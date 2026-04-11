@@ -110,6 +110,10 @@ from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
+from vllm_ascend.quantization.methods.turboquant_layout import (
+    TurboQuantAttentionSpec,
+    turboquant_cache_shapes,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -2760,6 +2764,22 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
+                    if isinstance(current_kv_cache_spec, TurboQuantAttentionSpec):
+                        num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
+                        tq_shapes = turboquant_cache_shapes(current_kv_cache_spec, num_blocks)
+                        tq_raw_tensors: dict[str, torch.Tensor] = {}
+                        for cache_name, (shape, dtype) in tq_shapes.items():
+                            tensor_size = math.prod(shape) * get_dtype_size(dtype)
+                            if self.vllm_config.kv_transfer_config is None:
+                                raw_tensor = torch.zeros(tensor_size, dtype=torch.int8, device=self.device)
+                            else:
+                                raw_tensor = torch.zeros(tensor_size + alignment, dtype=torch.int8, device=self.device)
+                                raw_tensor = self._align_memory(raw_tensor, alignment)[:tensor_size]
+                            tq_raw_tensors[cache_name] = raw_tensor
+                        for layer_name_inner in kv_cache_tensor.shared_by:
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache_raw_tensors[layer_name_inner] = tq_raw_tensors
+                        continue
 
                     if self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
@@ -2875,6 +2895,20 @@ class NPUModelRunner(GPUModelRunner):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(current_kv_cache_spec, AttentionSpec):
+                    if isinstance(current_kv_cache_spec, TurboQuantAttentionSpec):
+                        raw_tensor_dict = kv_cache_raw_tensors[layer_name]  # type: ignore[assignment]
+                        assert isinstance(raw_tensor_dict, dict)
+                        expected_page_size = current_kv_cache_spec.page_size_bytes
+                        total_numel = sum(raw_tensor.numel() for raw_tensor in raw_tensor_dict.values())
+                        assert total_numel % expected_page_size == 0
+                        num_blocks = total_numel // expected_page_size
+                        assert num_blocks >= kv_cache_config.num_blocks
+                        tq_shapes = turboquant_cache_shapes(current_kv_cache_spec, num_blocks)
+                        kv_caches[layer_name] = {
+                            cache_name: raw_tensor_dict[cache_name].view(dtype).view(shape)
+                            for cache_name, (shape, dtype) in tq_shapes.items()
+                        }
+                        continue
                     if self.use_sparse:
                         current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
                         if current_sparse_c8:
@@ -3266,6 +3300,26 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    if getattr(attn_module, "turboquant_enabled", False):
+                        assert isinstance(spec, AttentionSpec)
+                        kv_cache_spec[layer_name] = TurboQuantAttentionSpec(
+                            block_size=spec.block_size,
+                            num_kv_heads=spec.num_kv_heads,
+                            head_size=spec.head_size,
+                            head_size_v=getattr(spec, "head_size_v", spec.head_size),
+                            dtype=spec.dtype,
+                            kv_quant_mode=spec.kv_quant_mode,
+                            page_size_padded=spec.page_size_padded,
+                            sliding_window=getattr(spec, "sliding_window", None),
+                            attention_chunk_size=getattr(spec, "attention_chunk_size", None),
+                            k_bits=int(getattr(attn_module, "tq_k_bits")),
+                            v_bits=int(getattr(attn_module, "tq_v_bits")),
+                            k_variant=str(getattr(attn_module, "tq_k_variant")),
+                            v_variant=str(getattr(attn_module, "tq_v_variant")),
+                            use_k_qjl=str(getattr(attn_module, "tq_k_variant")) == "prod",
+                        )
+                        attn_layer_names.add(layer_name)
+                        continue
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 

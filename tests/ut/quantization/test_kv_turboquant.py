@@ -1,0 +1,84 @@
+from unittest.mock import MagicMock, patch
+
+import torch
+import torch.nn as nn
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+
+from tests.ut.base import TestBase
+from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
+
+
+class TestAscendTurboQuantKVCacheAttentionMethod(TestBase):
+
+    def _make_layer(self):
+        layer = nn.Module()
+        layer.impl = MagicMock()
+        layer.impl.head_size = 8
+        return layer
+
+    def test_create_weights_sets_runtime_fields(self):
+        from vllm_ascend.quantization.methods.kv_turboquant import AscendTurboQuantKVCacheAttentionMethod
+
+        method = AscendTurboQuantKVCacheAttentionMethod(
+            {
+                "kv_cache_type": "TurboQuant",
+                "turboquant": {
+                    "k_variant": "prod",
+                    "v_variant": "mse",
+                    "k_bits": 3,
+                    "v_bits": 2,
+                },
+            },
+            "model.layers.0.self_attn.attn",
+        )
+        layer = self._make_layer()
+        method.create_weights(layer)
+        self.assertTrue(layer.turboquant_enabled)
+        self.assertEqual(layer.kv_cache_torch_dtype, torch.int8)
+        self.assertEqual(layer.tq_k_variant, "prod")
+        self.assertEqual(layer.tq_v_variant, "mse")
+        self.assertIsInstance(layer.k_codebook, nn.Parameter)
+        self.assertIsInstance(layer.k_qjl_proj, nn.Parameter)
+
+    def test_process_weights_after_loading_marks_runtime_unprepared(self):
+        from vllm_ascend.quantization.methods.kv_turboquant import AscendTurboQuantKVCacheAttentionMethod
+
+        method = AscendTurboQuantKVCacheAttentionMethod({"kv_cache_type": "TurboQuant"}, "model.layers.0.self_attn.attn")
+        layer = self._make_layer()
+        method.create_weights(layer)
+        method.process_weights_after_loading(layer)
+        self.assertFalse(layer.tq_runtime_prepared)
+
+
+class TestModelSlimTurboQuantConfig(TestBase):
+
+    def test_turboquant_metadata_and_layer_filter(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "TurboQuant",
+                "turboquant_layers": [1, 3],
+                "turboquant": {"k_variant": "prod", "v_variant": "mse"},
+            }
+        )
+        self.assertTrue(config.enable_turboquant)
+        self.assertTrue(config.is_turboquant_layer("model.layers.1.self_attn.attn"))
+        self.assertFalse(config.is_turboquant_layer("model.layers.2.self_attn.attn"))
+
+    def test_get_quant_method_for_turboquant_attention(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "TurboQuant",
+                "turboquant_layers": [0],
+                "turboquant": {"k_variant": "prod", "v_variant": "mse"},
+            }
+        )
+        attention_layer = MagicMock(spec=AttentionLayerBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = None
+        with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config), \
+            patch("vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()) as mock_kvcache:
+            method = config.get_quant_method(attention_layer, "model.layers.0.self_attn.attn")
+            self.assertIs(method, mock_kvcache.return_value)
+            args, _ = mock_kvcache.call_args
+            from vllm_ascend.quantization.methods.kv_turboquant import AscendTurboQuantKVCacheAttentionMethod
+            self.assertIsInstance(args[0], AscendTurboQuantKVCacheAttentionMethod)

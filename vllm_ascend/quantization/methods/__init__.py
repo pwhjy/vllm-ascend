@@ -34,6 +34,7 @@ from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, Qu
 
 # Import all scheme classes for external access
 from .kv_c8 import AscendFAQuantAttentionMethod
+from .kv_turboquant import AscendTurboQuantKVCacheAttentionMethod
 
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
@@ -79,4 +80,5 @@ __all__ = [
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendFAQuantAttentionMethod",
+    "AscendTurboQuantKVCacheAttentionMethod",
 ]

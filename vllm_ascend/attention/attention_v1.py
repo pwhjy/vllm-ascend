@@ -56,6 +56,13 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
+from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
+from vllm_ascend.quantization.methods.turboquant_runtime import (
+    turboquant_decode_mse,
+    turboquant_decode_prod,
+    turboquant_encode_mse,
+    turboquant_encode_prod,
+)
 from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
@@ -105,6 +112,12 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
+        if isinstance(src_kv_cache, dict) and isinstance(dst_kv_cache, dict):
+            src_indices = src_to_dst[:, 0]
+            dst_indices = src_to_dst[:, 1]
+            for key in src_kv_cache:
+                dst_kv_cache[key][dst_indices] = src_kv_cache[key][src_indices].to(dst_kv_cache[key].device)
+            return
         src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
         dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
@@ -122,6 +135,10 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
+            if isinstance(kv_cache, dict):
+                for value in kv_cache.values():
+                    value[dst_indices] = value[src_indices]
+                continue
             key_caches = kv_cache[0]
             value_caches = kv_cache[1]
             key_caches[dst_indices] = key_caches[src_indices]
@@ -1341,3 +1358,324 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
         return output
+
+
+class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
+    """Reference TurboQuant backend for dense attention on Ascend.
+
+    This first-stage implementation intentionally favors correctness over
+    throughput. KV is encoded on cache write, gathered back from paged cache,
+    dequantized to dense tensors, and then computed by the existing FIA path.
+    """
+
+    def _prepare_turboquant_runtime(self, layer: AttentionLayer, device: torch.device) -> None:
+        if getattr(layer, "tq_runtime_prepared", False):
+            return
+        target_dtype = torch.float32
+        layer._tq_k_codebook = layer.k_codebook.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_v_codebook = layer.v_codebook.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_k_boundary = layer.k_boundary.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_v_boundary = layer.v_boundary.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_k_rot = layer.k_rot.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_v_rot = layer.v_rot.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_k_rot_t = layer._tq_k_rot.transpose(0, 1).contiguous()
+        layer._tq_v_rot_t = layer._tq_v_rot.transpose(0, 1).contiguous()
+        layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype).contiguous()
+        layer.tq_runtime_prepared = True
+
+    def _quantize_kv_to_turboquant(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer: AttentionLayer,
+        num_actual_tokens: int,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        self._prepare_turboquant_runtime(layer, key.device)
+        actual_key = key[:num_actual_tokens].to(torch.float32)
+        actual_value = value[:num_actual_tokens].to(torch.float32)
+
+        if getattr(layer, "tq_k_variant", "prod") == "prod":
+            encoded_k = turboquant_encode_prod(
+                actual_key,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                layer._tq_k_qjl_proj,
+                int(layer.tq_k_bits),
+            )
+        else:
+            encoded_k = turboquant_encode_mse(
+                actual_key,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                int(layer.tq_k_bits),
+            )
+
+        encoded_v = turboquant_encode_mse(
+            actual_value,
+            layer._tq_v_rot,
+            layer._tq_v_codebook,
+            layer._tq_v_boundary,
+            int(layer.tq_v_bits),
+        )
+        return encoded_k, encoded_v
+
+    def reshape_and_cache(
+        self,
+        query: torch.Tensor,
+        key: dict[str, torch.Tensor],
+        value: dict[str, torch.Tensor],
+        kv_cache,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        del output
+        if not isinstance(kv_cache, dict):
+            raise TypeError("TurboQuant KV cache must be a dict-based sidecar cache")
+        self.key_cache = kv_cache  # type: ignore[assignment]
+        slots = attn_metadata.slot_mapping[: attn_metadata.num_actual_tokens].to(torch.long)
+        if slots.numel() == 0:
+            return query, key, value, None
+
+        for cache_name, encoded in (
+            ("k_idx", key["idx"]),
+            ("k_norm", key["norm"]),
+            ("v_idx", value["idx"]),
+            ("v_norm", value["norm"]),
+        ):
+            flat_cache = kv_cache[cache_name].view(-1, self.num_kv_heads, kv_cache[cache_name].shape[-1])
+            flat_cache[slots] = encoded.to(flat_cache.dtype)
+        if "qjl" in key and "k_qjl" in kv_cache:
+            flat_cache = kv_cache["k_qjl"].view(-1, self.num_kv_heads, kv_cache["k_qjl"].shape[-1])
+            flat_cache[slots] = key["qjl"].to(flat_cache.dtype)
+        if "gamma" in key and "k_gamma" in kv_cache:
+            flat_cache = kv_cache["k_gamma"].view(-1, self.num_kv_heads, kv_cache["k_gamma"].shape[-1])
+            flat_cache[slots] = key["gamma"].to(flat_cache.dtype)
+        return query, key, value, None
+
+    def _gather_paged_cache(
+        self,
+        cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        batch_size = block_table.shape[0]
+        block_size = cache.shape[1]
+        max_blocks_per_seq = block_table.shape[1]
+        max_tokens_padded = max_blocks_per_seq * block_size
+        flat_ids = block_table.reshape(-1)
+        gathered = cache[flat_ids].view(batch_size, max_tokens_padded, *cache.shape[2:])
+        seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=cache.device)
+        positions = torch.arange(max_tokens_padded, dtype=torch.long, device=cache.device)
+        valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).reshape(-1)
+        return gathered.reshape(batch_size * max_tokens_padded, *cache.shape[2:])[valid_mask]
+
+    def _dequant_paged_kv_to_dense(
+        self,
+        kv_cache: dict[str, torch.Tensor],
+        block_table: torch.Tensor,
+        seq_lens: list[int],
+        target_dtype: torch.dtype,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
+        packed_k_idx = self._gather_paged_cache(kv_cache["k_idx"], block_table, seq_lens)
+        k_norm = self._gather_paged_cache(kv_cache["k_norm"], block_table, seq_lens)
+        packed_v_idx = self._gather_paged_cache(kv_cache["v_idx"], block_table, seq_lens)
+        v_norm = self._gather_paged_cache(kv_cache["v_norm"], block_table, seq_lens)
+
+        if getattr(layer, "tq_k_variant", "prod") == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
+            packed_k_qjl = self._gather_paged_cache(kv_cache["k_qjl"], block_table, seq_lens)
+            k_gamma = self._gather_paged_cache(kv_cache["k_gamma"], block_table, seq_lens)
+            dense_k = turboquant_decode_prod(
+                packed_k_idx,
+                packed_k_qjl,
+                k_gamma,
+                k_norm,
+                layer._tq_k_rot_t,
+                layer._tq_k_codebook,
+                layer._tq_k_qjl_proj,
+                int(layer.tq_k_bits),
+                self.head_size,
+                target_dtype,
+            )
+        else:
+            dense_k = turboquant_decode_mse(
+                packed_k_idx,
+                k_norm,
+                layer._tq_k_rot_t,
+                layer._tq_k_codebook,
+                int(layer.tq_k_bits),
+                self.head_size,
+                target_dtype,
+            )
+
+        dense_v = turboquant_decode_mse(
+            packed_v_idx,
+            v_norm,
+            layer._tq_v_rot_t,
+            layer._tq_v_codebook,
+            int(layer.tq_v_bits),
+            self.head_size,
+            target_dtype,
+        )
+        return dense_k, dense_v
+
+    def _run_dense_fia(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        actual_seq_lengths_q: list[int],
+        actual_seq_lengths_kv: list[int],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=attn_metadata.attn_mask,
+            block_table=None,
+            input_layout="TND",
+            block_size=128,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=3,
+        )
+        num_tokens = actual_seq_lengths_q[-1]
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _forward_turboquant_decode(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        kv_seq_lens = attn_metadata.seq_lens_list
+        dense_k, dense_v = self._dequant_paged_kv_to_dense(
+            self.key_cache,  # type: ignore[arg-type]
+            attn_metadata.block_tables,
+            kv_seq_lens,
+            query.dtype,
+            layer,
+        )
+        batch_size = len(kv_seq_lens)
+        actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device).cumsum(0).tolist()
+        actual_seq_lengths_kv = torch.tensor(kv_seq_lens, dtype=torch.int32, device=query.device).cumsum(0).tolist()
+        return self._run_dense_fia(query[:batch_size], dense_k, dense_v, actual_seq_lengths_q, actual_seq_lengths_kv, attn_metadata, output)
+
+    def _forward_turboquant_chunked_prefill(
+        self,
+        query: torch.Tensor,
+        float_key: torch.Tensor | None,
+        float_value: torch.Tensor | None,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        del float_key, float_value
+        dense_k, dense_v = self._dequant_paged_kv_to_dense(
+            self.key_cache,  # type: ignore[arg-type]
+            attn_metadata.block_tables,
+            attn_metadata.seq_lens_list,
+            query.dtype,
+            layer,
+        )
+        actual_seq_lengths_kv = torch.tensor(
+            attn_metadata.seq_lens_list, dtype=torch.int32, device=query.device
+        ).cumsum(0).tolist()
+        return self._run_dense_fia(
+            query[: attn_metadata.actual_seq_lengths_q[-1]],
+            dense_k,
+            dense_v,
+            attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            attn_metadata,
+            output,
+        )
+
+    def _forward_turboquant_fused_infer_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
+            return self._run_dense_fia(
+                query[:num_tokens],
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv,
+                attn_metadata,
+                output,
+            )
+
+        dense_k, dense_v = self._dequant_paged_kv_to_dense(
+            self.key_cache,  # type: ignore[arg-type]
+            attn_metadata.block_tables,
+            attn_metadata.seq_lens_list,
+            query.dtype,
+            layer,
+        )
+        actual_seq_lengths_kv = torch.tensor(
+            attn_metadata.seq_lens_list, dtype=torch.int32, device=query.device
+        ).cumsum(0).tolist()
+        return self._run_dense_fia(
+            query[:num_tokens],
+            dense_k,
+            dense_v,
+            attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            attn_metadata,
+            output,
+        )
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError("fused output quantization is not yet supported for AscendTurboQuantAttentionBackendImpl")
+        if attn_metadata is None:
+            return output.fill_(0)
+
+        float_key, float_value = key, value
+        if key is not None and value is not None:
+            encoded_k, encoded_v = self._quantize_kv_to_turboquant(key, value, layer, attn_metadata.num_actual_tokens)
+            query, _, _, _ = self.reshape_and_cache(query, encoded_k, encoded_v, kv_cache, attn_metadata, output)
+
+        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
+            attn_output = self._forward_encoder_attention(query, float_key, float_value, attn_metadata, output)
+            output[: query.shape[0]] = attn_output[: query.shape[0]]
+            return output
+
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return self._forward_turboquant_decode(query, attn_metadata, output, layer)
+        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            return self._forward_turboquant_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
+        return self._forward_turboquant_fused_infer_attention(query, float_key, float_value, attn_metadata, output, layer)

@@ -499,6 +499,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
+        elif isinstance(layer, AttentionLayerBase) and self.is_turboquant_layer(prefix):
+            from .methods.kv_turboquant import AscendTurboQuantKVCacheAttentionMethod
+
+            return AscendKVCacheMethod(AscendTurboQuantKVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -564,6 +568,14 @@ class AscendModelSlimConfig(QuantizationConfig):
             if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
                 return True
         return False
+
+    def is_turboquant_layer(self, prefix: str) -> bool:
+        if not getattr(self, "enable_turboquant", False):
+            return False
+        if not self.turboquant_layers:
+            return True
+        layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+        return layer_id_str.isdigit() and int(layer_id_str) in self.turboquant_layers
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
@@ -694,6 +706,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
+        self.enable_turboquant = self.quant_description.get("kv_cache_type") == "TurboQuant"
+        self.turboquant_layers = self.quant_description.get("turboquant_layers", [])
         if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
