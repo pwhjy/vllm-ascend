@@ -1,0 +1,10 @@
+{"id":"inst_001","prompt":"Explain what KV cache is in one short paragraph.","metadata":{"category":"instruction"}}
+{"id":"inst_002","prompt":"Summarize the following in three bullet points: vLLM is an inference engine optimized for high-throughput LLM serving, and vllm-ascend adapts it to Huawei Ascend NPUs.","metadata":{"category":"summarization"}}
+{"id":"inst_003","prompt":"Write a Python function that returns the Fibonacci sequence up to n terms.","metadata":{"category":"code"}}
+{"id":"inst_004","prompt":"What is the difference between tensor parallelism and pipeline parallelism? Answer briefly.","metadata":{"category":"qa"}}
+{"id":"inst_005","prompt":"Give a concise explanation of why greedy decoding is useful for regression testing.","metadata":{"category":"reasoning"}}
+{"id":"inst_006","prompt":"Translate this sentence into Chinese: The cache layout must stay stable across runs.","metadata":{"category":"translation"}}
+{"id":"inst_007","prompt":"List five risks to check before integrating a new KV cache quantization method into an inference engine.","metadata":{"category":"checklist"}}
+{"id":"inst_008","prompt":"Write a short user-facing warning message for a feature that is experimental and may reduce accuracy.","metadata":{"category":"writing"}}
+{"id":"inst_009","prompt":"What are three common causes of throughput regression in LLM serving systems?","metadata":{"category":"performance"}}
+{"id":"inst_010","prompt":"Suppose a system claims 6x KV cache compression. What must be included in the real memory accounting?","metadata":{"category":"analysis"}}

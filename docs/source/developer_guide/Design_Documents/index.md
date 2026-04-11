@@ -16,4 +16,6 @@ add_custom_aclnn_op
 context_parallel
 quantization
 npugraph_ex
+turboquant_p0_baseline
+vllm_ascend_turboquant_impl_summary
 :::
