@@ -2945,7 +2945,7 @@ class NPUModelRunner(GPUModelRunner):
                     if isinstance(current_kv_cache_spec, TurboQuantAttentionSpec):
                         raw_tensor_dict = kv_cache_raw_tensors[layer_name]  # type: ignore[assignment]
                         assert isinstance(raw_tensor_dict, dict)
-                        expected_page_size = current_kv_cache_spec.page_size_bytes
+                        expected_page_size = current_kv_cache_spec.real_page_size_bytes
                         total_numel = sum(raw_tensor.numel() for raw_tensor in raw_tensor_dict.values())
                         assert total_numel % expected_page_size == 0
                         num_blocks = total_numel // expected_page_size
@@ -3359,8 +3359,8 @@ class NPUModelRunner(GPUModelRunner):
                             page_size_padded=spec.page_size_padded,
                             sliding_window=getattr(spec, "sliding_window", None),
                             attention_chunk_size=getattr(spec, "attention_chunk_size", None),
-                            k_bits=int(getattr(attn_module, "tq_k_bits")),
-                            v_bits=int(getattr(attn_module, "tq_v_bits")),
+                            k_total_bits=int(getattr(attn_module, "tq_k_total_bits")),
+                            v_total_bits=int(getattr(attn_module, "tq_v_total_bits")),
                             k_variant=str(getattr(attn_module, "tq_k_variant")),
                             v_variant=str(getattr(attn_module, "tq_v_variant")),
                             use_k_qjl=str(getattr(attn_module, "tq_k_variant")) == "prod",

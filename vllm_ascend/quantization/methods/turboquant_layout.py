@@ -33,20 +33,35 @@ def scalar_bytes_per_vector(dtype: torch.dtype) -> int:
 
 @dataclass(frozen=True, kw_only=True)
 class TurboQuantAttentionSpec(FullAttentionSpec):
-    k_bits: int
-    v_bits: int
+    k_total_bits: int
+    v_total_bits: int
     k_variant: str
     v_variant: str
     scalar_dtype: torch.dtype = torch.float32
     use_k_qjl: bool = True
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.k_stage1_bits <= 0:
+            raise ValueError(f"Invalid K stage1 bits derived from total_bits={self.k_total_bits}")
+        if self.v_stage1_bits <= 0:
+            raise ValueError(f"Invalid V stage1 bits derived from total_bits={self.v_total_bits}")
+
+    @property
+    def k_stage1_bits(self) -> int:
+        return self.k_total_bits - 1 if self.k_variant == "prod" else self.k_total_bits
+
+    @property
+    def v_stage1_bits(self) -> int:
+        return self.v_total_bits - 1 if self.v_variant == "prod" else self.v_total_bits
+
     @property
     def k_idx_bytes_per_vector(self) -> int:
-        return packed_bytes_per_vector(self.head_size, self.k_bits)
+        return packed_bytes_per_vector(self.head_size, self.k_stage1_bits)
 
     @property
     def v_idx_bytes_per_vector(self) -> int:
-        return packed_bytes_per_vector(self.head_size_v, self.v_bits)
+        return packed_bytes_per_vector(self.head_size_v, self.v_stage1_bits)
 
     @property
     def k_qjl_bytes_per_vector(self) -> int:
@@ -80,8 +95,8 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
             assert spec.head_size == first.head_size
             assert spec.head_size_v == first.head_size_v
             assert spec.dtype == first.dtype
-            assert spec.k_bits == first.k_bits
-            assert spec.v_bits == first.v_bits
+            assert spec.k_total_bits == first.k_total_bits
+            assert spec.v_total_bits == first.v_total_bits
             assert spec.k_variant == first.k_variant
             assert spec.v_variant == first.v_variant
             assert spec.scalar_dtype == first.scalar_dtype
@@ -96,8 +111,8 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
             page_size_padded=first.page_size_padded,
             sliding_window=first.sliding_window,
             attention_chunk_size=first.attention_chunk_size,
-            k_bits=first.k_bits,
-            v_bits=first.v_bits,
+            k_total_bits=first.k_total_bits,
+            v_total_bits=first.v_total_bits,
             k_variant=first.k_variant,
             v_variant=first.v_variant,
             scalar_dtype=first.scalar_dtype,

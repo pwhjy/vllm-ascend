@@ -372,6 +372,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
+        self.packed_modules_mapping: dict[str, list[str]] = {}
         self._add_kvcache_quant_metadata()
 
     def __repr__(self) -> str:
@@ -483,6 +484,12 @@ class AscendModelSlimConfig(QuantizationConfig):
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
+            if self.enable_turboquant and not self.has_quant_description_for_layer(
+                prefix, "linear", self.packed_modules_mapping
+            ):
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+
+                return AscendUnquantizedLinearMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -504,6 +511,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             return AscendKVCacheMethod(AscendTurboQuantKVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
+            if self.enable_turboquant and not self.has_quant_description_for_layer(
+                prefix, "moe", self.packed_modules_mapping
+            ):
+                from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
@@ -512,14 +525,24 @@ class AscendModelSlimConfig(QuantizationConfig):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
             return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
+            if self.enable_turboquant and not self.has_quant_description_for_layer(
+                prefix, "linear", self.packed_modules_mapping
+            ):
+                return UnquantizedEmbeddingMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendEmbeddingMethod(scheme)
         return None
 
-    def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
+    def is_layer_skipped_ascend(
+        self,
+        prefix: str,
+        fused_mapping: Mapping[str, list[str]] | None = MappingProxyType({}),
+    ):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
+        if fused_mapping is None:
+            fused_mapping = MappingProxyType({})
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
             shard_prefixes = [
@@ -576,6 +599,25 @@ class AscendModelSlimConfig(QuantizationConfig):
             return True
         layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
         return layer_id_str.isdigit() and int(layer_id_str) in self.turboquant_layers
+
+    def has_quant_description_for_layer(
+        self,
+        prefix: str,
+        layer_type: str,
+        fused_mapping: Mapping[str, list[str]] | None = MappingProxyType({}),
+    ) -> bool:
+        if fused_mapping is None:
+            fused_mapping = MappingProxyType({})
+        if layer_type == "attention":
+            return get_quant_type_for_layer(self.quant_description, prefix, layer_type, fused_mapping) is not None
+
+        proj_name = prefix.split(".")[-1]
+        if proj_name in fused_mapping:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
+            ]
+            return any((shard_prefix + ".weight") in self.quant_description for shard_prefix in shard_prefixes)
+        return (prefix + ".weight") in self.quant_description
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):

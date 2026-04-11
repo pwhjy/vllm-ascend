@@ -1401,7 +1401,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 layer._tq_k_codebook,
                 layer._tq_k_boundary,
                 layer._tq_k_qjl_proj,
-                int(layer.tq_k_bits),
+                int(layer.tq_k_total_bits),
             )
         else:
             encoded_k = turboquant_encode_mse(
@@ -1409,15 +1409,17 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 layer._tq_k_rot,
                 layer._tq_k_codebook,
                 layer._tq_k_boundary,
-                int(layer.tq_k_bits),
+                int(layer.tq_k_stage1_bits),
             )
 
+        if getattr(layer, "tq_v_variant", "mse") != "mse":
+            raise RuntimeError(f"Unsupported TurboQuant V variant at runtime: {layer.tq_v_variant}")
         encoded_v = turboquant_encode_mse(
             actual_value,
             layer._tq_v_rot,
             layer._tq_v_codebook,
             layer._tq_v_boundary,
-            int(layer.tq_v_bits),
+            int(layer.tq_v_stage1_bits),
         )
         return encoded_k, encoded_v
 
@@ -1496,7 +1498,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 layer._tq_k_rot_t,
                 layer._tq_k_codebook,
                 layer._tq_k_qjl_proj,
-                int(layer.tq_k_bits),
+                int(layer.tq_k_total_bits),
                 self.head_size,
                 target_dtype,
             )
@@ -1506,18 +1508,19 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 k_norm,
                 layer._tq_k_rot_t,
                 layer._tq_k_codebook,
-                int(layer.tq_k_bits),
+                int(layer.tq_k_stage1_bits),
                 self.head_size,
                 target_dtype,
             )
 
+        v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
         dense_v = turboquant_decode_mse(
             packed_v_idx,
             v_norm,
             layer._tq_v_rot_t,
             layer._tq_v_codebook,
-            int(layer.tq_v_bits),
-            self.head_size,
+            int(layer.tq_v_stage1_bits),
+            v_dim,
             target_dtype,
         )
         return dense_k, dense_v
@@ -1532,6 +1535,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        if isinstance(self.key_cache, dict):
+            cache_block_size = next(iter(self.key_cache.values())).shape[1]
+        elif self.key_cache is not None:
+            cache_block_size = self.key_cache.shape[1]
+        else:
+            cache_block_size = 1
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
@@ -1539,7 +1548,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             atten_mask=attn_metadata.attn_mask,
             block_table=None,
             input_layout="TND",
-            block_size=128,
+            block_size=cache_block_size,
             actual_seq_lengths=actual_seq_lengths_q,
             actual_seq_lengths_kv=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
@@ -1568,7 +1577,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             layer,
         )
         batch_size = len(kv_seq_lens)
-        actual_seq_lengths_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=query.device).cumsum(0).tolist()
+        actual_seq_lengths_q = torch.ones(batch_size, dtype=torch.int32, device=query.device).cumsum(0).tolist()
         actual_seq_lengths_kv = torch.tensor(kv_seq_lens, dtype=torch.int32, device=query.device).cumsum(0).tolist()
         return self._run_dense_fia(query[:batch_size], dense_k, dense_v, actual_seq_lengths_q, actual_seq_lengths_kv, attn_metadata, output)
 
