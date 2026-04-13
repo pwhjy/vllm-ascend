@@ -112,6 +112,7 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.methods.turboquant_layout import (
     TurboQuantAttentionSpec,
+    register_turboquant_spec_in_manager,
     turboquant_cache_shapes,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -3410,6 +3411,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
+
+        register_turboquant_spec_in_manager()
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)

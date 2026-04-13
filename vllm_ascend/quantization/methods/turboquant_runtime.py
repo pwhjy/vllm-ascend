@@ -75,7 +75,7 @@ def build_beta_lloyd_max_codebook(
     pdf = _beta_coordinate_pdf(head_dim, grid)
     cdf = torch.cumsum(pdf, dim=0)
     cdf = cdf / torch.clamp(cdf[-1], min=1e-18)
-    quantiles = (torch.arange(levels, dtype=torch.float64) + 0.5) / levels
+    quantiles = (torch.arange(levels, dtype=torch.float64, device=grid.device) + 0.5) / levels
     codebook = _interp_from_cdf(grid, cdf, quantiles)
 
     for _ in range(max_iters):
@@ -134,7 +134,7 @@ def build_turboquant_codebook(head_dim: int, bits: int, device, dtype) -> tuple[
 def build_rotation_matrix(head_dim: int, seed: int, device, dtype) -> torch.Tensor:
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32)
+    random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32, device="cpu")
     q, _ = torch.linalg.qr(random_matrix, mode="reduced")
     return q.to(device=device, dtype=dtype).contiguous()
 
@@ -142,7 +142,7 @@ def build_rotation_matrix(head_dim: int, seed: int, device, dtype) -> torch.Tens
 def build_qjl_projection(head_dim: int, seed: int, device, dtype) -> torch.Tensor:
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32)
+    random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32, device="cpu")
     return random_matrix.to(device=device, dtype=dtype).contiguous()
 
 
@@ -296,8 +296,8 @@ def monte_carlo_bias_eval(
 ) -> dict[str, float]:
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
-    x = torch.randn(num_samples, head_dim, generator=generator, dtype=torch.float32)
-    y = torch.randn(num_samples, head_dim, generator=generator, dtype=torch.float32)
+    x = torch.randn(num_samples, head_dim, generator=generator, dtype=torch.float32, device="cpu")
+    y = torch.randn(num_samples, head_dim, generator=generator, dtype=torch.float32, device="cpu")
     codebook, boundary = build_turboquant_codebook(head_dim, get_stage1_bits(total_bits, "prod"), "cpu", torch.float32)
     rotation = build_rotation_matrix(head_dim, seed + 1, "cpu", torch.float32)
     qjl_proj = build_qjl_projection(head_dim, seed + 2, "cpu", torch.float32)

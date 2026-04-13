@@ -120,6 +120,16 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
         )
 
 
+def register_turboquant_spec_in_manager() -> None:
+    import sys
+
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+    stm = sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
+    if stm is not None and TurboQuantAttentionSpec not in stm.spec_manager_map:
+        stm.spec_manager_map[TurboQuantAttentionSpec] = FullAttentionManager
+
+
 def turboquant_cache_shapes(
     spec: TurboQuantAttentionSpec, num_blocks: int
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
