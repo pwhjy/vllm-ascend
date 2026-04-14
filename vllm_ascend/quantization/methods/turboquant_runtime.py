@@ -8,11 +8,103 @@
 
 from __future__ import annotations
 
+import atexit
+import json
 import math
+import os
+import socket
+import threading
+import time
 
 import torch
 
 _CODEBOOK_CACHE: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+
+# =========================
+# TurboQuant profiling
+# =========================
+_TQ_PROFILE_ENABLED = os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
+_TQ_PROFILE_DIR = os.getenv("VLLM_ASCEND_TQ_PROFILE_DIR", "/tmp/turboquant_profile")
+_TQ_PROFILE_LOCK = threading.Lock()
+_TQ_PROFILE_STATS: dict[str, dict] = {}
+
+
+def _is_npu_tensor(x) -> bool:
+    return isinstance(x, torch.Tensor) and hasattr(x, "is_npu") and x.is_npu
+
+
+def _maybe_sync_for_profile(*objs):
+    if not _TQ_PROFILE_ENABLED:
+        return
+
+    def _walk(obj):
+        if _is_npu_tensor(obj):
+            return [obj]
+        if isinstance(obj, (list, tuple)):
+            out = []
+            for item in obj:
+                out.extend(_walk(item))
+            return out
+        if isinstance(obj, dict):
+            out = []
+            for item in obj.values():
+                out.extend(_walk(item))
+            return out
+        return []
+
+    tensors = []
+    for obj in objs:
+        tensors.extend(_walk(obj))
+
+    for tensor in tensors:
+        if _is_npu_tensor(tensor):
+            torch.npu.synchronize(tensor.device)
+            break
+
+
+def _record_tq_profile(name: str, elapsed_ms: float, **meta):
+    if not _TQ_PROFILE_ENABLED:
+        return
+
+    with _TQ_PROFILE_LOCK:
+        stat = _TQ_PROFILE_STATS.setdefault(
+            name,
+            {
+                "calls": 0,
+                "total_ms": 0.0,
+                "min_ms": None,
+                "max_ms": 0.0,
+                "vectors": 0,
+                "elements": 0,
+                "bytes_out": 0,
+            },
+        )
+        stat["calls"] += 1
+        stat["total_ms"] += float(elapsed_ms)
+        stat["max_ms"] = max(stat["max_ms"], float(elapsed_ms))
+        stat["min_ms"] = float(elapsed_ms) if stat["min_ms"] is None else min(stat["min_ms"], float(elapsed_ms))
+
+        for key in ("vectors", "elements", "bytes_out"):
+            if key in meta and meta[key] is not None:
+                stat[key] += int(meta[key])
+
+
+def _dump_tq_profile():
+    if not _TQ_PROFILE_ENABLED:
+        return
+
+    os.makedirs(_TQ_PROFILE_DIR, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "stats": _TQ_PROFILE_STATS,
+    }
+    out_path = os.path.join(_TQ_PROFILE_DIR, f"turboquant_profile_{os.getpid()}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+atexit.register(_dump_tq_profile)
 
 
 def get_stage1_bits(total_bits: int, variant: str) -> int:
@@ -147,11 +239,17 @@ def build_qjl_projection(head_dim: int, seed: int, device, dtype) -> torch.Tenso
 
 
 def pack_bits(indices: torch.Tensor, bits: int) -> torch.Tensor:
+    _maybe_sync_for_profile(indices)
+    t0 = time.perf_counter()
+
     if indices.dtype not in (torch.uint8, torch.int16, torch.int32, torch.int64):
         indices = indices.to(torch.int64)
     values = indices.to(torch.int64)
     if values.numel() == 0:
-        return values.to(torch.uint8)
+        packed = values.to(torch.uint8)
+        _maybe_sync_for_profile(packed)
+        _record_tq_profile("pack_bits", (time.perf_counter() - t0) * 1000.0, elements=0, bytes_out=0)
+        return packed
     original_shape = values.shape[:-1]
     flat = values.reshape(-1, values.shape[-1])
     packed_cols = (flat.shape[-1] * bits + 7) // 8
@@ -166,7 +264,17 @@ def pack_bits(indices: torch.Tensor, bits: int) -> torch.Tensor:
         if bit_offset + bits > 8:
             packed[:, byte_index + 1] |= (value >> (8 - bit_offset)).to(torch.uint8)
         bit_cursor += bits
-    return packed.reshape(*original_shape, packed_cols)
+    packed = packed.reshape(*original_shape, packed_cols)
+
+    _maybe_sync_for_profile(packed)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    _record_tq_profile(
+        "pack_bits",
+        elapsed_ms,
+        elements=flat.numel(),
+        bytes_out=packed.numel(),
+    )
+    return packed
 
 
 def unpack_bits(packed: torch.Tensor, bits: int, dim: int) -> torch.Tensor:
@@ -213,12 +321,64 @@ def turboquant_encode_mse(
     boundary: torch.Tensor,
     bits: int,
 ) -> dict[str, torch.Tensor]:
+    num_vectors = int(x.numel() // x.shape[-1])
+
+    _maybe_sync_for_profile(x, rotation, codebook, boundary)
+    t_total_0 = time.perf_counter()
+
+    t0 = time.perf_counter()
     norm = torch.clamp(x.norm(dim=-1, keepdim=True), min=1e-6)
     x_unit = x / norm
+    _maybe_sync_for_profile(norm, x_unit)
+    _record_tq_profile(
+        "turboquant_encode_mse.norm_unit",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_rot = apply_rotation(x_unit, rotation)
+    _maybe_sync_for_profile(x_rot)
+    _record_tq_profile(
+        "turboquant_encode_mse.rotate",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     idx = _encode_scalar_with_boundary(x_rot, boundary)
+    _maybe_sync_for_profile(idx)
+    _record_tq_profile(
+        "turboquant_encode_mse.boundary_encode",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_hat_rot = _dequant_scalar(idx, codebook).to(x.dtype)
+    _maybe_sync_for_profile(x_hat_rot)
+    _record_tq_profile(
+        "turboquant_encode_mse.stage1_dequant",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     packed_idx = pack_bits(idx, bits)
+    _maybe_sync_for_profile(packed_idx)
+    _record_tq_profile(
+        "turboquant_encode_mse.pack_idx_only",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    _maybe_sync_for_profile(packed_idx, norm, x_hat_rot, x_rot)
+    total_ms = (time.perf_counter() - t_total_0) * 1000.0
+    _record_tq_profile(
+        "turboquant_encode_mse.total",
+        total_ms,
+        vectors=num_vectors,
+    )
     return {
         "idx": packed_idx,
         "norm": norm.to(torch.float32),
@@ -235,12 +395,57 @@ def turboquant_encode_prod(
     qjl_proj: torch.Tensor,
     total_bits: int,
 ) -> dict[str, torch.Tensor]:
+    num_vectors = int(x.numel() // x.shape[-1])
+
+    _maybe_sync_for_profile(x, rotation, codebook, boundary, qjl_proj)
+    t_total_0 = time.perf_counter()
+
     stage1_bits = get_stage1_bits(total_bits, "prod")
+
+    t0 = time.perf_counter()
     mse = turboquant_encode_mse(x, rotation, codebook, boundary, stage1_bits)
+    _maybe_sync_for_profile(mse)
+    _record_tq_profile(
+        "turboquant_encode_prod.stage1_mse",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     residual = mse["x_rot"] - mse["x_hat_rot"]
     gamma = residual.norm(dim=-1, keepdim=True).to(torch.float32)
+    _maybe_sync_for_profile(residual, gamma)
+    _record_tq_profile(
+        "turboquant_encode_prod.residual_gamma",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     qjl_sign = (apply_rotation(residual, qjl_proj.transpose(0, 1)) >= 0).to(torch.uint8)
+    _maybe_sync_for_profile(qjl_sign)
+    _record_tq_profile(
+        "turboquant_encode_prod.qjl_rotate_sign",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     packed_qjl = pack_bits(qjl_sign, 1)
+    _maybe_sync_for_profile(packed_qjl)
+    _record_tq_profile(
+        "turboquant_encode_prod.pack_qjl_only",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    _maybe_sync_for_profile(packed_qjl, gamma, mse["idx"], mse["norm"])
+    total_ms = (time.perf_counter() - t_total_0) * 1000.0
+    _record_tq_profile(
+        "turboquant_encode_prod.total",
+        total_ms,
+        vectors=num_vectors,
+    )
     return {
         "idx": mse["idx"],
         "qjl": packed_qjl,
