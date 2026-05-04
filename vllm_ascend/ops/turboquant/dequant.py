@@ -23,7 +23,6 @@ Output convention (P2):
 
 from __future__ import annotations
 
-import importlib
 import os
 
 import torch
@@ -46,29 +45,22 @@ def debug_compare_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Extension loading
+# Custom op availability (aclnn, via torch.ops._C_ascend)
 # ---------------------------------------------------------------------------
 
-_TQ_EXT = None
-_TQ_EXT_LOAD_TRIED = False
-
-
-def _load_ext():
-    """Load the compiled pybind extension ``vllm_ascend_tq_ops``.
-
-    Returns ``None`` when the extension is not available.
-    """
-    global _TQ_EXT, _TQ_EXT_LOAD_TRIED
-
-    if _TQ_EXT_LOAD_TRIED:
-        return _TQ_EXT
-
-    _TQ_EXT_LOAD_TRIED = True
+def _custom_op_available() -> bool:
+    if not custom_dequant_enabled():
+        return False
     try:
-        _TQ_EXT = importlib.import_module("vllm_ascend_tq_ops")
+        from vllm_ascend.utils import enable_custom_op
+        if not enable_custom_op():
+            return False
     except Exception:
-        _TQ_EXT = None
-    return _TQ_EXT
+        return False
+    return (
+        hasattr(torch.ops, "_C_ascend")
+        and hasattr(torch.ops._C_ascend, "tq_dequant_mse_paged")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,25 +176,24 @@ def tq_dequant_mse_paged_rot(
 ) -> torch.Tensor:
     """Dequant MSE-compressed K or V from paged cache → rotated space.
 
-    Dispatches to the Ascend C custom op when available, otherwise falls
-    back to the PyTorch reference.
+    Dispatches to ``torch.ops._C_ascend.tq_dequant_mse_paged`` when the
+    aclnn custom op is built and enabled, otherwise falls back to the
+    PyTorch reference.
     """
-    if not custom_dequant_enabled():
+    if not _custom_op_available():
         return tq_dequant_mse_paged_reference_rot(
             packed_idx, norm, token_block_ids, token_offsets,
             codebook, bits, head_dim, target_dtype,
         )
 
-    ext = _load_ext()
-    if ext is None or not getattr(packed_idx, "is_npu", False):
-        return tq_dequant_mse_paged_reference_rot(
-            packed_idx, norm, token_block_ids, token_offsets,
-            codebook, bits, head_dim, target_dtype,
-        )
-
-    out = ext.tq_dequant_mse_paged(
-        packed_idx, norm, token_block_ids, token_offsets,
-        codebook, int(bits), int(head_dim),
+    out = torch.ops._C_ascend.tq_dequant_mse_paged(
+        packed_idx.contiguous(),
+        norm.contiguous(),
+        token_block_ids.contiguous(),
+        token_offsets.contiguous(),
+        codebook.contiguous(),
+        int(bits),
+        int(head_dim),
     )
 
     out = out.to(target_dtype)
