@@ -40,6 +40,14 @@ class AscendTurboQuantKVCacheAttentionMethod(AscendAttentionScheme):
         self.rotation_seed_base = int(tq_config.get("rotation_seed_base", 1234))
         self.outlier_channels = int(tq_config.get("outlier_channels", 0))
         self.dequant_mode = tq_config.get("dequant_mode", "dense_then_attention")
+        scalar_dtype_str = tq_config.get("scalar_dtype", "float32")
+        _valid_scalar_dtypes = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        if scalar_dtype_str not in _valid_scalar_dtypes:
+            raise ValueError(
+                f"Unsupported TurboQuant scalar_dtype={scalar_dtype_str} for {prefix}. "
+                f"Supported: {list(_valid_scalar_dtypes.keys())}"
+            )
+        self.scalar_dtype = _valid_scalar_dtypes[scalar_dtype_str]
 
         if self.k_variant not in {"mse", "prod"}:
             raise ValueError(f"Unsupported TurboQuant k_variant={self.k_variant} for {prefix}")
@@ -89,6 +97,7 @@ class AscendTurboQuantKVCacheAttentionMethod(AscendAttentionScheme):
         layer.tq_rotation_scope = self.rotation_scope
         layer.tq_outlier_channels = self.outlier_channels
         layer.tq_dequant_mode = self.dequant_mode
+        layer.tq_scalar_dtype = self.scalar_dtype
         layer.tq_layer_id = self.layer_id
         layer.tq_head_size_v = v_dim
         layer.tq_runtime_prepared = False

@@ -3451,6 +3451,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_variant=str(getattr(attn_module, "tq_k_variant")),
                             v_variant=str(getattr(attn_module, "tq_v_variant")),
                             use_k_qjl=str(getattr(attn_module, "tq_k_variant")) == "prod",
+                            scalar_dtype=getattr(attn_module, "tq_scalar_dtype", torch.float32),
                         )
                         attn_layer_names.add(layer_name)
                         continue

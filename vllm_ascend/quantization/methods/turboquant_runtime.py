@@ -298,6 +298,31 @@ def _pack_bits_fast(flat: torch.Tensor, bits: int) -> torch.Tensor | None:
         )
         return packed.contiguous()
 
+    if bits == 3:
+        values = flat.to(torch.uint8) & 0x7
+        pad = (-values.shape[-1]) % 8
+        if pad:
+            padded = torch.zeros((values.shape[0], values.shape[-1] + pad), dtype=torch.uint8, device=values.device)
+            padded[:, : values.shape[-1]] = values
+            values = padded
+        chunks = values.view(values.shape[0], -1, 8)
+        byte0 = chunks[..., 0] | (chunks[..., 1] << 3) | (chunks[..., 2] << 6)
+        byte1 = (chunks[..., 2] >> 2) | (chunks[..., 3] << 1) | (chunks[..., 4] << 4) | (chunks[..., 5] << 7)
+        byte2 = (chunks[..., 5] >> 1) | (chunks[..., 6] << 2) | (chunks[..., 7] << 5)
+        packed = torch.stack([byte0, byte1, byte2], dim=-1).view(values.shape[0], -1)
+        return packed.contiguous()
+
+    if bits == 4:
+        values = flat.to(torch.uint8) & 0xF
+        pad = (-values.shape[-1]) % 2
+        if pad:
+            padded = torch.zeros((values.shape[0], values.shape[-1] + pad), dtype=torch.uint8, device=values.device)
+            padded[:, : values.shape[-1]] = values
+            values = padded
+        chunks = values.view(values.shape[0], -1, 2)
+        packed = chunks[..., 0] | (chunks[..., 1] << 4)
+        return packed.contiguous()
+
     return None
 
 
@@ -367,6 +392,29 @@ def _unpack_bits_fast(flat: torch.Tensor, bits: int, dim: int) -> torch.Tensor |
         unpacked[:, 1::4] = (values >> 2) & 0x3
         unpacked[:, 2::4] = (values >> 4) & 0x3
         unpacked[:, 3::4] = (values >> 6) & 0x3
+        return unpacked[:, :dim].contiguous()
+
+    if bits == 3:
+        n_groups = values.shape[1] // 3
+        unpacked = torch.empty((values.shape[0], n_groups * 8), dtype=torch.uint8, device=values.device)
+        chunks = values.view(values.shape[0], n_groups, 3)
+        byte0 = chunks[..., 0]
+        byte1 = chunks[..., 1]
+        byte2 = chunks[..., 2]
+        unpacked[:, 0::8] = byte0 & 0x7
+        unpacked[:, 1::8] = (byte0 >> 3) & 0x7
+        unpacked[:, 2::8] = ((byte0 >> 6) | (byte1 << 2)) & 0x7
+        unpacked[:, 3::8] = (byte1 >> 1) & 0x7
+        unpacked[:, 4::8] = (byte1 >> 4) & 0x7
+        unpacked[:, 5::8] = ((byte1 >> 7) | (byte2 << 1)) & 0x7
+        unpacked[:, 6::8] = (byte2 >> 2) & 0x7
+        unpacked[:, 7::8] = (byte2 >> 5) & 0x7
+        return unpacked[:, :dim].contiguous()
+
+    if bits == 4:
+        unpacked = torch.empty((values.shape[0], values.shape[1] * 2), dtype=torch.uint8, device=values.device)
+        unpacked[:, 0::2] = values & 0xF
+        unpacked[:, 1::2] = (values >> 4) & 0xF
         return unpacked[:, :dim].contiguous()
 
     return None

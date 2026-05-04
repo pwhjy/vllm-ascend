@@ -83,6 +83,71 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
         )
         return self.block_size * self.num_kv_heads * per_token_per_head
 
+    @property
+    def k_logical_bits(self) -> int:
+        """Configured K bit width (total_bits)."""
+        return self.k_total_bits
+
+    @property
+    def v_logical_bits(self) -> int:
+        """Configured V bit width (total_bits)."""
+        return self.v_total_bits
+
+    @property
+    def k_real_bits_per_channel(self) -> float:
+        """Effective K bits/channel including scalar sidecar overhead."""
+        idx_bits = self.k_idx_bytes_per_vector * 8
+        qjl_bits = self.k_qjl_bytes_per_vector * 8
+        scalar_bits = self.scalar_bytes * 8  # k_gamma + k_norm
+        return (idx_bits + qjl_bits + scalar_bits) / self.head_size
+
+    @property
+    def v_real_bits_per_channel(self) -> float:
+        """Effective V bits/channel including scalar sidecar overhead."""
+        idx_bits = self.v_idx_bytes_per_vector * 8
+        scalar_bits = self.scalar_bytes * 8  # v_norm
+        return (idx_bits + scalar_bits) / self.head_size_v
+
+    @property
+    def real_allocated_bytes(self) -> int:
+        """Total bytes allocated per page (real_page_size_bytes)."""
+        return self.real_page_size_bytes
+
+    @property
+    def bf16_baseline_bytes(self) -> int:
+        """Bytes per page if KV were stored as BF16."""
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size + self.head_size_v)
+            * 2
+        )
+
+    @property
+    def effective_compression_ratio(self) -> float:
+        """Compression ratio vs BF16 baseline.
+
+        Returns a value in (0, 1] where lower means more compression.
+        E.g. 0.25 means 4x compression vs BF16.
+        """
+        baseline = self.bf16_baseline_bytes
+        if baseline == 0:
+            return 1.0
+        return self.real_page_size_bytes / baseline
+
+    def get_memory_stats(self) -> dict:
+        """Return a dictionary of memory statistics suitable for logging."""
+        return {
+            "k_logical_bits": self.k_logical_bits,
+            "v_logical_bits": self.v_logical_bits,
+            "k_real_bits_per_channel": round(self.k_real_bits_per_channel, 2),
+            "v_real_bits_per_channel": round(self.v_real_bits_per_channel, 2),
+            "scalar_dtype": str(self.scalar_dtype),
+            "real_allocated_bytes_per_page": self.real_allocated_bytes,
+            "bf16_baseline_bytes_per_page": self.bf16_baseline_bytes,
+            "effective_compression_ratio": round(self.effective_compression_ratio, 4),
+        }
+
     @classmethod
     def merge(cls, specs: list["TurboQuantAttentionSpec"]) -> "TurboQuantAttentionSpec":
         assert all(isinstance(spec, TurboQuantAttentionSpec) for spec in specs), (

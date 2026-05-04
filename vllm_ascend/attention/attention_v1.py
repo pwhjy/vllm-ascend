@@ -1417,16 +1417,16 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
     def _prepare_turboquant_runtime(self, layer: AttentionLayer, device: torch.device) -> None:
         if getattr(layer, "tq_runtime_prepared", False):
             return
-        target_dtype = torch.float32
-        layer._tq_k_codebook = layer.k_codebook.data.to(device=device, dtype=target_dtype).contiguous()
-        layer._tq_v_codebook = layer.v_codebook.data.to(device=device, dtype=target_dtype).contiguous()
-        layer._tq_k_boundary = layer.k_boundary.data.to(device=device, dtype=target_dtype).contiguous()
-        layer._tq_v_boundary = layer.v_boundary.data.to(device=device, dtype=target_dtype).contiguous()
-        layer._tq_k_rot = layer.k_rot.data.to(device=device, dtype=target_dtype).contiguous()
-        layer._tq_v_rot = layer.v_rot.data.to(device=device, dtype=target_dtype).contiguous()
+        target_dtype = getattr(layer, "tq_scalar_dtype", torch.float32)
+        layer._tq_k_codebook = layer.k_codebook.data.to(device=device, dtype=target_dtype)
+        layer._tq_v_codebook = layer.v_codebook.data.to(device=device, dtype=target_dtype)
+        layer._tq_k_boundary = layer.k_boundary.data.to(device=device, dtype=target_dtype)
+        layer._tq_v_boundary = layer.v_boundary.data.to(device=device, dtype=target_dtype)
+        layer._tq_k_rot = layer.k_rot.data.to(device=device, dtype=target_dtype)
+        layer._tq_v_rot = layer.v_rot.data.to(device=device, dtype=target_dtype)
         layer._tq_k_rot_t = layer._tq_k_rot.transpose(0, 1).contiguous()
         layer._tq_v_rot_t = layer._tq_v_rot.transpose(0, 1).contiguous()
-        layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype).contiguous()
+        layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype)
         layer.tq_runtime_prepared = True
 
     def _quantize_kv_to_turboquant(

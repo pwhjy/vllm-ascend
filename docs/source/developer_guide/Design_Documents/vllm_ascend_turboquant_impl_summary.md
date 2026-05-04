@@ -1,6 +1,6 @@
 # vllm-Ascend TurboQuant 实现总结
 
-版本：2026-04-11
+版本：2026-05-04
 
 ## 1. 本次实现的范围
 
@@ -96,11 +96,10 @@ AscendKVCacheMethod(AscendTurboQuantKVCacheAttentionMethod(...))
 
 这里的实现是偏工程化参考版本：
 
-- codebook 先用均匀标量 codebook
-- rotation / qjl projection 先用随机正交矩阵 / 随机投影矩阵
+- codebook 已实现基于 Beta 坐标分布的 Lloyd-Max 标量量化（`_beta_coordinate_pdf()` + `build_beta_lloyd_max_codebook()`）
+- rotation / qjl projection 使用随机正交矩阵（QR 分解）/ 随机高斯投影矩阵
 - 所有 encode/decode 都是 PyTorch 版本
-
-它的目标是先把整个链路跑通，而不是第一版就追论文里最强压缩和最快 kernel。
+- 仍未实现：artifact loader、outlier split、fused Ascend op、compressed-domain attention
 
 ### 3.4 KV cache 布局怎么落的
 
@@ -173,14 +172,18 @@ AscendKVCacheMethod(AscendTurboQuantKVCacheAttentionMethod(...))
 - 精度是否可接受
 - sidecar KV cache 布局是否工作正常
 
-### 4.2 当前 codebook 还是参考实现
+### 4.2 Codebook 已升级为 Beta Lloyd-Max，但仍缺部分组件
 
-当前 codebook 是均匀标量 codebook，不是论文里最终最优的 learned / tuned codebook 版本。
+当前 codebook 已实现基于 Beta 坐标分布的 Lloyd-Max 标量量化（`turboquant_runtime.py` 中的 `_beta_coordinate_pdf()` 和 `build_beta_lloyd_max_codebook()`），不再使用均匀标量 codebook。
 
-所以当前版本更像：
+仍未实现的 TurboQuant 组件：
 
-- “把 TurboQuant 结构接进 vllm-ascend”
-- 不是“已经逼近论文最优数值和性能”
+- artifact loader（矩阵和 codebook 从外部文件加载）
+- outlier channel 分裂策略
+- fused Ascend C 自定义算子
+- compressed-domain attention
+
+当前版本的核心贡献是”把 TurboQuant 结构接进 vllm-ascend”，在正确性优先的前提下完成了 KV cache sidecar 布局和 reference runtime。
 
 ### 4.3 当前没有做完整的 TurboQuant artifact loader
 
