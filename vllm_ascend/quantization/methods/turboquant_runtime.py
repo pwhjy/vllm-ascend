@@ -23,10 +23,18 @@ _CODEBOOK_CACHE: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tenso
 # =========================
 # TurboQuant profiling
 # =========================
-_TQ_PROFILE_ENABLED = os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
-_TQ_PROFILE_DIR = os.getenv("VLLM_ASCEND_TQ_PROFILE_DIR", "/tmp/turboquant_profile")
 _TQ_PROFILE_LOCK = threading.Lock()
 _TQ_PROFILE_STATS: dict[str, dict] = {}
+_TQ_PROFILE_FLUSH_EVERY = max(1, int(os.getenv("VLLM_ASCEND_TQ_PROFILE_FLUSH_EVERY", "100")))
+_TQ_PROFILE_UPDATE_COUNT = 0
+
+
+def _tq_profile_enabled() -> bool:
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
+
+
+def _tq_profile_dir() -> str:
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_DIR", "/tmp/turboquant_profile")
 
 
 def _is_npu_tensor(x) -> bool:
@@ -34,7 +42,7 @@ def _is_npu_tensor(x) -> bool:
 
 
 def _maybe_sync_for_profile(*objs):
-    if not _TQ_PROFILE_ENABLED:
+    if not _tq_profile_enabled():
         return
 
     def _walk(obj):
@@ -63,7 +71,9 @@ def _maybe_sync_for_profile(*objs):
 
 
 def _record_tq_profile(name: str, elapsed_ms: float, **meta):
-    if not _TQ_PROFILE_ENABLED:
+    global _TQ_PROFILE_UPDATE_COUNT
+
+    if not _tq_profile_enabled():
         return
 
     with _TQ_PROFILE_LOCK:
@@ -88,18 +98,31 @@ def _record_tq_profile(name: str, elapsed_ms: float, **meta):
             if key in meta and meta[key] is not None:
                 stat[key] += int(meta[key])
 
+        _TQ_PROFILE_UPDATE_COUNT += 1
+        if _TQ_PROFILE_UPDATE_COUNT % _TQ_PROFILE_FLUSH_EVERY == 0:
+            _dump_tq_profile_locked()
+
 
 def _dump_tq_profile():
-    if not _TQ_PROFILE_ENABLED:
+    if not _tq_profile_enabled():
         return
 
-    os.makedirs(_TQ_PROFILE_DIR, exist_ok=True)
+    with _TQ_PROFILE_LOCK:
+        _dump_tq_profile_locked()
+
+
+def _dump_tq_profile_locked():
+    if not _TQ_PROFILE_STATS:
+        return
+
+    profile_dir = _tq_profile_dir()
+    os.makedirs(profile_dir, exist_ok=True)
     payload = {
         "pid": os.getpid(),
         "hostname": socket.gethostname(),
         "stats": _TQ_PROFILE_STATS,
     }
-    out_path = os.path.join(_TQ_PROFILE_DIR, f"turboquant_profile_{os.getpid()}.json")
+    out_path = os.path.join(profile_dir, f"turboquant_profile_{os.getpid()}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
@@ -238,32 +261,78 @@ def build_qjl_projection(head_dim: int, seed: int, device, dtype) -> torch.Tenso
     return random_matrix.to(device=device, dtype=dtype).contiguous()
 
 
+def _pack_bits_fast(flat: torch.Tensor, bits: int) -> torch.Tensor | None:
+    if bits == 1:
+        values = flat.to(torch.uint8)
+        pad = (-values.shape[-1]) % 8
+        if pad:
+            padded = torch.zeros((values.shape[0], values.shape[-1] + pad), dtype=torch.uint8, device=values.device)
+            padded[:, : values.shape[-1]] = values
+            values = padded
+        chunks = (values & 0x1).view(values.shape[0], -1, 8)
+        packed = (
+            chunks[..., 0]
+            | (chunks[..., 1] << 1)
+            | (chunks[..., 2] << 2)
+            | (chunks[..., 3] << 3)
+            | (chunks[..., 4] << 4)
+            | (chunks[..., 5] << 5)
+            | (chunks[..., 6] << 6)
+            | (chunks[..., 7] << 7)
+        )
+        return packed.contiguous()
+
+    if bits == 2:
+        values = flat.to(torch.uint8) & 0x3
+        pad = (-values.shape[-1]) % 4
+        if pad:
+            padded = torch.zeros((values.shape[0], values.shape[-1] + pad), dtype=torch.uint8, device=values.device)
+            padded[:, : values.shape[-1]] = values
+            values = padded
+        chunks = values.view(values.shape[0], -1, 4)
+        packed = (
+            chunks[..., 0]
+            | (chunks[..., 1] << 2)
+            | (chunks[..., 2] << 4)
+            | (chunks[..., 3] << 6)
+        )
+        return packed.contiguous()
+
+    return None
+
+
 def pack_bits(indices: torch.Tensor, bits: int) -> torch.Tensor:
     _maybe_sync_for_profile(indices)
     t0 = time.perf_counter()
 
-    if indices.dtype not in (torch.uint8, torch.int16, torch.int32, torch.int64):
-        indices = indices.to(torch.int64)
-    values = indices.to(torch.int64)
-    if values.numel() == 0:
-        packed = values.to(torch.uint8)
+    if indices.numel() == 0:
+        packed = indices.to(torch.uint8)
         _maybe_sync_for_profile(packed)
         _record_tq_profile("pack_bits", (time.perf_counter() - t0) * 1000.0, elements=0, bytes_out=0)
         return packed
-    original_shape = values.shape[:-1]
-    flat = values.reshape(-1, values.shape[-1])
-    packed_cols = (flat.shape[-1] * bits + 7) // 8
-    packed = torch.zeros((flat.shape[0], packed_cols), dtype=torch.uint8, device=flat.device)
-    bit_cursor = 0
-    mask = (1 << bits) - 1
-    for col in range(flat.shape[-1]):
-        value = flat[:, col] & mask
-        byte_index = bit_cursor // 8
-        bit_offset = bit_cursor % 8
-        packed[:, byte_index] |= (value << bit_offset).to(torch.uint8)
-        if bit_offset + bits > 8:
-            packed[:, byte_index + 1] |= (value >> (8 - bit_offset)).to(torch.uint8)
-        bit_cursor += bits
+
+    original_shape = indices.shape[:-1]
+    flat_u8 = indices.to(torch.uint8).reshape(-1, indices.shape[-1])
+    packed_cols = (flat_u8.shape[-1] * bits + 7) // 8
+    packed_fast = _pack_bits_fast(flat_u8, bits)
+    if packed_fast is not None:
+        packed = packed_fast[:, :packed_cols]
+    else:
+        if indices.dtype not in (torch.uint8, torch.int16, torch.int32, torch.int64):
+            indices = indices.to(torch.int64)
+        values = indices.to(torch.int64)
+        flat = values.reshape(-1, values.shape[-1])
+        packed = torch.zeros((flat.shape[0], packed_cols), dtype=torch.uint8, device=flat.device)
+        bit_cursor = 0
+        mask = (1 << bits) - 1
+        for col in range(flat.shape[-1]):
+            value = flat[:, col] & mask
+            byte_index = bit_cursor // 8
+            bit_offset = bit_cursor % 8
+            packed[:, byte_index] |= (value << bit_offset).to(torch.uint8)
+            if bit_offset + bits > 8:
+                packed[:, byte_index + 1] |= (value >> (8 - bit_offset)).to(torch.uint8)
+            bit_cursor += bits
     packed = packed.reshape(*original_shape, packed_cols)
 
     _maybe_sync_for_profile(packed)
@@ -271,32 +340,81 @@ def pack_bits(indices: torch.Tensor, bits: int) -> torch.Tensor:
     _record_tq_profile(
         "pack_bits",
         elapsed_ms,
-        elements=flat.numel(),
+        elements=flat_u8.numel(),
         bytes_out=packed.numel(),
     )
     return packed
 
 
+def _unpack_bits_fast(flat: torch.Tensor, bits: int, dim: int) -> torch.Tensor | None:
+    values = flat.to(torch.uint8)
+
+    if bits == 1:
+        unpacked = torch.empty((values.shape[0], values.shape[1] * 8), dtype=torch.uint8, device=values.device)
+        unpacked[:, 0::8] = values & 0x1
+        unpacked[:, 1::8] = (values >> 1) & 0x1
+        unpacked[:, 2::8] = (values >> 2) & 0x1
+        unpacked[:, 3::8] = (values >> 3) & 0x1
+        unpacked[:, 4::8] = (values >> 4) & 0x1
+        unpacked[:, 5::8] = (values >> 5) & 0x1
+        unpacked[:, 6::8] = (values >> 6) & 0x1
+        unpacked[:, 7::8] = (values >> 7) & 0x1
+        return unpacked[:, :dim].contiguous()
+
+    if bits == 2:
+        unpacked = torch.empty((values.shape[0], values.shape[1] * 4), dtype=torch.uint8, device=values.device)
+        unpacked[:, 0::4] = values & 0x3
+        unpacked[:, 1::4] = (values >> 2) & 0x3
+        unpacked[:, 2::4] = (values >> 4) & 0x3
+        unpacked[:, 3::4] = (values >> 6) & 0x3
+        return unpacked[:, :dim].contiguous()
+
+    return None
+
+
 def unpack_bits(packed: torch.Tensor, bits: int, dim: int) -> torch.Tensor:
-    values = packed.to(torch.int64)
-    if values.numel() == 0:
-        return values.to(torch.uint8)
-    original_shape = values.shape[:-1]
-    flat = values.reshape(-1, values.shape[-1])
-    unpacked = torch.zeros((flat.shape[0], dim), dtype=torch.int64, device=flat.device)
-    bit_cursor = 0
-    mask = (1 << bits) - 1
-    for col in range(dim):
-        byte_index = bit_cursor // 8
-        bit_offset = bit_cursor % 8
-        value = (flat[:, byte_index] >> bit_offset) & mask
-        if bit_offset + bits > 8:
-            spill_bits = bit_offset + bits - 8
-            spill_mask = (1 << spill_bits) - 1
-            value |= (flat[:, byte_index + 1] & spill_mask) << (8 - bit_offset)
-        unpacked[:, col] = value
-        bit_cursor += bits
-    return unpacked.reshape(*original_shape, dim).to(torch.uint8)
+    _maybe_sync_for_profile(packed)
+    t0 = time.perf_counter()
+
+    if packed.numel() == 0:
+        unpacked = packed.to(torch.uint8)
+        _maybe_sync_for_profile(unpacked)
+        _record_tq_profile("unpack_bits", (time.perf_counter() - t0) * 1000.0, elements=0, bytes_out=0)
+        return unpacked
+
+    original_shape = packed.shape[:-1]
+    flat_u8 = packed.to(torch.uint8).reshape(-1, packed.shape[-1])
+    unpacked_fast = _unpack_bits_fast(flat_u8, bits, dim)
+    if unpacked_fast is not None:
+        unpacked = unpacked_fast
+    else:
+        values = packed.to(torch.int64)
+        flat = values.reshape(-1, values.shape[-1])
+        unpacked = torch.zeros((flat.shape[0], dim), dtype=torch.int64, device=flat.device)
+        bit_cursor = 0
+        mask = (1 << bits) - 1
+        for col in range(dim):
+            byte_index = bit_cursor // 8
+            bit_offset = bit_cursor % 8
+            value = (flat[:, byte_index] >> bit_offset) & mask
+            if bit_offset + bits > 8:
+                spill_bits = bit_offset + bits - 8
+                spill_mask = (1 << spill_bits) - 1
+                value |= (flat[:, byte_index + 1] & spill_mask) << (8 - bit_offset)
+            unpacked[:, col] = value
+            bit_cursor += bits
+        unpacked = unpacked.to(torch.uint8)
+    unpacked = unpacked.reshape(*original_shape, dim).to(torch.uint8)
+
+    _maybe_sync_for_profile(unpacked)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    _record_tq_profile(
+        "unpack_bits",
+        elapsed_ms,
+        elements=unpacked.numel(),
+        bytes_out=unpacked.numel(),
+    )
+    return unpacked
 
 
 def apply_rotation(x: torch.Tensor, rotation: torch.Tensor) -> torch.Tensor:
@@ -463,10 +581,53 @@ def turboquant_decode_mse(
     dim: int,
     target_dtype: torch.dtype,
 ) -> torch.Tensor:
+    num_vectors = int(norm.numel())
+
+    _maybe_sync_for_profile(packed_idx, norm, rotation_t, codebook)
+    t_total_0 = time.perf_counter()
+
+    t0 = time.perf_counter()
     idx = unpack_bits(packed_idx, bits, dim)
+    _maybe_sync_for_profile(idx)
+    _record_tq_profile(
+        "turboquant_decode_mse.unpack_idx",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_hat_rot = _dequant_scalar(idx, codebook).to(target_dtype)
+    _maybe_sync_for_profile(x_hat_rot)
+    _record_tq_profile(
+        "turboquant_decode_mse.stage1_dequant",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_hat = apply_rotation(x_hat_rot, rotation_t)
-    return x_hat * norm.to(target_dtype)
+    _maybe_sync_for_profile(x_hat)
+    _record_tq_profile(
+        "turboquant_decode_mse.inverse_rotate",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
+    decoded = x_hat * norm.to(target_dtype)
+    _maybe_sync_for_profile(decoded)
+    _record_tq_profile(
+        "turboquant_decode_mse.rescale_norm",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    _record_tq_profile(
+        "turboquant_decode_mse.total",
+        (time.perf_counter() - t_total_0) * 1000.0,
+        vectors=num_vectors,
+    )
+    return decoded
 
 
 def turboquant_decode_prod(
@@ -481,15 +642,84 @@ def turboquant_decode_prod(
     dim: int,
     target_dtype: torch.dtype,
 ) -> torch.Tensor:
+    num_vectors = int(norm.numel())
+
+    _maybe_sync_for_profile(packed_idx, packed_qjl, gamma, norm, rotation_t, codebook, qjl_proj)
+    t_total_0 = time.perf_counter()
+
     stage1_bits = get_stage1_bits(total_bits, "prod")
+
+    t0 = time.perf_counter()
     idx = unpack_bits(packed_idx, stage1_bits, dim)
+    _maybe_sync_for_profile(idx)
+    _record_tq_profile(
+        "turboquant_decode_prod.unpack_idx",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     qjl = unpack_bits(packed_qjl, 1, dim).to(target_dtype)
+    _maybe_sync_for_profile(qjl)
+    _record_tq_profile(
+        "turboquant_decode_prod.unpack_qjl",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     qjl = qjl * 2.0 - 1.0
+    _maybe_sync_for_profile(qjl)
+    _record_tq_profile(
+        "turboquant_decode_prod.qjl_sign_to_pm1",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_mse_hat_rot = _dequant_scalar(idx, codebook).to(target_dtype)
+    _maybe_sync_for_profile(x_mse_hat_rot)
+    _record_tq_profile(
+        "turboquant_decode_prod.stage1_dequant",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
     correction = math.sqrt(math.pi / 2.0) / dim
+
+    t0 = time.perf_counter()
     x_qjl_hat_rot = correction * gamma.to(target_dtype) * apply_rotation(qjl, qjl_proj)
+    _maybe_sync_for_profile(x_qjl_hat_rot)
+    _record_tq_profile(
+        "turboquant_decode_prod.qjl_correction_rotate",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
     x_hat = apply_rotation(x_mse_hat_rot + x_qjl_hat_rot, rotation_t)
-    return x_hat * norm.to(target_dtype)
+    _maybe_sync_for_profile(x_hat)
+    _record_tq_profile(
+        "turboquant_decode_prod.inverse_rotate",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    t0 = time.perf_counter()
+    decoded = x_hat * norm.to(target_dtype)
+    _maybe_sync_for_profile(decoded)
+    _record_tq_profile(
+        "turboquant_decode_prod.rescale_norm",
+        (time.perf_counter() - t0) * 1000.0,
+        vectors=num_vectors,
+    )
+
+    _record_tq_profile(
+        "turboquant_decode_prod.total",
+        (time.perf_counter() - t_total_0) * 1000.0,
+        vectors=num_vectors,
+    )
+    return decoded
 
 
 def monte_carlo_bias_eval(

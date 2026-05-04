@@ -26,6 +26,24 @@ class TestTurboQuantRuntime(TestBase):
         unpacked = unpack_bits(packed, bits=3, dim=indices.shape[-1])
         self.assertTrue(torch.equal(unpacked, indices))
 
+    def test_pack_unpack_roundtrip_fast_path_1bit(self):
+        indices = torch.tensor(
+            [[[0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1]]],
+            dtype=torch.uint8,
+        )
+        packed = pack_bits(indices, bits=1)
+        unpacked = unpack_bits(packed, bits=1, dim=indices.shape[-1])
+        self.assertTrue(torch.equal(unpacked, indices))
+
+    def test_pack_unpack_roundtrip_fast_path_2bit(self):
+        indices = torch.tensor(
+            [[[0, 1, 2, 3, 1, 0, 2]]],
+            dtype=torch.uint8,
+        )
+        packed = pack_bits(indices, bits=2)
+        unpacked = unpack_bits(packed, bits=2, dim=indices.shape[-1])
+        self.assertTrue(torch.equal(unpacked, indices))
+
     def test_turboquant_mse_roundtrip_shape(self):
         x = torch.randn(2, 3, 8, dtype=torch.float32)
         codebook, boundary = build_turboquant_codebook(8, 3, "cpu", torch.float32)

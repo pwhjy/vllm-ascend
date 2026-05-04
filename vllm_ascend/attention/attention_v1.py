@@ -17,6 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import time
 
 import torch
 import torch_npu
@@ -58,6 +59,8 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
+    _maybe_sync_for_profile,
+    _record_tq_profile,
     turboquant_decode_mse,
     turboquant_decode_prod,
     turboquant_encode_mse,
@@ -1504,7 +1507,11 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         cache: torch.Tensor,
         block_table: torch.Tensor,
         seq_lens: list[int],
+        *,
+        profile_name: str | None = None,
     ) -> torch.Tensor:
+        _maybe_sync_for_profile(cache, block_table)
+        t0 = time.perf_counter()
         batch_size = block_table.shape[0]
         block_size = cache.shape[1]
         max_blocks_per_seq = block_table.shape[1]
@@ -1514,7 +1521,16 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=cache.device)
         positions = torch.arange(max_tokens_padded, dtype=torch.long, device=cache.device)
         valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).reshape(-1)
-        return gathered.reshape(batch_size * max_tokens_padded, *cache.shape[2:])[valid_mask]
+        gathered = gathered.reshape(batch_size * max_tokens_padded, *cache.shape[2:])[valid_mask]
+        _maybe_sync_for_profile(gathered)
+        if profile_name is not None:
+            _record_tq_profile(
+                profile_name,
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=int(gathered.numel() // max(gathered.shape[-1], 1)),
+                bytes_out=gathered.numel(),
+            )
+        return gathered
 
     def _dequant_paged_kv_to_dense(
         self,
@@ -1523,16 +1539,51 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         seq_lens: list[int],
         target_dtype: torch.dtype,
         layer: AttentionLayer,
+        *,
+        profile_label: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        _maybe_sync_for_profile(block_table)
+        t_total_0 = time.perf_counter()
         self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
-        packed_k_idx = self._gather_paged_cache(kv_cache["k_idx"], block_table, seq_lens)
-        k_norm = self._gather_paged_cache(kv_cache["k_norm"], block_table, seq_lens)
-        packed_v_idx = self._gather_paged_cache(kv_cache["v_idx"], block_table, seq_lens)
-        v_norm = self._gather_paged_cache(kv_cache["v_norm"], block_table, seq_lens)
+        packed_k_idx = self._gather_paged_cache(
+            kv_cache["k_idx"],
+            block_table,
+            seq_lens,
+            profile_name=f"{profile_label}.gather_paged_cache.k_idx",
+        )
+        k_norm = self._gather_paged_cache(
+            kv_cache["k_norm"],
+            block_table,
+            seq_lens,
+            profile_name=f"{profile_label}.gather_paged_cache.k_norm",
+        )
+        packed_v_idx = self._gather_paged_cache(
+            kv_cache["v_idx"],
+            block_table,
+            seq_lens,
+            profile_name=f"{profile_label}.gather_paged_cache.v_idx",
+        )
+        v_norm = self._gather_paged_cache(
+            kv_cache["v_norm"],
+            block_table,
+            seq_lens,
+            profile_name=f"{profile_label}.gather_paged_cache.v_norm",
+        )
 
         if getattr(layer, "tq_k_variant", "prod") == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
-            packed_k_qjl = self._gather_paged_cache(kv_cache["k_qjl"], block_table, seq_lens)
-            k_gamma = self._gather_paged_cache(kv_cache["k_gamma"], block_table, seq_lens)
+            packed_k_qjl = self._gather_paged_cache(
+                kv_cache["k_qjl"],
+                block_table,
+                seq_lens,
+                profile_name=f"{profile_label}.gather_paged_cache.k_qjl",
+            )
+            k_gamma = self._gather_paged_cache(
+                kv_cache["k_gamma"],
+                block_table,
+                seq_lens,
+                profile_name=f"{profile_label}.gather_paged_cache.k_gamma",
+            )
+            t0 = time.perf_counter()
             dense_k = turboquant_decode_prod(
                 packed_k_idx,
                 packed_k_qjl,
@@ -1545,7 +1596,14 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 self.head_size,
                 target_dtype,
             )
+            _maybe_sync_for_profile(dense_k)
+            _record_tq_profile(
+                f"{profile_label}.decode_k",
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=int(dense_k.numel() // max(dense_k.shape[-1], 1)),
+            )
         else:
+            t0 = time.perf_counter()
             dense_k = turboquant_decode_mse(
                 packed_k_idx,
                 k_norm,
@@ -1555,8 +1613,15 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 self.head_size,
                 target_dtype,
             )
+            _maybe_sync_for_profile(dense_k)
+            _record_tq_profile(
+                f"{profile_label}.decode_k",
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=int(dense_k.numel() // max(dense_k.shape[-1], 1)),
+            )
 
         v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
+        t0 = time.perf_counter()
         dense_v = turboquant_decode_mse(
             packed_v_idx,
             v_norm,
@@ -1565,6 +1630,17 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             int(layer.tq_v_stage1_bits),
             v_dim,
             target_dtype,
+        )
+        _maybe_sync_for_profile(dense_v)
+        _record_tq_profile(
+            f"{profile_label}.decode_v",
+            (time.perf_counter() - t0) * 1000.0,
+            vectors=int(dense_v.numel() // max(dense_v.shape[-1], 1)),
+        )
+        _record_tq_profile(
+            f"{profile_label}.dequant_paged_kv_to_dense.total",
+            (time.perf_counter() - t_total_0) * 1000.0,
+            vectors=len(seq_lens),
         )
         return dense_k, dense_v
 
@@ -1577,7 +1653,11 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         actual_seq_lengths_kv: list[int],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        *,
+        profile_name: str,
     ) -> torch.Tensor:
+        _maybe_sync_for_profile(query, key, value)
+        t0 = time.perf_counter()
         if isinstance(self.key_cache, dict):
             cache_block_size = next(iter(self.key_cache.values())).shape[1]
         elif self.key_cache is not None:
@@ -1602,6 +1682,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         num_tokens = actual_seq_lengths_q[-1]
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
+        _maybe_sync_for_profile(attn_output, output)
+        _record_tq_profile(
+            profile_name,
+            (time.perf_counter() - t0) * 1000.0,
+            vectors=num_tokens,
+        )
         return output
 
     def _forward_turboquant_decode(
@@ -1611,6 +1697,8 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
+        _maybe_sync_for_profile(query, attn_metadata.block_tables)
+        t_total_0 = time.perf_counter()
         kv_seq_lens = attn_metadata.seq_lens_list
         dense_k, dense_v = self._dequant_paged_kv_to_dense(
             self.key_cache,  # type: ignore[arg-type]
@@ -1618,11 +1706,28 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             kv_seq_lens,
             query.dtype,
             layer,
+            profile_label="turboquant_decode",
         )
         batch_size = len(kv_seq_lens)
         actual_seq_lengths_q = torch.ones(batch_size, dtype=torch.int32, device=query.device).cumsum(0).tolist()
         actual_seq_lengths_kv = torch.tensor(kv_seq_lens, dtype=torch.int32, device=query.device).cumsum(0).tolist()
-        return self._run_dense_fia(query[:batch_size], dense_k, dense_v, actual_seq_lengths_q, actual_seq_lengths_kv, attn_metadata, output)
+        output = self._run_dense_fia(
+            query[:batch_size],
+            dense_k,
+            dense_v,
+            actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            attn_metadata,
+            output,
+            profile_name="turboquant_decode.run_dense_fia",
+        )
+        _maybe_sync_for_profile(output)
+        _record_tq_profile(
+            "turboquant_decode.total",
+            (time.perf_counter() - t_total_0) * 1000.0,
+            vectors=batch_size,
+        )
+        return output
 
     def _forward_turboquant_chunked_prefill(
         self,
@@ -1633,6 +1738,8 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
+        _maybe_sync_for_profile(query, attn_metadata.block_tables)
+        t_total_0 = time.perf_counter()
         del float_key, float_value
         dense_k, dense_v = self._dequant_paged_kv_to_dense(
             self.key_cache,  # type: ignore[arg-type]
@@ -1640,11 +1747,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata.seq_lens_list,
             query.dtype,
             layer,
+            profile_label="turboquant_chunked_prefill",
         )
         actual_seq_lengths_kv = torch.tensor(
             attn_metadata.seq_lens_list, dtype=torch.int32, device=query.device
         ).cumsum(0).tolist()
-        return self._run_dense_fia(
+        output = self._run_dense_fia(
             query[: attn_metadata.actual_seq_lengths_q[-1]],
             dense_k,
             dense_v,
@@ -1652,7 +1760,15 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             actual_seq_lengths_kv,
             attn_metadata,
             output,
+            profile_name="turboquant_chunked_prefill.run_dense_fia",
         )
+        _maybe_sync_for_profile(output)
+        _record_tq_profile(
+            "turboquant_chunked_prefill.total",
+            (time.perf_counter() - t_total_0) * 1000.0,
+            vectors=attn_metadata.actual_seq_lengths_q[-1],
+        )
+        return output
 
     def _forward_turboquant_fused_infer_attention(
         self,
@@ -1663,12 +1779,14 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
+        _maybe_sync_for_profile(query)
+        t_total_0 = time.perf_counter()
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
             if self.attn_type == AttentionType.ENCODER_DECODER:
                 actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
-            return self._run_dense_fia(
+            output = self._run_dense_fia(
                 query[:num_tokens],
                 key[:num_tokens],
                 value[:num_tokens],
@@ -1676,7 +1794,15 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 actual_seq_lengths_kv,
                 attn_metadata,
                 output,
+                profile_name="turboquant_prefill_no_cache.run_dense_fia",
             )
+            _maybe_sync_for_profile(output)
+            _record_tq_profile(
+                "turboquant_prefill_no_cache.total",
+                (time.perf_counter() - t_total_0) * 1000.0,
+                vectors=num_tokens,
+            )
+            return output
 
         dense_k, dense_v = self._dequant_paged_kv_to_dense(
             self.key_cache,  # type: ignore[arg-type]
@@ -1684,11 +1810,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata.seq_lens_list,
             query.dtype,
             layer,
+            profile_label="turboquant_prefill_cache_hit",
         )
         actual_seq_lengths_kv = torch.tensor(
             attn_metadata.seq_lens_list, dtype=torch.int32, device=query.device
         ).cumsum(0).tolist()
-        return self._run_dense_fia(
+        output = self._run_dense_fia(
             query[:num_tokens],
             dense_k,
             dense_v,
@@ -1696,7 +1823,15 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             actual_seq_lengths_kv,
             attn_metadata,
             output,
+            profile_name="turboquant_prefill_cache_hit.run_dense_fia",
         )
+        _maybe_sync_for_profile(output)
+        _record_tq_profile(
+            "turboquant_prefill_cache_hit.total",
+            (time.perf_counter() - t_total_0) * 1000.0,
+            vectors=num_tokens,
+        )
+        return output
 
     def forward(
         self,
