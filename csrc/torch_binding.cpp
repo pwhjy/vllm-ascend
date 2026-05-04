@@ -46,6 +46,7 @@
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "tq_dequant_mse_paged/tq_dequant_mse_paged_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -772,6 +773,41 @@ at::Tensor npu_causal_conv1d_custom(
     return output;
 }
   
+at::Tensor tq_dequant_mse_paged(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits,
+    int64_t head_dim)
+{
+    TORCH_CHECK(packed_idx.scalar_type() == at::kByte, "packed_idx must be uint8");
+    TORCH_CHECK(token_block_ids.scalar_type() == at::kInt, "token_block_ids must be int32");
+    TORCH_CHECK(token_offsets.scalar_type() == at::kInt, "token_offsets must be int32");
+    TORCH_CHECK(norm.scalar_type() == at::kFloat, "P2 requires norm fp32");
+    TORCH_CHECK(codebook.scalar_type() == at::kFloat, "P2 requires codebook fp32");
+    TORCH_CHECK(packed_idx.dim() == 4,
+                "packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(norm.dim() == 4, "norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(token_block_ids.dim() == 1, "token_block_ids must be 1D");
+    TORCH_CHECK(token_offsets.dim() == 1, "token_offsets must be 1D");
+    TORCH_CHECK(bits >= 1 && bits <= 4, "bits must be in [1, 4]");
+
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+
+    at::Tensor out = at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnTqDequantMsePaged,
+        packed_idx, norm, token_block_ids, token_offsets,
+        codebook, bits, head_dim, out);
+
+    return out;
+}
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -1076,5 +1112,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+
+    ops.def(
+        "tq_dequant_mse_paged(Tensor packed_idx, Tensor norm, "
+        "                     Tensor token_block_ids, Tensor token_offsets, "
+        "                     Tensor codebook, int bits, int head_dim) -> Tensor"
+    );
+    ops.impl("tq_dequant_mse_paged", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged);
 }
 #endif

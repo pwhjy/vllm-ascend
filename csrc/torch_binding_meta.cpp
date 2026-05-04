@@ -577,6 +577,23 @@ std::vector<at::Tensor> moe_grouped_matmul_meta(
     return y;
 }
 
+at::Tensor tq_dequant_mse_paged_meta(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits,
+    int64_t head_dim)
+{
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+
+    return at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(at::kFloat).device(at::kMeta));
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -680,6 +697,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // TurboQuant MSE paged dequant
+    ops.impl("tq_dequant_mse_paged", &vllm_ascend::meta::tq_dequant_mse_paged_meta);
 }
 }
 #endif
