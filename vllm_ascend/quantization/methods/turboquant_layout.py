@@ -31,6 +31,18 @@ def scalar_bytes_per_vector(dtype: torch.dtype) -> int:
     return get_dtype_size(dtype)
 
 
+def get_stage1_bits(total_bits: int, variant: str) -> int:
+    if total_bits <= 0:
+        raise ValueError(f"total_bits must be > 0, got {total_bits}")
+    if variant == "prod":
+        if total_bits < 2:
+            raise ValueError(f"TurboQuant prod requires total_bits >= 2, got {total_bits}")
+        return total_bits - 1
+    if variant == "mse":
+        return total_bits
+    raise ValueError(f"Unsupported TurboQuant variant: {variant}")
+
+
 @dataclass(frozen=True, kw_only=True)
 class TurboQuantAttentionSpec(FullAttentionSpec):
     k_total_bits: int
@@ -49,11 +61,11 @@ class TurboQuantAttentionSpec(FullAttentionSpec):
 
     @property
     def k_stage1_bits(self) -> int:
-        return self.k_total_bits - 1 if self.k_variant == "prod" else self.k_total_bits
+        return get_stage1_bits(self.k_total_bits, self.k_variant)
 
     @property
     def v_stage1_bits(self) -> int:
-        return self.v_total_bits - 1 if self.v_variant == "prod" else self.v_total_bits
+        return get_stage1_bits(self.v_total_bits, self.v_variant)
 
     @property
     def k_idx_bytes_per_vector(self) -> int:

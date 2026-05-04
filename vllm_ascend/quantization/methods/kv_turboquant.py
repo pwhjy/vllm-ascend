@@ -13,16 +13,19 @@ import re
 import torch
 
 from .base import AscendAttentionScheme
+from .turboquant_layout import get_stage1_bits
 from .turboquant_runtime import (
     build_qjl_projection,
     build_rotation_matrix,
     build_turboquant_codebook,
-    get_stage1_bits,
 )
 
 
+_LAYER_ID_RE = re.compile(r"\.(\d+)\.")
+
+
 def _parse_layer_id(prefix: str) -> int:
-    match = re.search(r"\.(\d+)\.", prefix)
+    match = _LAYER_ID_RE.search(prefix)
     return int(match.group(1)) if match else 0
 
 

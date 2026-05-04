@@ -17,6 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import os
 import time
 
 import torch
@@ -57,10 +58,16 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
+from vllm_ascend.ops.turboquant.dequant import (
+    build_token_map_from_block_table,
+    custom_dequant_enabled,
+    tq_dequant_mse_paged_rot,
+)
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
     _maybe_sync_for_profile,
     _record_tq_profile,
+    apply_rotation,
     turboquant_decode_mse,
     turboquant_decode_prod,
     turboquant_encode_mse,
@@ -1469,22 +1476,20 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         return encoded_k, encoded_v
 
-    def reshape_and_cache(
+    def _reshape_and_cache_turboquant(
         self,
         query: torch.Tensor,
         key: dict[str, torch.Tensor],
         value: dict[str, torch.Tensor],
         kv_cache,
         attn_metadata: AscendMetadata,
-        output: torch.Tensor,
     ):
-        del output
         if not isinstance(kv_cache, dict):
             raise TypeError("TurboQuant KV cache must be a dict-based sidecar cache")
         self.key_cache = kv_cache  # type: ignore[assignment]
         slots = attn_metadata.slot_mapping[: attn_metadata.num_actual_tokens].to(torch.long)
         if slots.numel() == 0:
-            return query, key, value, None
+            return
 
         for cache_name, encoded in (
             ("k_idx", key["idx"]),
@@ -1500,37 +1505,135 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         if "gamma" in key and "k_gamma" in kv_cache:
             flat_cache = kv_cache["k_gamma"].view(-1, self.num_kv_heads, kv_cache["k_gamma"].shape[-1])
             flat_cache[slots] = key["gamma"].to(flat_cache.dtype)
-        return query, key, value, None
 
-    def _gather_paged_cache(
+    def _dequant_paged_kv_to_dense_reference(
         self,
-        cache: torch.Tensor,
+        kv_cache: dict[str, torch.Tensor],
         block_table: torch.Tensor,
         seq_lens: list[int],
+        target_dtype: torch.dtype,
+        layer: AttentionLayer,
         *,
-        profile_name: str | None = None,
-    ) -> torch.Tensor:
-        _maybe_sync_for_profile(cache, block_table)
-        t0 = time.perf_counter()
-        batch_size = block_table.shape[0]
-        block_size = cache.shape[1]
-        max_blocks_per_seq = block_table.shape[1]
-        max_tokens_padded = max_blocks_per_seq * block_size
-        flat_ids = block_table.reshape(-1)
-        gathered = cache[flat_ids].view(batch_size, max_tokens_padded, *cache.shape[2:])
-        seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=cache.device)
-        positions = torch.arange(max_tokens_padded, dtype=torch.long, device=cache.device)
-        valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).reshape(-1)
-        gathered = gathered.reshape(batch_size * max_tokens_padded, *cache.shape[2:])[valid_mask]
-        _maybe_sync_for_profile(gathered)
-        if profile_name is not None:
+        profile_label: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reference path: gather each cache tensor then full PyTorch decode."""
+        _maybe_sync_for_profile(block_table)
+        t_total_0 = time.perf_counter()
+        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
+
+        def _gather(cache, profile_name):
+            _maybe_sync_for_profile(cache, block_table)
+            t0 = time.perf_counter()
+            batch_size = block_table.shape[0]
+            block_size = cache.shape[1]
+            max_blocks_per_seq = block_table.shape[1]
+            max_tokens_padded = max_blocks_per_seq * block_size
+            flat_ids = block_table.reshape(-1)
+            gathered = cache[flat_ids].view(batch_size, max_tokens_padded, *cache.shape[2:])
+            seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=cache.device)
+            positions = torch.arange(max_tokens_padded, dtype=torch.long, device=cache.device)
+            valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).reshape(-1)
+            gathered = gathered.reshape(batch_size * max_tokens_padded, *cache.shape[2:])[valid_mask]
+            _maybe_sync_for_profile(gathered)
             _record_tq_profile(
-                profile_name,
-                (time.perf_counter() - t0) * 1000.0,
+                profile_name, (time.perf_counter() - t0) * 1000.0,
                 vectors=int(gathered.numel() // max(gathered.shape[-1], 1)),
                 bytes_out=gathered.numel(),
             )
-        return gathered
+            return gathered
+
+        if getattr(layer, "tq_k_variant", "prod") == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
+            dense_k = turboquant_decode_prod(
+                _gather(kv_cache["k_idx"], f"{profile_label}.gather.k_idx"),
+                _gather(kv_cache["k_qjl"], f"{profile_label}.gather.k_qjl"),
+                _gather(kv_cache["k_gamma"], f"{profile_label}.gather.k_gamma"),
+                _gather(kv_cache["k_norm"], f"{profile_label}.gather.k_norm"),
+                layer._tq_k_rot_t,
+                layer._tq_k_codebook,
+                layer._tq_k_qjl_proj,
+                int(layer.tq_k_total_bits),
+                self.head_size,
+                target_dtype,
+            )
+        else:
+            dense_k = turboquant_decode_mse(
+                _gather(kv_cache["k_idx"], f"{profile_label}.gather.k_idx"),
+                _gather(kv_cache["k_norm"], f"{profile_label}.gather.k_norm"),
+                layer._tq_k_rot_t,
+                layer._tq_k_codebook,
+                int(layer.tq_k_stage1_bits),
+                self.head_size,
+                target_dtype,
+            )
+
+        v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
+        dense_v = turboquant_decode_mse(
+            _gather(kv_cache["v_idx"], f"{profile_label}.gather.v_idx"),
+            _gather(kv_cache["v_norm"], f"{profile_label}.gather.v_norm"),
+            layer._tq_v_rot_t,
+            layer._tq_v_codebook,
+            int(layer.tq_v_stage1_bits),
+            v_dim,
+            target_dtype,
+        )
+
+        _record_tq_profile(
+            f"{profile_label}.total",
+            (time.perf_counter() - t_total_0) * 1000.0,
+            vectors=len(seq_lens),
+        )
+        return dense_k, dense_v
+
+    def _dequant_paged_kv_to_dense_custom_mse(
+        self,
+        kv_cache: dict[str, torch.Tensor],
+        block_table: torch.Tensor,
+        seq_lens: list[int],
+        target_dtype: torch.dtype,
+        layer: AttentionLayer,
+        *,
+        profile_label: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Custom-op path for MSE dequant (rotated-space output + PyTorch inverse rotation)."""
+        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
+        cache_block_size = kv_cache["v_idx"].shape[1]
+
+        token_block_ids, token_offsets = build_token_map_from_block_table(
+            block_table=block_table, seq_lens=seq_lens, block_size=cache_block_size,
+        )
+
+        # V (always MSE)
+        v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
+        dense_v_rot = tq_dequant_mse_paged_rot(
+            packed_idx=kv_cache["v_idx"],
+            norm=kv_cache["v_norm"],
+            token_block_ids=token_block_ids,
+            token_offsets=token_offsets,
+            codebook=layer._tq_v_codebook,
+            bits=int(layer.tq_v_stage1_bits),
+            head_dim=v_dim,
+            target_dtype=target_dtype,
+        )
+        dense_v = apply_rotation(dense_v_rot, layer._tq_v_rot_t).contiguous()
+
+        # K=mse only — K=prod still goes through reference path
+        if getattr(layer, "tq_k_variant", "prod") == "mse":
+            dense_k_rot = tq_dequant_mse_paged_rot(
+                packed_idx=kv_cache["k_idx"],
+                norm=kv_cache["k_norm"],
+                token_block_ids=token_block_ids,
+                token_offsets=token_offsets,
+                codebook=layer._tq_k_codebook,
+                bits=int(layer.tq_k_stage1_bits),
+                head_dim=self.head_size,
+                target_dtype=target_dtype,
+            )
+            dense_k = apply_rotation(dense_k_rot, layer._tq_k_rot_t).contiguous()
+            return dense_k, dense_v
+
+        raise RuntimeError(
+            "custom_dequant path only supports K=mse; K=prod should use reference path"
+        )
 
     def _dequant_paged_kv_to_dense(
         self,
@@ -1542,107 +1645,27 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         *,
         profile_label: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        _maybe_sync_for_profile(block_table)
-        t_total_0 = time.perf_counter()
-        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
-        packed_k_idx = self._gather_paged_cache(
-            kv_cache["k_idx"],
-            block_table,
-            seq_lens,
-            profile_name=f"{profile_label}.gather_paged_cache.k_idx",
-        )
-        k_norm = self._gather_paged_cache(
-            kv_cache["k_norm"],
-            block_table,
-            seq_lens,
-            profile_name=f"{profile_label}.gather_paged_cache.k_norm",
-        )
-        packed_v_idx = self._gather_paged_cache(
-            kv_cache["v_idx"],
-            block_table,
-            seq_lens,
-            profile_name=f"{profile_label}.gather_paged_cache.v_idx",
-        )
-        v_norm = self._gather_paged_cache(
-            kv_cache["v_norm"],
-            block_table,
-            seq_lens,
-            profile_name=f"{profile_label}.gather_paged_cache.v_norm",
+        # K=prod always uses reference path until prod custom op is ready
+        k_is_prod = (
+            getattr(layer, "tq_k_variant", "prod") == "prod"
+            and "k_qjl" in kv_cache
+            and "k_gamma" in kv_cache
         )
 
-        if getattr(layer, "tq_k_variant", "prod") == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
-            packed_k_qjl = self._gather_paged_cache(
-                kv_cache["k_qjl"],
-                block_table,
-                seq_lens,
-                profile_name=f"{profile_label}.gather_paged_cache.k_qjl",
-            )
-            k_gamma = self._gather_paged_cache(
-                kv_cache["k_gamma"],
-                block_table,
-                seq_lens,
-                profile_name=f"{profile_label}.gather_paged_cache.k_gamma",
-            )
-            t0 = time.perf_counter()
-            dense_k = turboquant_decode_prod(
-                packed_k_idx,
-                packed_k_qjl,
-                k_gamma,
-                k_norm,
-                layer._tq_k_rot_t,
-                layer._tq_k_codebook,
-                layer._tq_k_qjl_proj,
-                int(layer.tq_k_total_bits),
-                self.head_size,
-                target_dtype,
-            )
-            _maybe_sync_for_profile(dense_k)
-            _record_tq_profile(
-                f"{profile_label}.decode_k",
-                (time.perf_counter() - t0) * 1000.0,
-                vectors=int(dense_k.numel() // max(dense_k.shape[-1], 1)),
-            )
-        else:
-            t0 = time.perf_counter()
-            dense_k = turboquant_decode_mse(
-                packed_k_idx,
-                k_norm,
-                layer._tq_k_rot_t,
-                layer._tq_k_codebook,
-                int(layer.tq_k_stage1_bits),
-                self.head_size,
-                target_dtype,
-            )
-            _maybe_sync_for_profile(dense_k)
-            _record_tq_profile(
-                f"{profile_label}.decode_k",
-                (time.perf_counter() - t0) * 1000.0,
-                vectors=int(dense_k.numel() // max(dense_k.shape[-1], 1)),
-            )
+        if custom_dequant_enabled() and not k_is_prod:
+            try:
+                return self._dequant_paged_kv_to_dense_custom_mse(
+                    kv_cache, block_table, seq_lens, target_dtype, layer,
+                    profile_label=profile_label,
+                )
+            except Exception:
+                if os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1":
+                    raise
 
-        v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
-        t0 = time.perf_counter()
-        dense_v = turboquant_decode_mse(
-            packed_v_idx,
-            v_norm,
-            layer._tq_v_rot_t,
-            layer._tq_v_codebook,
-            int(layer.tq_v_stage1_bits),
-            v_dim,
-            target_dtype,
+        return self._dequant_paged_kv_to_dense_reference(
+            kv_cache, block_table, seq_lens, target_dtype, layer,
+            profile_label=profile_label,
         )
-        _maybe_sync_for_profile(dense_v)
-        _record_tq_profile(
-            f"{profile_label}.decode_v",
-            (time.perf_counter() - t0) * 1000.0,
-            vectors=int(dense_v.numel() // max(dense_v.shape[-1], 1)),
-        )
-        _record_tq_profile(
-            f"{profile_label}.dequant_paged_kv_to_dense.total",
-            (time.perf_counter() - t_total_0) * 1000.0,
-            vectors=len(seq_lens),
-        )
-        return dense_k, dense_v
 
     def _run_dense_fia(
         self,
@@ -1854,7 +1877,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         float_key, float_value = key, value
         if key is not None and value is not None:
             encoded_k, encoded_v = self._quantize_kv_to_turboquant(key, value, layer, attn_metadata.num_actual_tokens)
-            query, _, _, _ = self.reshape_and_cache(query, encoded_k, encoded_v, kv_cache, attn_metadata, output)
+            self._reshape_and_cache_turboquant(query, encoded_k, encoded_v, kv_cache, attn_metadata)
 
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, float_key, float_value, attn_metadata, output)

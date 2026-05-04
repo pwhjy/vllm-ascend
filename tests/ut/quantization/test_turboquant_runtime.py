@@ -1,11 +1,11 @@
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.quantization.methods.turboquant_layout import get_stage1_bits
 from vllm_ascend.quantization.methods.turboquant_runtime import (
     build_qjl_projection,
     build_rotation_matrix,
     build_turboquant_codebook,
-    get_stage1_bits,
     monte_carlo_bias_eval,
     pack_bits,
     turboquant_decode_mse,

@@ -14,6 +14,7 @@ class TestAscendTurboQuantKVCacheAttentionMethod(TestBase):
         layer = nn.Module()
         layer.impl = MagicMock()
         layer.impl.head_size = 8
+        layer.impl.head_size_v = 8
         return layer
 
     def test_create_weights_sets_runtime_fields(self):

@@ -18,7 +18,10 @@ import time
 
 import torch
 
+from .turboquant_layout import get_stage1_bits
+
 _CODEBOOK_CACHE: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+_CODEBOOK_CACHE_LOCK = threading.Lock()
 
 # =========================
 # TurboQuant profiling
@@ -130,18 +133,6 @@ def _dump_tq_profile_locked():
 atexit.register(_dump_tq_profile)
 
 
-def get_stage1_bits(total_bits: int, variant: str) -> int:
-    if total_bits <= 0:
-        raise ValueError(f"total_bits must be > 0, got {total_bits}")
-    if variant == "prod":
-        if total_bits < 2:
-            raise ValueError(f"TurboQuant prod requires total_bits >= 2, got {total_bits}")
-        return total_bits - 1
-    if variant == "mse":
-        return total_bits
-    raise ValueError(f"Unsupported TurboQuant variant: {variant}")
-
-
 def _interp_from_cdf(grid: torch.Tensor, cdf: torch.Tensor, quantiles: torch.Tensor) -> torch.Tensor:
     indices = torch.searchsorted(cdf, quantiles)
     indices = torch.clamp(indices, 1, grid.numel() - 1)
@@ -226,15 +217,16 @@ def get_cached_codebook(
     max_iters: int = 96,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cache_key = (head_dim, bits, num_grid_points, max_iters)
-    cached = _CODEBOOK_CACHE.get(cache_key)
-    if cached is None:
-        cached = build_beta_lloyd_max_codebook(
-            head_dim,
-            bits,
-            num_grid_points=num_grid_points,
-            max_iters=max_iters,
-        )
-        _CODEBOOK_CACHE[cache_key] = cached
+    with _CODEBOOK_CACHE_LOCK:
+        cached = _CODEBOOK_CACHE.get(cache_key)
+        if cached is None:
+            cached = build_beta_lloyd_max_codebook(
+                head_dim,
+                bits,
+                num_grid_points=num_grid_points,
+                max_iters=max_iters,
+            )
+            _CODEBOOK_CACHE[cache_key] = cached
     return cached
 
 
@@ -395,6 +387,12 @@ def _unpack_bits_fast(flat: torch.Tensor, bits: int, dim: int) -> torch.Tensor |
         return unpacked[:, :dim].contiguous()
 
     if bits == 3:
+        # Pad to a multiple of 3 bytes so every 3-byte group decodes
+        # to exactly 8 elements.  Zero-padding is safe because the pack
+        # side fills padding elements with zero (index 0).
+        pad = (-values.shape[1]) % 3
+        if pad:
+            values = torch.nn.functional.pad(values, (0, pad))
         n_groups = values.shape[1] // 3
         unpacked = torch.empty((values.shape[0], n_groups * 8), dtype=torch.uint8, device=values.device)
         chunks = values.view(values.shape[0], n_groups, 3)
@@ -480,6 +478,21 @@ def _dequant_scalar(idx: torch.Tensor, codebook: torch.Tensor) -> torch.Tensor:
     return codebook[idx.long()]
 
 
+def _check_codebook_bits_consistency(codebook: torch.Tensor, boundary: torch.Tensor, bits: int) -> None:
+    levels = codebook.shape[0]
+    expected_levels = 1 << bits
+    if levels != expected_levels:
+        raise ValueError(
+            f"codebook has {levels} levels but bits={bits} expects {expected_levels} levels. "
+            f"Ensure the codebook is built with the same bits used for encode/decode."
+        )
+    if boundary.shape[0] != levels - 1:
+        raise ValueError(
+            f"boundary has {boundary.shape[0]} entries but codebook has {levels} levels "
+            f"(expected {levels - 1} boundaries)."
+        )
+
+
 def turboquant_encode_mse(
     x: torch.Tensor,
     rotation: torch.Tensor,
@@ -487,6 +500,7 @@ def turboquant_encode_mse(
     boundary: torch.Tensor,
     bits: int,
 ) -> dict[str, torch.Tensor]:
+    _check_codebook_bits_consistency(codebook, boundary, bits)
     num_vectors = int(x.numel() // x.shape[-1])
 
     _maybe_sync_for_profile(x, rotation, codebook, boundary)
@@ -629,6 +643,11 @@ def turboquant_decode_mse(
     dim: int,
     target_dtype: torch.dtype,
 ) -> torch.Tensor:
+    if codebook.shape[0] != (1 << bits):
+        raise ValueError(
+            f"decode_mse: codebook has {codebook.shape[0]} levels but bits={bits} "
+            f"expects {1 << bits} levels."
+        )
     num_vectors = int(norm.numel())
 
     _maybe_sync_for_profile(packed_idx, norm, rotation_t, codebook)
