@@ -797,12 +797,16 @@ at::Tensor tq_dequant_mse_paged(
     int64_t total_tokens = token_block_ids.size(0);
     int64_t num_kv_heads = packed_idx.size(2);
 
+    // CANN does not recognise DT_UINT8; the OpDef declares DT_INT8.
+    // Reinterpret the uint8 tensor as int8 (same bytes, zero copy).
+    auto packed_idx_int8 = packed_idx.view(at::kChar);
+
     at::Tensor out = at::empty(
         {total_tokens, num_kv_heads, head_dim},
         packed_idx.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(aclnnTqDequantMsePaged,
-        packed_idx, norm, token_block_ids, token_offsets,
+        packed_idx_int8, norm, token_block_ids, token_offsets,
         codebook, bits, head_dim, out);
 
     return out;

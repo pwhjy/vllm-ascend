@@ -16,7 +16,7 @@ public:
     {
         this->Input("packedIdx")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_UINT8})
+            .DataType({ge::DT_INT8})
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
