@@ -11,7 +11,11 @@
 Compares:
   1. full PyTorch reference decode_prod
   2. hybrid path: custom MSE stage1 + PyTorch QJL correction
-  3. experimental custom prod op: MSE stage1 + QJL correction in Ascend C
+  3. fast hybrid path: custom MSE stage1 + custom QJL unpack + NPU matmul
+
+Use ``--include-prod-custom`` to also run the experimental scalar prod op.
+It is correctness-only and intentionally excluded from the default benchmark
+because it is much slower for D x D QJL projection.
 """
 
 from __future__ import annotations
@@ -232,33 +236,44 @@ def _run_case(args, total_bits: int) -> None:
     ref = ref_fn()
     torch_hybrid = torch_hybrid_fn()
     hybrid = hybrid_fn()
-    custom_prod = custom_prod_fn()
+    custom_prod = custom_prod_fn() if args.include_prod_custom else None
     _sync()
 
     ref_ms = _bench(ref_fn, warmup=args.warmup, iters=args.iters)
     torch_hybrid_ms = _bench(torch_hybrid_fn, warmup=args.warmup, iters=args.iters)
     hybrid_ms = _bench(hybrid_fn, warmup=args.warmup, iters=args.iters)
-    custom_ms = _bench(custom_prod_fn, warmup=args.warmup, iters=args.iters)
+    custom_ms = (
+        _bench(custom_prod_fn, warmup=args.warmup, iters=args.iters)
+        if args.include_prod_custom else None
+    )
 
     torch_hybrid_diff = (torch_hybrid - ref).abs().max().item() if ref.numel() else 0.0
     hybrid_diff = (hybrid - ref).abs().max().item() if ref.numel() else 0.0
-    custom_diff = (custom_prod - ref).abs().max().item() if ref.numel() else 0.0
+    custom_diff = (
+        (custom_prod - ref).abs().max().item()
+        if args.include_prod_custom and custom_prod is not None and ref.numel()
+        else None
+    )
 
-    print(
+    line = (
         f"bits={total_bits} "
         f"ref={ref_ms:.3f} ms "
         f"torch_hybrid={torch_hybrid_ms:.3f} ms "
         f"hybrid={hybrid_ms:.3f} ms "
-        f"prod_custom={custom_ms:.3f} ms "
         f"torch_hybrid_speedup={ref_ms / torch_hybrid_ms:.2f}x "
         f"hybrid_speedup={ref_ms / hybrid_ms:.2f}x "
         f"hybrid_vs_torch={torch_hybrid_ms / hybrid_ms:.2f}x "
-        f"prod_speedup={ref_ms / custom_ms:.2f}x "
-        f"custom_vs_hybrid={hybrid_ms / custom_ms:.2f}x "
         f"torch_hybrid_diff={torch_hybrid_diff:.3g} "
-        f"hybrid_diff={hybrid_diff:.3g} "
-        f"prod_diff={custom_diff:.3g}"
+        f"hybrid_diff={hybrid_diff:.3g}"
     )
+    if args.include_prod_custom:
+        line += (
+            f" prod_custom={custom_ms:.3f} ms "
+            f"prod_speedup={ref_ms / custom_ms:.2f}x "
+            f"custom_vs_hybrid={hybrid_ms / custom_ms:.2f}x "
+            f"prod_diff={custom_diff:.3g}"
+        )
+    print(line)
 
 
 def main() -> None:
@@ -272,13 +287,20 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=30)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument(
+        "--include-prod-custom",
+        action="store_true",
+        help="Also benchmark the correctness-only scalar prod custom op.",
+    )
     args = parser.parse_args()
 
     if not torch.npu.is_available():
         raise RuntimeError("NPU is not available")
 
     os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT"] = "1"
-    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT"] = "1"
+    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT"] = (
+        "1" if args.include_prod_custom else "0"
+    )
     os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = "0"
     os.environ["VLLM_ASCEND_TQ_CUSTOM_STRICT"] = "1"
 
