@@ -47,6 +47,7 @@
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "tq_dequant_mse_paged/tq_dequant_mse_paged_torch_adpt.h"
+#include "tq_dequant_prod_paged/tq_dequant_prod_paged_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -808,6 +809,52 @@ at::Tensor tq_dequant_mse_paged(
     return out;
 }
 
+at::Tensor tq_dequant_prod_paged(
+    const at::Tensor& packed_idx,
+    const at::Tensor& packed_qjl,
+    const at::Tensor& gamma,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    const at::Tensor& qjl_proj,
+    int64_t total_bits,
+    int64_t head_dim)
+{
+    TORCH_CHECK(packed_idx.scalar_type() == at::kByte, "packed_idx must be uint8");
+    TORCH_CHECK(packed_qjl.scalar_type() == at::kByte, "packed_qjl must be uint8");
+    TORCH_CHECK(token_block_ids.scalar_type() == at::kInt, "token_block_ids must be int32");
+    TORCH_CHECK(token_offsets.scalar_type() == at::kInt, "token_offsets must be int32");
+    TORCH_CHECK(gamma.scalar_type() == at::kFloat, "P2 requires gamma fp32");
+    TORCH_CHECK(norm.scalar_type() == at::kFloat, "P2 requires norm fp32");
+    TORCH_CHECK(codebook.scalar_type() == at::kFloat, "P2 requires codebook fp32");
+    TORCH_CHECK(qjl_proj.scalar_type() == at::kFloat, "P2 requires qjl_proj fp32");
+    TORCH_CHECK(packed_idx.dim() == 4,
+                "packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(packed_qjl.dim() == 4,
+                "packed_qjl must be [num_blocks, block_size, num_kv_heads, qjl_cols]");
+    TORCH_CHECK(gamma.dim() == 4, "gamma must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(norm.dim() == 4, "norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(token_block_ids.dim() == 1, "token_block_ids must be 1D");
+    TORCH_CHECK(token_offsets.dim() == 1, "token_offsets must be 1D");
+    TORCH_CHECK(qjl_proj.dim() == 2, "qjl_proj must be [head_dim, head_dim]");
+    TORCH_CHECK(total_bits >= 2 && total_bits <= 5, "prod total_bits must be in [2, 5]");
+
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+
+    at::Tensor out = at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnTqDequantProdPaged,
+        packed_idx, packed_qjl, gamma, norm,
+        token_block_ids, token_offsets,
+        codebook, qjl_proj, total_bits, head_dim, out);
+
+    return out;
+}
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -1119,5 +1166,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     Tensor codebook, int bits, int head_dim) -> Tensor"
     );
     ops.impl("tq_dequant_mse_paged", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged);
+
+    ops.def(
+        "tq_dequant_prod_paged(Tensor packed_idx, Tensor packed_qjl, "
+        "                      Tensor gamma, Tensor norm, "
+        "                      Tensor token_block_ids, Tensor token_offsets, "
+        "                      Tensor codebook, Tensor qjl_proj, "
+        "                      int total_bits, int head_dim) -> Tensor"
+    );
+    ops.impl("tq_dequant_prod_paged", torch::kPrivateUse1, &vllm_ascend::tq_dequant_prod_paged);
 }
 #endif

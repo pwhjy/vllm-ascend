@@ -15,6 +15,11 @@ from vllm_ascend.ops.turboquant.dequant import (
     build_token_map_from_block_table,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
+    tq_dequant_prod_paged_reference_rot,
+    tq_dequant_prod_paged_rot,
+)
+from vllm_ascend.quantization.methods.turboquant_layout import (
+    get_stage1_bits,
 )
 from vllm_ascend.quantization.methods.turboquant_runtime import (
     apply_rotation,
@@ -76,6 +81,60 @@ def _make_random_paged_inputs(
     )
 
     return packed, norm, codebook, token_block_ids, token_offsets
+
+
+def _make_random_prod_paged_inputs(
+    total_bits: int,
+    head_dim: int,
+    num_blocks: int = 4,
+    block_size: int = 8,
+    num_kv_heads: int = 2,
+    total_tokens: int = 12,
+    device: str = "cpu",
+):
+    stage1_bits = get_stage1_bits(total_bits, "prod")
+    levels = 1 << stage1_bits
+    idx = torch.randint(
+        0, levels,
+        (num_blocks, block_size, num_kv_heads, head_dim),
+        dtype=torch.uint8, device=device,
+    )
+    packed_idx = pack_bits(idx, bits=stage1_bits).contiguous()
+
+    qjl = torch.randint(
+        0, 2,
+        (num_blocks, block_size, num_kv_heads, head_dim),
+        dtype=torch.uint8, device=device,
+    )
+    packed_qjl = pack_bits(qjl, bits=1).contiguous()
+
+    gamma = torch.rand(
+        (num_blocks, block_size, num_kv_heads, 1),
+        dtype=torch.float32, device=device,
+    )
+    norm = torch.rand(
+        (num_blocks, block_size, num_kv_heads, 1),
+        dtype=torch.float32, device=device,
+    )
+
+    codebook, _ = build_turboquant_codebook(
+        head_dim, stage1_bits, device, torch.float32,
+    )
+    qjl_proj = build_qjl_projection(head_dim, 2026, device, torch.float32)
+
+    token_block_ids = torch.randint(
+        0, num_blocks,
+        (total_tokens,), dtype=torch.int32, device=device,
+    )
+    token_offsets = torch.randint(
+        0, block_size,
+        (total_tokens,), dtype=torch.int32, device=device,
+    )
+
+    return (
+        packed_idx, packed_qjl, gamma, norm,
+        codebook, qjl_proj, token_block_ids, token_offsets,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +371,125 @@ class TestTqDequantMsePagedRot:
         out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
 
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("total_bits", [2, 3, 4])
+    @pytest.mark.parametrize("head_dim", [16, 64])
+    def test_prod_paged_reference_rot_matches_decode_prod(self, total_bits, head_dim):
+        packed_idx, packed_qjl, gamma, norm, codebook, qjl_proj, \
+            token_block_ids, token_offsets = _make_random_prod_paged_inputs(
+                total_bits, head_dim,
+            )
+        rotation = build_rotation_matrix(head_dim, 99, "cpu", torch.float32)
+        rotation_t = rotation.transpose(0, 1).contiguous()
+
+        def _gather(cache):
+            return cache[token_block_ids.long(), token_offsets.long()]
+
+        ref = turboquant_decode_prod(
+            _gather(packed_idx),
+            _gather(packed_qjl),
+            _gather(gamma),
+            _gather(norm),
+            rotation_t,
+            codebook,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            torch.float32,
+        )
+        out_rot = tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+        out = apply_rotation(out_rot, rotation_t).contiguous()
+
+        assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("total_bits", [2, 3, 4])
+    def test_prod_paged_rot_matches_reference(self, total_bits):
+        head_dim = 64
+        packed_idx, packed_qjl, gamma, norm, codebook, qjl_proj, \
+            token_block_ids, token_offsets = _make_random_prod_paged_inputs(
+                total_bits, head_dim,
+            )
+
+        ref = tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_prod_paged_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+
+        assert torch.allclose(out, ref, atol=1e-6, rtol=0)
+
+    def test_prod_cpu_tensors_fallback_when_custom_env_enabled(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT", "1")
+
+        total_bits = 3
+        head_dim = 64
+        packed_idx, packed_qjl, gamma, norm, codebook, qjl_proj, \
+            token_block_ids, token_offsets = _make_random_prod_paged_inputs(
+                total_bits, head_dim,
+            )
+
+        ref = tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_prod_paged_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+
+        assert torch.allclose(out, ref, atol=1e-6, rtol=0)
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    @pytest.mark.parametrize("total_bits", [2, 3, 4])
+    def test_prod_custom_op_matches_reference_on_npu(self, monkeypatch, total_bits):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
+
+        head_dim = 64
+        packed_idx, packed_qjl, gamma, norm, codebook, qjl_proj, \
+            token_block_ids, token_offsets = _make_random_prod_paged_inputs(
+                total_bits,
+                head_dim,
+                num_blocks=4,
+                block_size=4,
+                total_tokens=8,
+                device="npu",
+            )
+
+        ref = tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_prod_paged_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, torch.float32,
+        )
+
+        torch.npu.synchronize()
+        assert out.shape == ref.shape
+        assert torch.allclose(out, ref, atol=1e-3, rtol=0)
 
 
 # ---------------------------------------------------------------------------

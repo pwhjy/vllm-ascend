@@ -594,6 +594,26 @@ at::Tensor tq_dequant_mse_paged_meta(
         packed_idx.options().dtype(at::kFloat).device(at::kMeta));
 }
 
+at::Tensor tq_dequant_prod_paged_meta(
+    const at::Tensor& packed_idx,
+    const at::Tensor& packed_qjl,
+    const at::Tensor& gamma,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    const at::Tensor& qjl_proj,
+    int64_t total_bits,
+    int64_t head_dim)
+{
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+
+    return at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(at::kFloat).device(at::kMeta));
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -699,6 +719,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // TurboQuant MSE paged dequant
     ops.impl("tq_dequant_mse_paged", &vllm_ascend::meta::tq_dequant_mse_paged_meta);
+    // TurboQuant prod paged dequant
+    ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
 }
 }
 #endif

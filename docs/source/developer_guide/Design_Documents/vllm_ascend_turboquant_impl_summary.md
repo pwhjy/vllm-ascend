@@ -2,6 +2,15 @@
 
 版本：2026-05-04
 
+## 0. 当前 P2 增量状态
+
+截至 2026-05-05，P2 已经从纯 Python reference 路径推进到 aclnn 自定义算子路径：
+
+- `tq_dequant_mse_paged` 已接入 `torch.ops._C_ascend`，用于 `V=mse` 和 `K=prod` 的 stage1 MSE dequant。
+- `K=prod` 当前默认仍是 hybrid 路径：stage1 MSE 走 custom op，QJL correction 走 PyTorch。
+- `tq_dequant_prod_paged` 已新增为实验路径，受 `VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT=1` 控制，用于验证 QJL correction 下沉到 Ascend C 后的收益。
+- 当前仍未进入 P3/P4 的 compressed-domain attention，最终 attention 仍调用现有 FIA。
+
 ## 1. 本次实现的范围
 
 本次实现按 `vllm_ascend_turboquant_dev_doc.md` 的 MVP 路线落地，目标是先把 `v1` 上的 **TurboQuant KV cache write/read/dequant** 路径接通，优先保证数值正确，不追求第一版性能最优。
@@ -17,7 +26,7 @@
 没有覆盖：
 
 - 压缩域直接 attention
-- 自定义 CANN 融合算子
+- 完整 fused compressed-domain attention
 - 完整的 2.5-bit / 3.5-bit outlier 分裂策略
 - 上游 vLLM 的 `KVQuantMode` / `KVCacheSpec` 正式扩展
 
@@ -28,6 +37,9 @@
 - `vllm_ascend/quantization/methods/turboquant_layout.py`
 - `vllm_ascend/quantization/methods/turboquant_runtime.py`
 - `vllm_ascend/quantization/methods/kv_turboquant.py`
+- `vllm_ascend/ops/turboquant/dequant.py`
+- `csrc/tq_dequant_mse_paged/`
+- `csrc/tq_dequant_prod_paged/`
 - `tests/ut/quantization/test_turboquant_runtime.py`
 - `tests/ut/quantization/test_kv_turboquant.py`
 

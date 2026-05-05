@@ -23,11 +23,16 @@ Output convention (P2):
 
 from __future__ import annotations
 
+import math
 import os
 
 import torch
 
+from vllm_ascend.quantization.methods.turboquant_layout import (
+    get_stage1_bits,
+)
 from vllm_ascend.quantization.methods.turboquant_runtime import (
+    apply_rotation,
     unpack_bits,
 )
 
@@ -38,6 +43,13 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 
 def custom_dequant_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "0") == "1"
+
+
+def prod_custom_dequant_enabled() -> bool:
+    return (
+        custom_dequant_enabled()
+        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT", "0") == "1"
+    )
 
 
 def debug_compare_enabled() -> bool:
@@ -55,7 +67,7 @@ def _is_npu_tensor(tensor: torch.Tensor) -> bool:
     }
 
 
-def _custom_op_available(*tensors: torch.Tensor) -> bool:
+def _custom_op_available(op_name: str, *tensors: torch.Tensor) -> bool:
     if not custom_dequant_enabled():
         return False
     if tensors and not all(_is_npu_tensor(tensor) for tensor in tensors):
@@ -68,7 +80,7 @@ def _custom_op_available(*tensors: torch.Tensor) -> bool:
         return False
     return (
         hasattr(torch.ops, "_C_ascend")
-        and hasattr(torch.ops._C_ascend, "tq_dequant_mse_paged")
+        and hasattr(torch.ops._C_ascend, op_name)
     )
 
 
@@ -169,6 +181,58 @@ def tq_dequant_mse_paged_reference_rot(
     return dense_rot.contiguous()
 
 
+def tq_dequant_prod_paged_reference_rot(
+    packed_idx: torch.Tensor,
+    packed_qjl: torch.Tensor,
+    gamma: torch.Tensor,
+    norm: torch.Tensor,
+    token_block_ids: torch.Tensor,
+    token_offsets: torch.Tensor,
+    codebook: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+    head_dim: int,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Reference: paged K=prod dequant into rotated space.
+
+    This returns ``(stage1_mse + qjl_correction) * norm`` before the final
+    inverse rotation. The caller applies ``rotation_t`` separately.
+    """
+    total_tokens = int(token_block_ids.numel())
+    num_kv_heads = int(packed_idx.shape[2])
+
+    if total_tokens == 0:
+        return torch.empty(
+            (0, num_kv_heads, head_dim),
+            dtype=target_dtype,
+            device=packed_idx.device,
+        )
+
+    stage1_bits = get_stage1_bits(total_bits, "prod")
+    gathered_idx = packed_idx[token_block_ids.long(), token_offsets.long()]
+    gathered_qjl = packed_qjl[token_block_ids.long(), token_offsets.long()]
+    gathered_gamma = gamma[token_block_ids.long(), token_offsets.long()]
+    gathered_norm = norm[token_block_ids.long(), token_offsets.long()]
+
+    idx = unpack_bits(gathered_idx, bits=stage1_bits, dim=head_dim)
+    qjl = unpack_bits(gathered_qjl, bits=1, dim=head_dim).to(target_dtype)
+    qjl = qjl * 2.0 - 1.0
+
+    x_mse_hat_rot = codebook[idx.long()].to(target_dtype)
+    correction = math.sqrt(math.pi / 2.0) / head_dim
+    x_qjl_hat_rot = (
+        correction
+        * gathered_gamma.to(target_dtype)
+        * apply_rotation(qjl, qjl_proj.to(target_dtype))
+    )
+    dense_rot = (
+        x_mse_hat_rot + x_qjl_hat_rot
+    ) * gathered_norm.to(target_dtype)
+
+    return dense_rot.contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Unified dispatch entry points
 # ---------------------------------------------------------------------------
@@ -199,6 +263,7 @@ def tq_dequant_mse_paged_rot(
         )
 
     if not _custom_op_available(
+        "tq_dequant_mse_paged",
         packed_idx,
         norm,
         token_block_ids,
@@ -232,6 +297,83 @@ def tq_dequant_mse_paged_rot(
         if max_diff > 1e-3:
             raise RuntimeError(
                 f"TurboQuant custom dequant mismatch: max_diff={max_diff}"
+            )
+
+    return out.contiguous()
+
+
+def tq_dequant_prod_paged_rot(
+    packed_idx: torch.Tensor,
+    packed_qjl: torch.Tensor,
+    gamma: torch.Tensor,
+    norm: torch.Tensor,
+    token_block_ids: torch.Tensor,
+    token_offsets: torch.Tensor,
+    codebook: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+    head_dim: int,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequant prod-compressed K from paged cache to rotated space.
+
+    The first custom op version is guarded by
+    ``VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT`` so the established MSE path
+    stays unchanged while this heavier QJL kernel is benchmarked.
+    """
+    if head_dim < 16 or not prod_custom_dequant_enabled():
+        return tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, target_dtype,
+        )
+
+    if not _custom_op_available(
+        "tq_dequant_prod_paged",
+        packed_idx,
+        packed_qjl,
+        gamma,
+        norm,
+        token_block_ids,
+        token_offsets,
+        codebook,
+        qjl_proj,
+    ):
+        return tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, target_dtype,
+        )
+
+    out = torch.ops._C_ascend.tq_dequant_prod_paged(
+        packed_idx.contiguous(),
+        packed_qjl.contiguous(),
+        gamma.contiguous(),
+        norm.contiguous(),
+        token_block_ids.contiguous(),
+        token_offsets.contiguous(),
+        codebook.contiguous(),
+        qjl_proj.contiguous(),
+        int(total_bits),
+        int(head_dim),
+    )
+
+    out = out.to(target_dtype)
+
+    if debug_compare_enabled():
+        ref = tq_dequant_prod_paged_reference_rot(
+            packed_idx, packed_qjl, gamma, norm,
+            token_block_ids, token_offsets,
+            codebook, qjl_proj,
+            total_bits, head_dim, target_dtype,
+        )
+        torch.npu.synchronize()
+        max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
+        if max_diff > 1e-3:
+            raise RuntimeError(
+                f"TurboQuant custom prod dequant mismatch: max_diff={max_diff}"
             )
 
     return out.contiguous()
