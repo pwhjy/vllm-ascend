@@ -377,13 +377,11 @@ def _run_case(args) -> None:
 
     total_tokens = args.batch_size * args.seq_len
     mode = "decode+fia" if args.include_fia else "dequant"
-    stream_overlap = args.stream_overlap or os.getenv("VLLM_ASCEND_TQ_STREAM_OVERLAP", "0") == "1"
     print(
         f"mode={mode} k_bits={args.k_bits} v_bits={args.v_bits} "
         f"k_variant={args.k_variant} batch={args.batch_size} "
         f"seq_len={args.seq_len} tokens={total_tokens} "
-        f"heads={args.num_heads}/{args.num_kv_heads} head_dim={args.head_dim} "
-        f"stream_overlap={stream_overlap}"
+        f"heads={args.num_heads}/{args.num_kv_heads} head_dim={args.head_dim}"
     )
     print(
         f"timing_no_profile: reference={ref_ms:.3f} ms "
@@ -450,11 +448,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--profile-dir", default="/tmp/turboquant_decode_profile")
     parser.add_argument(
-        "--stream-overlap",
-        action="store_true",
-        help="Enable experimental K/V dequant stream overlap for no-profile timing.",
-    )
-    parser.add_argument(
         "--include-fia",
         action="store_true",
         help="Also run dense FIA after dequant for a fuller decode path.",
@@ -465,9 +458,6 @@ def main() -> None:
         raise ValueError("num_heads must be divisible by num_kv_heads")
     if not torch.npu.is_available():
         raise RuntimeError("NPU is not available")
-
-    if args.stream_overlap:
-        os.environ["VLLM_ASCEND_TQ_STREAM_OVERLAP"] = "1"
 
     try:
         from vllm_ascend.utils import enable_custom_op

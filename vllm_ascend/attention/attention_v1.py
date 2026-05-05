@@ -81,13 +81,6 @@ from vllm_ascend.utils import weak_ref_tensors
 SWA_INT_MAX = 2147483647
 
 
-def _tq_stream_overlap_enabled() -> bool:
-    return (
-        os.getenv("VLLM_ASCEND_TQ_STREAM_OVERLAP", "0") == "1"
-        and os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") != "1"
-    )
-
-
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -1814,13 +1807,6 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         return dense_k
 
-    def _get_tq_dequant_streams(self):
-        streams = getattr(self, "_tq_dequant_streams", None)
-        if streams is None:
-            streams = (torch.npu.Stream(), torch.npu.Stream())
-            self._tq_dequant_streams = streams
-        return streams
-
     def _dequant_paged_kv_to_dense_custom_mse(
         self,
         kv_cache: dict[str, torch.Tensor],
@@ -1854,60 +1840,41 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
 
         # V (always MSE)
         v_dim = int(getattr(layer, "tq_head_size_v", self.head_size))
-
-        def _dequant_v():
-            return self._dequant_mse_paged_cache_custom(
-                kv_cache["v_idx"],
-                kv_cache["v_norm"],
-                token_block_ids,
-                token_offsets,
-                layer._tq_v_codebook,
-                layer._tq_v_rot_t,
-                int(layer.tq_v_stage1_bits),
-                v_dim,
-                target_dtype,
-                profile_label=f"{profile_label}.custom_mse.v",
-            )
+        dense_v = self._dequant_mse_paged_cache_custom(
+            kv_cache["v_idx"],
+            kv_cache["v_norm"],
+            token_block_ids,
+            token_offsets,
+            layer._tq_v_codebook,
+            layer._tq_v_rot_t,
+            int(layer.tq_v_stage1_bits),
+            v_dim,
+            target_dtype,
+            profile_label=f"{profile_label}.custom_mse.v",
+        )
 
         if getattr(layer, "tq_k_variant", "prod") == "mse":
-            def _dequant_k():
-                return self._dequant_mse_paged_cache_custom(
-                    kv_cache["k_idx"],
-                    kv_cache["k_norm"],
-                    token_block_ids,
-                    token_offsets,
-                    layer._tq_k_codebook,
-                    layer._tq_k_rot_t,
-                    int(layer.tq_k_stage1_bits),
-                    self.head_size,
-                    target_dtype,
-                    profile_label=f"{profile_label}.custom_mse.k",
-                )
+            dense_k = self._dequant_mse_paged_cache_custom(
+                kv_cache["k_idx"],
+                kv_cache["k_norm"],
+                token_block_ids,
+                token_offsets,
+                layer._tq_k_codebook,
+                layer._tq_k_rot_t,
+                int(layer.tq_k_stage1_bits),
+                self.head_size,
+                target_dtype,
+                profile_label=f"{profile_label}.custom_mse.k",
+            )
         else:
-            def _dequant_k():
-                return self._dequant_prod_paged_cache_hybrid(
-                    kv_cache,
-                    token_block_ids,
-                    token_offsets,
-                    target_dtype,
-                    layer,
-                    profile_label=f"{profile_label}.hybrid_prod.k",
-                )
-
-        if _tq_stream_overlap_enabled():
-            k_stream, v_stream = self._get_tq_dequant_streams()
-            current_stream = torch.npu.current_stream()
-            k_stream.wait_stream(current_stream)
-            v_stream.wait_stream(current_stream)
-            with torch.npu.stream(k_stream):
-                dense_k = _dequant_k()
-            with torch.npu.stream(v_stream):
-                dense_v = _dequant_v()
-            current_stream.wait_stream(k_stream)
-            current_stream.wait_stream(v_stream)
-        else:
-            dense_v = _dequant_v()
-            dense_k = _dequant_k()
+            dense_k = self._dequant_prod_paged_cache_hybrid(
+                kv_cache,
+                token_block_ids,
+                token_offsets,
+                target_dtype,
+                layer,
+                profile_label=f"{profile_label}.hybrid_prod.k",
+            )
 
         _record_tq_profile(
             f"{profile_label}.custom_mse.total",
