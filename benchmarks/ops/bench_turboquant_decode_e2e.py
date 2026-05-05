@@ -213,7 +213,7 @@ def _run_decode_case(
     if not include_fia:
         tq_runtime._maybe_sync_for_profile(dense_k, dense_v)
         tq_runtime._record_tq_profile(
-            f"{label}.turboquant_decode.total",
+            f"{label}.turboquant_decode.e2e_total",
             (time.perf_counter() - t0) * 1000.0,
             vectors=len(seq_lens),
         )
@@ -240,7 +240,7 @@ def _run_decode_case(
     )
     tq_runtime._maybe_sync_for_profile(out)
     tq_runtime._record_tq_profile(
-        f"{label}.turboquant_decode.total",
+        f"{label}.turboquant_decode.e2e_total",
         (time.perf_counter() - t0) * 1000.0,
         vectors=len(seq_lens),
     )
@@ -404,6 +404,7 @@ def _run_case(args) -> None:
         "turboquant_decode_mse.total",
         "reference.turboquant_decode.run_dense_fia",
         "reference.turboquant_decode.total",
+        "reference.turboquant_decode.e2e_total",
     ]
     hybrid_rows = [
         "hybrid.turboquant_decode.hybrid_prod.k",
@@ -411,7 +412,7 @@ def _run_case(args) -> None:
         "hybrid.turboquant_decode.custom_mse.v",
         "hybrid.turboquant_decode.custom_mse.total",
         "hybrid.turboquant_decode.run_dense_fia",
-        "hybrid.turboquant_decode.total",
+        "hybrid.turboquant_decode.e2e_total",
     ]
     _print_profile_rows("reference", ref_stats, ref_rows)
     _print_profile_rows("hybrid", custom_stats, hybrid_rows)
