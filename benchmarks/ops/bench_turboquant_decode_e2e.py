@@ -196,6 +196,7 @@ def _run_decode_case(
     seq_lens: list[int],
     query: torch.Tensor,
     layer: SimpleNamespace,
+    target_dtype: torch.dtype,
     *,
     label: str,
     include_fia: bool,
@@ -206,7 +207,7 @@ def _run_decode_case(
         kv_cache,
         block_table,
         seq_lens,
-        torch.float32,
+        target_dtype,
         layer,
         profile_label=f"{label}.turboquant_decode",
     )
@@ -282,6 +283,11 @@ def _run_mode(
     _set_profile_mode(enable_profile, profile_dir)
     if enable_profile:
         _reset_profile_stats()
+    target_dtype = (
+        query.dtype
+        if args.dequant_dtype == "query"
+        else _dtype_from_name(args.dequant_dtype)
+    )
 
     def fn():
         return _run_decode_case(
@@ -291,6 +297,7 @@ def _run_mode(
             seq_lens,
             query,
             layer,
+            target_dtype,
             label=mode,
             include_fia=args.include_fia,
         )
@@ -341,16 +348,23 @@ def _run_case(args) -> None:
     impl = _make_impl(args)
     layer = _make_layer(args, device)
     kv_cache, block_table, seq_lens, query = _make_inputs(args, device)
+    target_dtype = (
+        query.dtype
+        if args.dequant_dtype == "query"
+        else _dtype_from_name(args.dequant_dtype)
+    )
 
     _set_profile_mode(False, args.profile_dir)
     _set_custom_mode(False)
     ref_out = _run_decode_case(
         impl, kv_cache, block_table, seq_lens, query, layer,
+        target_dtype,
         label="warm_reference", include_fia=args.include_fia,
     )
     _set_custom_mode(True)
     custom_out = _run_decode_case(
         impl, kv_cache, block_table, seq_lens, query, layer,
+        target_dtype,
         label="warm_hybrid", include_fia=args.include_fia,
     )
     _sync()
@@ -381,7 +395,8 @@ def _run_case(args) -> None:
         f"mode={mode} k_bits={args.k_bits} v_bits={args.v_bits} "
         f"k_variant={args.k_variant} batch={args.batch_size} "
         f"seq_len={args.seq_len} tokens={total_tokens} "
-        f"heads={args.num_heads}/{args.num_kv_heads} head_dim={args.head_dim}"
+        f"heads={args.num_heads}/{args.num_kv_heads} head_dim={args.head_dim} "
+        f"query_dtype={args.query_dtype} dequant_dtype={target_dtype}"
     )
     print(
         f"timing_no_profile: reference={ref_ms:.3f} ms "
@@ -443,6 +458,12 @@ def main() -> None:
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--query-dtype", choices=["float32", "float16", "bfloat16"], default="float16")
+    parser.add_argument(
+        "--dequant-dtype",
+        choices=["query", "float32", "float16", "bfloat16"],
+        default="query",
+        help="Dense K/V dtype produced by dequant. 'query' matches production decode.",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--seed", type=int, default=2026)
@@ -469,7 +490,10 @@ def main() -> None:
     has_mse = hasattr(torch.ops, "_C_ascend") and hasattr(
         torch.ops._C_ascend, "tq_dequant_mse_paged",
     )
-    print(f"custom op mse={has_mse}")
+    has_mse_out = hasattr(torch.ops, "_C_ascend") and hasattr(
+        torch.ops._C_ascend, "tq_dequant_mse_paged_out",
+    )
+    print(f"custom op mse={has_mse} mse_out={has_mse_out}")
     _run_case(args)
 
 

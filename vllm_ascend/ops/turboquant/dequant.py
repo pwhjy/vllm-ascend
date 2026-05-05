@@ -63,6 +63,17 @@ def token_map_cache_size() -> int:
     return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
 
 
+_TQ_CUSTOM_OUT_DTYPE_CODES = {
+    torch.float32: 0,
+    torch.float16: 1,
+    torch.bfloat16: 2,
+}
+
+
+def _custom_out_dtype_code(dtype: torch.dtype) -> int | None:
+    return _TQ_CUSTOM_OUT_DTYPE_CODES.get(dtype)
+
+
 # ---------------------------------------------------------------------------
 # Custom op availability (aclnn, via torch.ops._C_ascend)
 # ---------------------------------------------------------------------------
@@ -341,17 +352,38 @@ def tq_dequant_mse_paged_rot(
             codebook, bits, head_dim, target_dtype,
         )
 
-    out = torch.ops._C_ascend.tq_dequant_mse_paged(
-        packed_idx.contiguous(),
-        norm.contiguous(),
-        token_block_ids.contiguous(),
-        token_offsets.contiguous(),
-        codebook.contiguous(),
-        int(bits),
-        int(head_dim),
-    )
-
-    out = out.to(target_dtype)
+    out_dtype_code = _custom_out_dtype_code(target_dtype)
+    if (
+        out_dtype_code is not None
+        and _custom_op_available(
+            "tq_dequant_mse_paged_out",
+            packed_idx,
+            norm,
+            token_block_ids,
+            token_offsets,
+            codebook,
+        )
+    ):
+        out = torch.ops._C_ascend.tq_dequant_mse_paged_out(
+            packed_idx.contiguous(),
+            norm.contiguous(),
+            token_block_ids.contiguous(),
+            token_offsets.contiguous(),
+            codebook.contiguous(),
+            int(bits),
+            int(head_dim),
+            int(out_dtype_code),
+        )
+    else:
+        out = torch.ops._C_ascend.tq_dequant_mse_paged(
+            packed_idx.contiguous(),
+            norm.contiguous(),
+            token_block_ids.contiguous(),
+            token_offsets.contiguous(),
+            codebook.contiguous(),
+            int(bits),
+            int(head_dim),
+        ).to(target_dtype)
 
     if debug_compare_enabled():
         ref = tq_dequant_mse_paged_reference_rot(

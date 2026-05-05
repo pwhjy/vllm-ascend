@@ -236,6 +236,31 @@ class TestTqDequantMsePagedRot:
             f"Mismatch for bits={bits} head_dim={head_dim}"
 
     @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_custom_op_writes_target_dtype_on_npu(self, monkeypatch, dtype):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
+
+        bits = 3
+        head_dim = 128
+        packed, norm, codebook, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim, device="npu")
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, dtype,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, dtype,
+        )
+
+        torch.npu.synchronize()
+        assert out.dtype == dtype
+        assert out.shape == ref.shape
+        assert torch.allclose(out.float(), ref.float(), atol=1e-3, rtol=0)
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
     @pytest.mark.parametrize("bits", [1, 2, 3, 4])
     def test_tiny_head_dim_uses_reference_on_npu(self, monkeypatch, bits):
         monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
