@@ -30,6 +30,8 @@ static ge::graphStatus TqDequantProdPagedTilingFunc(gert::TilingContext* context
     uint32_t totalBits = static_cast<uint32_t>(totalBitsPtr != nullptr ? *totalBitsPtr : 0);
     uint32_t stage1Bits = totalBits > 0 ? totalBits - 1 : 0;
     uint32_t headDim = static_cast<uint32_t>(headDimPtr != nullptr ? *headDimPtr : 0);
+    float qjlCorrection = headDim > 0 ?
+        1.2533141373155003F / static_cast<float>(headDim) : 0.0F;
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
@@ -50,6 +52,7 @@ static ge::graphStatus TqDequantProdPagedTilingFunc(gert::TilingContext* context
     tiling.set_qjlCols(qjlCols);
     tiling.set_totalBits(totalBits);
     tiling.set_stage1Bits(stage1Bits);
+    tiling.set_qjlCorrection(qjlCorrection);
     tiling.set_numCore(coreNum);
 
     context->SetBlockDim(coreNum);

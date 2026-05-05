@@ -18,6 +18,7 @@ BEGIN_TILING_DATA_DEF(TqDequantProdPagedTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, qjlCols);
     TILING_DATA_FIELD_DEF(uint32_t, totalBits);
     TILING_DATA_FIELD_DEF(uint32_t, stage1Bits);
+    TILING_DATA_FIELD_DEF(float, qjlCorrection);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
 END_TILING_DATA_DEF;
 

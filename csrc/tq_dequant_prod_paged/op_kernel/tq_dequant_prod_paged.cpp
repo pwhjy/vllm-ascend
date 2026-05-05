@@ -19,6 +19,7 @@ struct TqDequantProdPagedTilingData {
     uint32_t qjlCols;
     uint32_t totalBits;
     uint32_t stage1Bits;
+    float qjlCorrection;
     uint32_t numCore;
 };
 
@@ -56,6 +57,7 @@ public:
         qjlCols_ = tiling->qjlCols;
         totalBits_ = tiling->totalBits;
         stage1Bits_ = tiling->stage1Bits;
+        qjlCorrection_ = tiling->qjlCorrection;
         numCore_ = tiling->numCore;
     }
 
@@ -183,7 +185,7 @@ public:
 
         float gamma = gammaGm_.GetValue(cacheTokenHead);
         float norm = normGm_.GetValue(cacheTokenHead);
-        float qjlScale = (1.2533141373155003F / static_cast<float>(headDim_)) * gamma;
+        float qjlScale = qjlCorrection_ * gamma;
 
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractIndex(packedIdxBase, d);
@@ -241,6 +243,7 @@ private:
     uint32_t qjlCols_{0};
     uint32_t totalBits_{0};
     uint32_t stage1Bits_{0};
+    float qjlCorrection_{0.0F};
     uint32_t numCore_{0};
 
     float cb0_{0.0F};
