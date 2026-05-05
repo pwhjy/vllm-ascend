@@ -13,6 +13,7 @@ import torch
 
 from vllm_ascend.ops.turboquant.dequant import (
     build_token_map_from_block_table,
+    cached_token_map_from_block_table,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
     tq_dequant_prod_paged_reference_rot,
@@ -579,3 +580,39 @@ class TestBuildTokenMapFromBlockTable:
         )
         assert ids.tolist() == expected_ids
         assert offsets.tolist() == expected_offsets
+
+    def test_cached_token_map_reuses_same_block_table(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")
+        block_table = torch.tensor([[5, 7, 0]], dtype=torch.int32)
+        seq_lens = [6]
+        block_size = 4
+
+        ids1, offsets1 = cached_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+        ids2, offsets2 = cached_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+
+        assert ids1.data_ptr() == ids2.data_ptr()
+        assert offsets1.data_ptr() == offsets2.data_ptr()
+        assert ids2.tolist() == [5, 5, 5, 5, 7, 7]
+        assert offsets2.tolist() == [0, 1, 2, 3, 0, 1]
+
+    def test_cached_token_map_invalidates_on_block_table_update(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")
+        block_table = torch.tensor([[5, 7, 0]], dtype=torch.int32)
+        seq_lens = [6]
+        block_size = 4
+
+        ids1, _ = cached_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+        block_table[0, 0] = 9
+        ids2, offsets2 = cached_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+
+        assert ids1.data_ptr() != ids2.data_ptr()
+        assert ids2.tolist() == [9, 9, 9, 9, 7, 7]
+        assert offsets2.tolist() == [0, 1, 2, 3, 0, 1]

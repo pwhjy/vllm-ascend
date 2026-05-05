@@ -23,8 +23,11 @@ Output convention (P2):
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import math
 import os
+import threading
+import weakref
 
 import torch
 
@@ -54,6 +57,10 @@ def prod_custom_dequant_enabled() -> bool:
 
 def debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
+
+
+def token_map_cache_size() -> int:
+    return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +144,65 @@ def build_token_map_from_block_table(
     token_block_ids = physical_blocks[valid].contiguous().to(torch.int32)
     token_offsets = offsets.unsqueeze(0).expand(batch, max_len)[valid].contiguous().to(torch.int32)
     return token_block_ids, token_offsets
+
+
+_TOKEN_MAP_CACHE_LOCK = threading.Lock()
+_TOKEN_MAP_CACHE: OrderedDict[
+    tuple,
+    tuple[weakref.ReferenceType[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+] = OrderedDict()
+
+
+def _seq_lens_cache_key(seq_lens: list[int] | torch.Tensor) -> tuple[int, ...]:
+    if isinstance(seq_lens, list):
+        return tuple(int(seq_len) for seq_len in seq_lens)
+    return tuple(int(seq_len) for seq_len in seq_lens.detach().cpu().tolist())
+
+
+def _token_map_cache_key(
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    block_size: int,
+) -> tuple:
+    return (
+        str(block_table.device),
+        int(block_table.data_ptr()),
+        tuple(int(dim) for dim in block_table.shape),
+        tuple(int(stride) for stride in block_table.stride()),
+        int(block_table.storage_offset()),
+        int(getattr(block_table, "_version", 0)),
+        str(block_table.dtype),
+        int(block_size),
+        _seq_lens_cache_key(seq_lens),
+    )
+
+
+def cached_token_map_from_block_table(
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cache_size = token_map_cache_size()
+    if cache_size == 0:
+        return build_token_map_from_block_table(block_table, seq_lens, block_size)
+
+    key = _token_map_cache_key(block_table, seq_lens, block_size)
+    with _TOKEN_MAP_CACHE_LOCK:
+        cached = _TOKEN_MAP_CACHE.get(key)
+        if cached is not None:
+            cached_block_table, cached_token_map = cached
+            if cached_block_table() is block_table:
+                _TOKEN_MAP_CACHE.move_to_end(key)
+                return cached_token_map
+            del _TOKEN_MAP_CACHE[key]
+
+    token_map = build_token_map_from_block_table(block_table, seq_lens, block_size)
+    with _TOKEN_MAP_CACHE_LOCK:
+        _TOKEN_MAP_CACHE[key] = (weakref.ref(block_table), token_map)
+        _TOKEN_MAP_CACHE.move_to_end(key)
+        while len(_TOKEN_MAP_CACHE) > cache_size:
+            _TOKEN_MAP_CACHE.popitem(last=False)
+    return token_map
 
 
 # ---------------------------------------------------------------------------

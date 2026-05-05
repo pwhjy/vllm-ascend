@@ -60,7 +60,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.ops.turboquant.dequant import (
-    build_token_map_from_block_table,
+    cached_token_map_from_block_table,
     custom_dequant_enabled,
     debug_compare_enabled,
     tq_dequant_mse_paged_rot,
@@ -1824,7 +1824,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         cache_block_size = kv_cache["v_idx"].shape[1]
 
         t_map = time.perf_counter()
-        token_block_ids, token_offsets = build_token_map_from_block_table(
+        token_block_ids, token_offsets = cached_token_map_from_block_table(
             block_table=block_table, seq_lens=seq_lens, block_size=cache_block_size,
         )
         _maybe_sync_for_profile(token_block_ids, token_offsets)
