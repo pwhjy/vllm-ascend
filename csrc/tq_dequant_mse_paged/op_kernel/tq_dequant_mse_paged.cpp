@@ -94,52 +94,76 @@ public:
         }
     }
 
-    __aicore__ inline float LookupCodebook(uint32_t idx)
+    __aicore__ inline void ScaleCodebook(float scale)
+    {
+        scb0_ = cb0_ * scale;
+        scb1_ = cb1_ * scale;
+        if (bits_ >= 2) {
+            scb2_ = cb2_ * scale;
+            scb3_ = cb3_ * scale;
+        }
+        if (bits_ >= 3) {
+            scb4_ = cb4_ * scale;
+            scb5_ = cb5_ * scale;
+            scb6_ = cb6_ * scale;
+            scb7_ = cb7_ * scale;
+        }
+        if (bits_ >= 4) {
+            scb8_ = cb8_ * scale;
+            scb9_ = cb9_ * scale;
+            scb10_ = cb10_ * scale;
+            scb11_ = cb11_ * scale;
+            scb12_ = cb12_ * scale;
+            scb13_ = cb13_ * scale;
+            scb14_ = cb14_ * scale;
+            scb15_ = cb15_ * scale;
+        }
+    }
+
+    __aicore__ inline float LookupScaledCodebook(uint32_t idx)
     {
         switch (idx) {
             case 0U:
-                return cb0_;
+                return scb0_;
             case 1U:
-                return cb1_;
+                return scb1_;
             case 2U:
-                return cb2_;
+                return scb2_;
             case 3U:
-                return cb3_;
+                return scb3_;
             case 4U:
-                return cb4_;
+                return scb4_;
             case 5U:
-                return cb5_;
+                return scb5_;
             case 6U:
-                return cb6_;
+                return scb6_;
             case 7U:
-                return cb7_;
+                return scb7_;
             case 8U:
-                return cb8_;
+                return scb8_;
             case 9U:
-                return cb9_;
+                return scb9_;
             case 10U:
-                return cb10_;
+                return scb10_;
             case 11U:
-                return cb11_;
+                return scb11_;
             case 12U:
-                return cb12_;
+                return scb12_;
             case 13U:
-                return cb13_;
+                return scb13_;
             case 14U:
-                return cb14_;
+                return scb14_;
             default:
-                return cb15_;
+                return scb15_;
         }
     }
 
     __aicore__ inline void StoreDequantizedValue(
         uint64_t outBase,
         uint32_t d,
-        float scale,
         uint32_t idx
     ) {
-        float cb = LookupCodebook(idx);
-        denseRotGm_.SetValue(outBase + d, cb * scale);
+        denseRotGm_.SetValue(outBase + d, LookupScaledCodebook(idx));
     }
 
     __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
@@ -147,7 +171,7 @@ public:
         return lhs < rhs ? lhs : rhs;
     }
 
-    __aicore__ inline void ProcessBits1(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits1(uint64_t packedBase, uint64_t outBase)
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 3;
@@ -159,13 +183,13 @@ public:
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outBase, dBase + lane,
                     (value >> lane) & 0x1U);
             }
         }
     }
 
-    __aicore__ inline void ProcessBits2(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits2(uint64_t packedBase, uint64_t outBase)
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 2;
@@ -177,13 +201,13 @@ public:
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outBase, dBase + lane,
                     (value >> (lane << 1)) & 0x3U);
             }
         }
     }
 
-    __aicore__ inline void ProcessBits3(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits3(uint64_t packedBase, uint64_t outBase)
     {
         uint32_t d = 0;
         uint32_t byteCol = 0;
@@ -193,18 +217,18 @@ public:
             value |= static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol + 2U)) << 16;
             for (uint32_t lane = 0; lane < 8U; ++lane) {
                 StoreDequantizedValue(
-                    outBase, d + lane, scale,
+                    outBase, d + lane,
                     (value >> (lane * 3U)) & 0x7U);
             }
         }
         for (; d < headDim_; ++d) {
             StoreDequantizedValue(
-                outBase, d, scale,
+                outBase, d,
                 ExtractIndex(packedBase, d));
         }
     }
 
-    __aicore__ inline void ProcessBits4(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits4(uint64_t packedBase, uint64_t outBase)
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 1;
@@ -216,17 +240,17 @@ public:
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outBase, dBase + lane,
                     (value >> (lane << 2)) & 0xFU);
             }
         }
     }
 
-    __aicore__ inline void ProcessGeneric(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessGeneric(uint64_t packedBase, uint64_t outBase)
     {
         for (uint32_t d = 0; d < headDim_; ++d) {
             StoreDequantizedValue(
-                outBase, d, scale,
+                outBase, d,
                 ExtractIndex(packedBase, d));
         }
     }
@@ -273,17 +297,18 @@ public:
             uint64_t outBase =
                 ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
                     * headDim_);
+            ScaleCodebook(scale);
 
             if (bits_ == 1U) {
-                ProcessBits1(packedBase, outBase, scale);
+                ProcessBits1(packedBase, outBase);
             } else if (bits_ == 2U) {
-                ProcessBits2(packedBase, outBase, scale);
+                ProcessBits2(packedBase, outBase);
             } else if (bits_ == 3U) {
-                ProcessBits3(packedBase, outBase, scale);
+                ProcessBits3(packedBase, outBase);
             } else if (bits_ == 4U) {
-                ProcessBits4(packedBase, outBase, scale);
+                ProcessBits4(packedBase, outBase);
             } else {
-                ProcessGeneric(packedBase, outBase, scale);
+                ProcessGeneric(packedBase, outBase);
             }
         }
     }
@@ -320,6 +345,23 @@ private:
     float cb13_{0.0F};
     float cb14_{0.0F};
     float cb15_{0.0F};
+
+    float scb0_{0.0F};
+    float scb1_{0.0F};
+    float scb2_{0.0F};
+    float scb3_{0.0F};
+    float scb4_{0.0F};
+    float scb5_{0.0F};
+    float scb6_{0.0F};
+    float scb7_{0.0F};
+    float scb8_{0.0F};
+    float scb9_{0.0F};
+    float scb10_{0.0F};
+    float scb11_{0.0F};
+    float scb12_{0.0F};
+    float scb13_{0.0F};
+    float scb14_{0.0F};
+    float scb15_{0.0F};
 };
 
 extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
