@@ -66,7 +66,6 @@ def token_map_cache_size() -> int:
 _TQ_CUSTOM_OUT_DTYPE_CODES = {
     torch.float32: 0,
     torch.float16: 1,
-    torch.bfloat16: 2,
 }
 
 

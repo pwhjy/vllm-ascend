@@ -601,8 +601,6 @@ at::ScalarType tq_dequant_meta_out_dtype_from_code(int64_t out_dtype)
             return at::kFloat;
         case 1:
             return at::kHalf;
-        case 2:
-            return at::kBFloat16;
         default:
             TORCH_CHECK(false, "unsupported TurboQuant output dtype code: ", out_dtype);
     }
