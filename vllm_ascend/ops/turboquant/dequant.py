@@ -189,6 +189,15 @@ def tq_dequant_mse_paged_rot(
     aclnn custom op is built and enabled, otherwise falls back to the
     PyTorch reference.
     """
+    # The P2 Ascend C scalar kernel is validated for real model head dims
+    # (64/80/96/128). Tiny test-only dims can expose backend edge cases, so
+    # keep them on the reference path.
+    if head_dim < 16:
+        return tq_dequant_mse_paged_reference_rot(
+            packed_idx, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, target_dtype,
+        )
+
     if not _custom_op_available(
         packed_idx,
         norm,

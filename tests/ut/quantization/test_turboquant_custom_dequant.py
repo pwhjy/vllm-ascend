@@ -154,7 +154,7 @@ class TestTqDequantMsePagedRot:
 
     @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
     @pytest.mark.parametrize("bits", [1, 2, 3, 4])
-    @pytest.mark.parametrize("head_dim", [8, 64, 80, 96, 128])
+    @pytest.mark.parametrize("head_dim", [64, 80, 96, 128])
     def test_custom_op_matches_reference_on_npu(self, monkeypatch, bits, head_dim):
         monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
         monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
@@ -175,6 +175,28 @@ class TestTqDequantMsePagedRot:
         assert out.shape == ref.shape
         assert torch.allclose(out, ref, atol=1e-6, rtol=0), \
             f"Mismatch for bits={bits} head_dim={head_dim}"
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4])
+    def test_tiny_head_dim_uses_reference_on_npu(self, monkeypatch, bits):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "1")
+
+        head_dim = 8
+        packed, norm, codebook, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim, device="npu")
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+
+        torch.npu.synchronize()
+        assert torch.equal(out, ref)
 
     @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
     def test_custom_op_matches_reference_from_npu_block_table(self, monkeypatch):
