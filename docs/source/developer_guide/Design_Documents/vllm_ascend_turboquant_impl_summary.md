@@ -7,8 +7,8 @@
 截至 2026-05-05，P2 已经从纯 Python reference 路径推进到 aclnn 自定义算子路径：
 
 - `tq_dequant_mse_paged` 已接入 `torch.ops._C_ascend`，用于 `V=mse` 和 `K=prod` 的 stage1 MSE dequant。
-- `K=prod` 当前默认仍是 hybrid 路径：stage1 MSE 走 custom op，QJL correction 走 PyTorch。
-- `tq_dequant_prod_paged` 已新增为实验路径，受 `VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT=1` 控制，用于验证 QJL correction 下沉到 Ascend C 后的收益。
+- `K=prod` 当前默认走快速 hybrid 路径：stage1 MSE 走 custom op，QJL 1-bit unpack/scale 复用 MSE custom op，QJL projection 仍交给 NPU matmul。
+- `tq_dequant_prod_paged` 保留为实验/benchmark 路径；实测标量 D×D QJL kernel 过慢，不接入 attention runtime。
 - 当前仍未进入 P3/P4 的 compressed-domain attention，最终 attention 仍调用现有 FIA。
 
 ## 1. 本次实现的范围

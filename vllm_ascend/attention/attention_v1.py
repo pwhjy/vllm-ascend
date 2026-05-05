@@ -63,9 +63,7 @@ from vllm_ascend.ops.turboquant.dequant import (
     build_token_map_from_block_table,
     custom_dequant_enabled,
     debug_compare_enabled,
-    prod_custom_dequant_enabled,
     tq_dequant_mse_paged_rot,
-    tq_dequant_prod_paged_rot,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
@@ -1709,30 +1707,6 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         t0 = time.perf_counter()
 
-        if prod_custom_dequant_enabled():
-            dense_rot = tq_dequant_prod_paged_rot(
-                packed_idx=kv_cache["k_idx"],
-                packed_qjl=kv_cache["k_qjl"],
-                gamma=kv_cache["k_gamma"],
-                norm=kv_cache["k_norm"],
-                token_block_ids=token_block_ids,
-                token_offsets=token_offsets,
-                codebook=layer._tq_k_codebook,
-                qjl_proj=layer._tq_k_qjl_proj,
-                total_bits=int(layer.tq_k_total_bits),
-                head_dim=self.head_size,
-                target_dtype=target_dtype,
-            )
-            dense_k = apply_rotation(dense_rot, layer._tq_k_rot_t).contiguous()
-            _maybe_sync_for_profile(dense_k)
-            _record_tq_profile(
-                profile_label,
-                (time.perf_counter() - t0) * 1000.0,
-                vectors=int(dense_k.shape[0]) if dense_k.dim() else 0,
-                bytes_out=dense_k.numel() * dense_k.element_size(),
-            )
-            return dense_k
-
         k_stage1_rot = tq_dequant_mse_paged_rot(
             packed_idx=kv_cache["k_idx"],
             norm=kv_cache["k_norm"],
@@ -1822,18 +1796,13 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 profile_label=f"{profile_label}.custom_mse.k",
             )
         else:
-            prod_profile = (
-                f"{profile_label}.custom_prod.k"
-                if prod_custom_dequant_enabled()
-                else f"{profile_label}.hybrid_prod.k"
-            )
             dense_k = self._dequant_prod_paged_cache_hybrid(
                 kv_cache,
                 token_block_ids,
                 token_offsets,
                 target_dtype,
                 layer,
-                profile_label=prod_profile,
+                profile_label=f"{profile_label}.hybrid_prod.k",
             )
 
         _record_tq_profile(
