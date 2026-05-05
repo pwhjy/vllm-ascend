@@ -48,8 +48,17 @@ def debug_compare_enabled() -> bool:
 # Custom op availability (aclnn, via torch.ops._C_ascend)
 # ---------------------------------------------------------------------------
 
-def _custom_op_available() -> bool:
+def _is_npu_tensor(tensor: torch.Tensor) -> bool:
+    return bool(getattr(tensor, "is_npu", False)) or tensor.device.type in {
+        "npu",
+        "privateuseone",
+    }
+
+
+def _custom_op_available(*tensors: torch.Tensor) -> bool:
     if not custom_dequant_enabled():
+        return False
+    if tensors and not all(_is_npu_tensor(tensor) for tensor in tensors):
         return False
     try:
         from vllm_ascend.utils import enable_custom_op
@@ -180,7 +189,13 @@ def tq_dequant_mse_paged_rot(
     aclnn custom op is built and enabled, otherwise falls back to the
     PyTorch reference.
     """
-    if not _custom_op_available():
+    if not _custom_op_available(
+        packed_idx,
+        norm,
+        token_block_ids,
+        token_offsets,
+        codebook,
+    ):
         return tq_dequant_mse_paged_reference_rot(
             packed_idx, norm, token_block_ids, token_offsets,
             codebook, bits, head_dim, target_dtype,

@@ -118,6 +118,22 @@ class TestTqDequantMsePagedRot:
             assert out.dtype == dtype
             assert out.shape[1:] == (packed.shape[2], 64)
 
+    def test_cpu_tensors_fallback_when_custom_env_enabled(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        packed, norm, codebook, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits=3, head_dim=8)
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, 3, 8, torch.float32,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, 3, 8, torch.float32,
+        )
+
+        assert torch.equal(out, ref)
+
 
 # ---------------------------------------------------------------------------
 # build_token_map_from_block_table tests
