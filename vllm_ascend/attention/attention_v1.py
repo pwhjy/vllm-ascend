@@ -1874,6 +1874,8 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
     ) -> torch.Tensor:
         _maybe_sync_for_profile(query, key, value)
         t0 = time.perf_counter()
+        attn_mask = getattr(attn_metadata, "attn_mask", None)
+        sparse_mode = 3 if attn_mask is not None else 0
         if isinstance(self.key_cache, dict):
             cache_block_size = next(iter(self.key_cache.values())).shape[1]
         elif self.key_cache is not None:
@@ -1884,7 +1886,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask,
+            atten_mask=attn_mask,
             block_table=None,
             input_layout="TND",
             block_size=cache_block_size,
@@ -1893,7 +1895,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=sparse_mode,
         )
         num_tokens = actual_seq_lengths_q[-1]
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
