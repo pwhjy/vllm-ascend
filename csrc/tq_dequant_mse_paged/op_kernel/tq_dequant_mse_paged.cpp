@@ -3,7 +3,7 @@
  * This file is a part of the vllm-ascend project.
  * Licensed under the Apache License, Version 2.0 (the "License");
  *
- * Ascend C kernel: TurboQuant MSE paged dequant (scalar GM, correctness-first).
+ * Ascend C kernel: TurboQuant MSE paged dequant (token-head scalar GM).
  */
 
 #include "kernel_operator.h"
@@ -72,24 +72,24 @@ public:
     {
         uint32_t coreId = GetBlockIdx();
 
-        uint64_t totalElems =
+        uint64_t totalPairs =
             static_cast<uint64_t>(totalTokens_) *
-            static_cast<uint64_t>(numKvHeads_) *
-            static_cast<uint64_t>(headDim_);
-
-        uint64_t elemsPerCore = (totalElems + numCore_ - 1) / numCore_;
-        uint64_t start = static_cast<uint64_t>(coreId) * elemsPerCore;
-        uint64_t end = start + elemsPerCore;
-        if (end > totalElems) {
-            end = totalElems;
+            static_cast<uint64_t>(numKvHeads_);
+        if (totalPairs == 0) {
+            return;
         }
 
-        for (uint64_t linear = start; linear < end; ++linear) {
-            uint32_t d = linear % headDim_;
-            uint64_t tmp = linear / headDim_;
-            uint32_t kvHead = tmp % numKvHeads_;
-            uint32_t token = tmp / numKvHeads_;
+        uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
+        uint64_t pairsPerCore = (totalPairs + coreCount - 1) / coreCount;
+        uint64_t startPair = static_cast<uint64_t>(coreId) * pairsPerCore;
+        uint64_t endPair = startPair + pairsPerCore;
+        if (endPair > totalPairs) {
+            endPair = totalPairs;
+        }
 
+        for (uint64_t pair = startPair; pair < endPair; ++pair) {
+            uint32_t kvHead = pair % numKvHeads_;
+            uint32_t token = pair / numKvHeads_;
             int32_t blockId = tokenBlockIdsGm_.GetValue(token);
             int32_t offset = tokenOffsetsGm_.GetValue(token);
 
@@ -103,18 +103,19 @@ public:
                 ((static_cast<uint64_t>(blockId) * blockSize_ +
                   static_cast<uint64_t>(offset))
                     * numKvHeads_ + kvHead);
-
-            uint32_t idx = ExtractIndex(packedBase, d);
-
-            float cb = codebookGm_.GetValue(idx);
             float scale = normGm_.GetValue(normIndex);
-            float y = cb * scale;
 
-            uint64_t outIndex =
+            uint64_t outBase =
                 ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
-                    * headDim_ + d);
+                    * headDim_);
 
-            denseRotGm_.SetValue(outIndex, y);
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                uint32_t idx = ExtractIndex(packedBase, d);
+                float cb = codebookGm_.GetValue(idx);
+                float y = cb * scale;
+
+                denseRotGm_.SetValue(outBase + d, y);
+            }
         }
     }
 
