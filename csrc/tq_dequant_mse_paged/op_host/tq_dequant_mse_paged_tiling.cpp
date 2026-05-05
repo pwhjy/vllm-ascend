@@ -21,13 +21,12 @@ static ge::graphStatus TqDequantMsePagedTilingFunc(gert::TilingContext* context)
     uint32_t numKvHeads = static_cast<uint32_t>(packedIdxShape.GetDim(2));
     uint32_t packedCols = static_cast<uint32_t>(packedIdxShape.GetDim(3));
 
-    int64_t bitsAttr = 0;
-    int64_t headDimAttr = 0;
-    context->GetAttrs()->GetAttrPointer<int64_t>(0, bitsAttr);
-    context->GetAttrs()->GetAttrPointer<int64_t>(1, headDimAttr);
+    auto attr = context->GetAttrs();
+    const int64_t* bitsPtr = attr->GetAttrPointer<int64_t>(0);
+    const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(1);
 
-    uint32_t bits = static_cast<uint32_t>(bitsAttr);
-    uint32_t headDim = static_cast<uint32_t>(headDimAttr);
+    uint32_t bits = static_cast<uint32_t>(bitsPtr != nullptr ? *bitsPtr : 0);
+    uint32_t headDim = static_cast<uint32_t>(headDimPtr != nullptr ? *headDimPtr : 0);
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
