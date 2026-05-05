@@ -215,6 +215,7 @@ def _run_case(args, total_bits: int) -> None:
             args.head_dim,
             torch.float32,
             correction,
+            signed_bits1=True,
         )
         qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         return apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()

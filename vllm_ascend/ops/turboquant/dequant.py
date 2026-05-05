@@ -410,6 +410,7 @@ def tq_dequant_mse_paged_scaled_rot(
     head_dim: int,
     target_dtype: torch.dtype,
     scale_multiplier: float,
+    signed_bits1: bool = False,
 ) -> torch.Tensor:
     """Dequant MSE data with two paged scale tensors.
 
@@ -442,6 +443,7 @@ def tq_dequant_mse_paged_scaled_rot(
             int(head_dim),
             int(out_dtype_code),
             float(scale_multiplier),
+            1 if signed_bits1 else 0,
         )
     else:
         combined_scale = (norm * extra_scale * float(scale_multiplier)).contiguous()

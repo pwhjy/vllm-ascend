@@ -886,7 +886,8 @@ at::Tensor tq_dequant_mse_paged_scaled_out(
     int64_t bits,
     int64_t head_dim,
     int64_t out_dtype,
-    double scale_multiplier)
+    double scale_multiplier,
+    int64_t signed_bits1)
 {
     check_tq_dequant_mse_paged_inputs(
         packed_idx, norm, token_block_ids, token_offsets, codebook, bits);
@@ -907,7 +908,7 @@ at::Tensor tq_dequant_mse_paged_scaled_out(
 
     EXEC_NPU_CMD(aclnnTqDequantMsePagedScaled,
         packed_idx, norm, extra_scale, token_block_ids, token_offsets,
-        codebook, bits, head_dim, scale_multiplier, out);
+        codebook, bits, head_dim, scale_multiplier, signed_bits1, out);
 
     return out;
 }
@@ -1281,7 +1282,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                Tensor extra_scale, "
         "                                Tensor token_block_ids, Tensor token_offsets, "
         "                                Tensor codebook, int bits, int head_dim, "
-        "                                int out_dtype, float scale_multiplier) -> Tensor"
+        "                                int out_dtype, float scale_multiplier, "
+        "                                int signed_bits1) -> Tensor"
     );
     ops.impl("tq_dequant_mse_paged_scaled_out", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged_scaled_out);
 

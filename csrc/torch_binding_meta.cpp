@@ -636,7 +636,8 @@ at::Tensor tq_dequant_mse_paged_scaled_out_meta(
     int64_t bits,
     int64_t head_dim,
     int64_t out_dtype,
-    double scale_multiplier)
+    double scale_multiplier,
+    int64_t signed_bits1)
 {
     (void)norm;
     (void)extra_scale;
@@ -644,6 +645,7 @@ at::Tensor tq_dequant_mse_paged_scaled_out_meta(
     (void)codebook;
     (void)bits;
     (void)scale_multiplier;
+    (void)signed_bits1;
     int64_t total_tokens = token_block_ids.size(0);
     int64_t num_kv_heads = packed_idx.size(2);
     at::ScalarType scalar_type = tq_dequant_meta_out_dtype_from_code(out_dtype);

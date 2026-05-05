@@ -395,6 +395,7 @@ class TestTqDequantMsePagedRot:
             head_dim,
             torch.float32,
             math.sqrt(math.pi / 2.0) / head_dim,
+            signed_bits1=True,
         )
         qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
@@ -429,6 +430,22 @@ class TestTqDequantMsePagedRot:
         )
 
         assert torch.equal(out, ref)
+
+        out_signed = tq_dequant_mse_paged_scaled_rot(
+            packed,
+            norm,
+            extra_scale,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            bits,
+            head_dim,
+            torch.float32,
+            scale_multiplier,
+            signed_bits1=True,
+        )
+
+        assert torch.equal(out_signed, ref)
 
     @pytest.mark.parametrize("total_bits", [2, 3, 4])
     @pytest.mark.parametrize("head_dim", [16, 64])

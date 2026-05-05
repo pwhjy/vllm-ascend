@@ -1755,6 +1755,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             head_dim=self.head_size,
             target_dtype=target_dtype,
             scale_multiplier=correction,
+            signed_bits1=True,
         )
         _maybe_sync_for_profile(qjl_scaled)
         _record_tq_profile(

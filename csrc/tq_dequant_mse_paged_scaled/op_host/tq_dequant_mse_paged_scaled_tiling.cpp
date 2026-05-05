@@ -25,11 +25,14 @@ static ge::graphStatus TqDequantMsePagedScaledTilingFunc(gert::TilingContext* co
     const int64_t* bitsPtr = attr->GetAttrPointer<int64_t>(0);
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(1);
     const float* scaleMultiplierPtr = attr->GetAttrPointer<float>(2);
+    const int64_t* signedBits1Ptr = attr->GetAttrPointer<int64_t>(3);
 
     uint32_t bits = static_cast<uint32_t>(bitsPtr != nullptr ? *bitsPtr : 0);
     uint32_t headDim = static_cast<uint32_t>(headDimPtr != nullptr ? *headDimPtr : 0);
     float scaleMultiplier =
         scaleMultiplierPtr != nullptr ? *scaleMultiplierPtr : 1.0F;
+    uint32_t signedBits1 = static_cast<uint32_t>(
+        signedBits1Ptr != nullptr ? *signedBits1Ptr : 0);
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
@@ -49,6 +52,7 @@ static ge::graphStatus TqDequantMsePagedScaledTilingFunc(gert::TilingContext* co
     tiling.set_packedCols(packedCols);
     tiling.set_bits(bits);
     tiling.set_numCore(coreNum);
+    tiling.set_signedBits1(signedBits1);
     tiling.set_scaleMultiplier(scaleMultiplier);
 
     context->SetBlockDim(coreNum);

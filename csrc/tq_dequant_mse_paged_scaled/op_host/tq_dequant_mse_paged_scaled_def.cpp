@@ -50,6 +50,7 @@ public:
         this->Attr("bits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
         this->Attr("scaleMultiplier").AttrType(REQUIRED).Float(1.0);
+        this->Attr("signedBits1").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

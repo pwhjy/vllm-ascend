@@ -18,6 +18,7 @@ struct TqDequantMsePagedScaledTilingData {
     uint32_t packedCols;
     uint32_t bits;
     uint32_t numCore;
+    uint32_t signedBits1;
     float scaleMultiplier;
 };
 
@@ -51,6 +52,7 @@ public:
         packedCols_ = tiling->packedCols;
         bits_ = tiling->bits;
         numCore_ = tiling->numCore;
+        signedBits1_ = tiling->signedBits1;
         scaleMultiplier_ = tiling->scaleMultiplier;
     }
 
@@ -168,6 +170,23 @@ public:
         }
     }
 
+    __aicore__ inline void ProcessSignedBits1(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+            uint32_t dBase = byteCol << 3;
+            if (dBase >= headDim_) {
+                return;
+            }
+            uint32_t count = MinU32(8U, headDim_ - dBase);
+            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint32_t value = static_cast<uint32_t>(byteValue);
+            for (uint32_t lane = 0; lane < count; ++lane) {
+                float signedScale = ((value >> lane) & 0x1U) != 0U ? scale : -scale;
+                outGm_.SetValue(outBase + dBase + lane, static_cast<OutT>(signedScale));
+            }
+        }
+    }
+
     __aicore__ inline void ProcessBits2(uint64_t packedBase, uint64_t outBase, float scale)
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
@@ -281,7 +300,11 @@ public:
                     * headDim_);
 
             if (bits_ == 1U) {
-                ProcessBits1(packedBase, outBase, scale);
+                if (signedBits1_ != 0U) {
+                    ProcessSignedBits1(packedBase, outBase, scale);
+                } else {
+                    ProcessBits1(packedBase, outBase, scale);
+                }
             } else if (bits_ == 2U) {
                 ProcessBits2(packedBase, outBase, scale);
             } else if (bits_ == 3U) {
@@ -310,6 +333,7 @@ private:
     uint32_t packedCols_{0};
     uint32_t bits_{0};
     uint32_t numCore_{0};
+    uint32_t signedBits1_{0};
     float scaleMultiplier_{1.0F};
 
     float cb0_{0.0F};

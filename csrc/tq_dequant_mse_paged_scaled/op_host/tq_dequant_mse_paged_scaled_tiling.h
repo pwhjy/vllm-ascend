@@ -17,6 +17,7 @@ BEGIN_TILING_DATA_DEF(TqDequantMsePagedScaledTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, packedCols);
     TILING_DATA_FIELD_DEF(uint32_t, bits);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
+    TILING_DATA_FIELD_DEF(uint32_t, signedBits1);
     TILING_DATA_FIELD_DEF(float, scaleMultiplier);
 END_TILING_DATA_DEF;
 
