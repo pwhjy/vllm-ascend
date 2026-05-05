@@ -399,6 +399,79 @@ def tq_dequant_mse_paged_rot(
     return out.contiguous()
 
 
+def tq_dequant_mse_paged_scaled_rot(
+    packed_idx: torch.Tensor,
+    norm: torch.Tensor,
+    extra_scale: torch.Tensor,
+    token_block_ids: torch.Tensor,
+    token_offsets: torch.Tensor,
+    codebook: torch.Tensor,
+    bits: int,
+    head_dim: int,
+    target_dtype: torch.dtype,
+    scale_multiplier: float,
+) -> torch.Tensor:
+    """Dequant MSE data with two paged scale tensors.
+
+    This is used for the prod-QJL correction path where the scale is
+    ``norm * gamma * correction``. Keeping both scale tensors as inputs avoids
+    materializing a full-cache temporary scale tensor every decode step.
+    """
+    out_dtype_code = _custom_out_dtype_code(target_dtype)
+    if (
+        head_dim >= 16
+        and out_dtype_code is not None
+        and _custom_op_available(
+            "tq_dequant_mse_paged_scaled_out",
+            packed_idx,
+            norm,
+            extra_scale,
+            token_block_ids,
+            token_offsets,
+            codebook,
+        )
+    ):
+        out = torch.ops._C_ascend.tq_dequant_mse_paged_scaled_out(
+            packed_idx.contiguous(),
+            norm.contiguous(),
+            extra_scale.contiguous(),
+            token_block_ids.contiguous(),
+            token_offsets.contiguous(),
+            codebook.contiguous(),
+            int(bits),
+            int(head_dim),
+            int(out_dtype_code),
+            float(scale_multiplier),
+        )
+    else:
+        combined_scale = (norm * extra_scale * float(scale_multiplier)).contiguous()
+        out = tq_dequant_mse_paged_rot(
+            packed_idx=packed_idx,
+            norm=combined_scale,
+            token_block_ids=token_block_ids,
+            token_offsets=token_offsets,
+            codebook=codebook,
+            bits=bits,
+            head_dim=head_dim,
+            target_dtype=target_dtype,
+        )
+
+    if debug_compare_enabled():
+        combined_scale = (norm * extra_scale * float(scale_multiplier)).contiguous()
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed_idx, combined_scale, token_block_ids, token_offsets,
+            codebook, bits, head_dim, target_dtype,
+        )
+        torch.npu.synchronize()
+        max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
+        if max_diff > 1e-3:
+            raise RuntimeError(
+                f"TurboQuant custom scaled dequant mismatch: max_diff={max_diff}"
+            )
+
+    return out.contiguous()
+
+
 def tq_dequant_prod_paged_rot(
     packed_idx: torch.Tensor,
     packed_qjl: torch.Tensor,

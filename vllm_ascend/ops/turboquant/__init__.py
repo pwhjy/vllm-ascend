@@ -13,6 +13,7 @@ from .dequant import (
     prod_custom_dequant_enabled,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
+    tq_dequant_mse_paged_scaled_rot,
     tq_dequant_prod_paged_reference_rot,
     tq_dequant_prod_paged_rot,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "prod_custom_dequant_enabled",
     "tq_dequant_mse_paged_reference_rot",
     "tq_dequant_mse_paged_rot",
+    "tq_dequant_mse_paged_scaled_rot",
     "tq_dequant_prod_paged_reference_rot",
     "tq_dequant_prod_paged_rot",
 ]

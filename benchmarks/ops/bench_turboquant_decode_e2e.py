@@ -493,7 +493,13 @@ def main() -> None:
     has_mse_out = hasattr(torch.ops, "_C_ascend") and hasattr(
         torch.ops._C_ascend, "tq_dequant_mse_paged_out",
     )
-    print(f"custom op mse={has_mse} mse_out={has_mse_out}")
+    has_mse_scaled = hasattr(torch.ops, "_C_ascend") and hasattr(
+        torch.ops._C_ascend, "tq_dequant_mse_paged_scaled_out",
+    )
+    print(
+        f"custom op mse={has_mse} mse_out={has_mse_out} "
+        f"mse_scaled={has_mse_scaled}"
+    )
     _run_case(args)
 
 

@@ -626,6 +626,33 @@ at::Tensor tq_dequant_mse_paged_out_meta(
         packed_idx.options().dtype(scalar_type).device(at::kMeta));
 }
 
+at::Tensor tq_dequant_mse_paged_scaled_out_meta(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& extra_scale,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits,
+    int64_t head_dim,
+    int64_t out_dtype,
+    double scale_multiplier)
+{
+    (void)norm;
+    (void)extra_scale;
+    (void)token_offsets;
+    (void)codebook;
+    (void)bits;
+    (void)scale_multiplier;
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+    at::ScalarType scalar_type = tq_dequant_meta_out_dtype_from_code(out_dtype);
+
+    return at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(scalar_type).device(at::kMeta));
+}
+
 at::Tensor tq_dequant_prod_paged_meta(
     const at::Tensor& packed_idx,
     const at::Tensor& packed_qjl,
@@ -752,6 +779,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // TurboQuant MSE paged dequant
     ops.impl("tq_dequant_mse_paged", &vllm_ascend::meta::tq_dequant_mse_paged_meta);
     ops.impl("tq_dequant_mse_paged_out", &vllm_ascend::meta::tq_dequant_mse_paged_out_meta);
+    ops.impl("tq_dequant_mse_paged_scaled_out", &vllm_ascend::meta::tq_dequant_mse_paged_scaled_out_meta);
     // TurboQuant prod paged dequant
     ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
 }

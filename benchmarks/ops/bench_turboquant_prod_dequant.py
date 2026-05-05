@@ -29,6 +29,7 @@ import torch
 
 from vllm_ascend.ops.turboquant.dequant import (
     tq_dequant_mse_paged_rot,
+    tq_dequant_mse_paged_scaled_rot,
     tq_dequant_prod_paged_rot,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import get_stage1_bits
@@ -203,16 +204,17 @@ def _run_case(args, total_bits: int) -> None:
             torch.float32,
         )
         correction = math.sqrt(math.pi / 2.0) / args.head_dim
-        qjl_scale_cache = (correction * gamma * norm).contiguous()
-        qjl_scaled = tq_dequant_mse_paged_rot(
+        qjl_scaled = tq_dequant_mse_paged_scaled_rot(
             packed_qjl,
-            qjl_scale_cache,
+            norm,
+            gamma,
             token_block_ids,
             token_offsets,
             qjl_codebook,
             1,
             args.head_dim,
             torch.float32,
+            correction,
         )
         qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         return apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
@@ -317,8 +319,11 @@ def main() -> None:
     has_prod = hasattr(torch.ops, "_C_ascend") and hasattr(
         torch.ops._C_ascend, "tq_dequant_prod_paged",
     )
+    has_mse_scaled = hasattr(torch.ops, "_C_ascend") and hasattr(
+        torch.ops._C_ascend, "tq_dequant_mse_paged_scaled_out",
+    )
     print(
-        f"custom ops: mse={has_mse} prod={has_prod} "
+        f"custom ops: mse={has_mse} mse_scaled={has_mse_scaled} prod={has_prod} "
         f"tokens={args.total_tokens} heads={args.num_kv_heads} "
         f"head_dim={args.head_dim}"
     )

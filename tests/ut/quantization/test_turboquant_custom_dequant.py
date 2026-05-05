@@ -16,6 +16,7 @@ from vllm_ascend.ops.turboquant.dequant import (
     cached_token_map_from_block_table,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
+    tq_dequant_mse_paged_scaled_rot,
     tq_dequant_prod_paged_reference_rot,
     tq_dequant_prod_paged_rot,
 )
@@ -382,24 +383,52 @@ class TestTqDequantMsePagedRot:
             head_dim,
             torch.float32,
         )
-        qjl_scale_cache = (
-            math.sqrt(math.pi / 2.0) / head_dim * k_gamma * k_norm
-        ).contiguous()
         qjl_codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32)
-        qjl_scaled = tq_dequant_mse_paged_rot(
+        qjl_scaled = tq_dequant_mse_paged_scaled_rot(
             k_qjl,
-            qjl_scale_cache,
+            k_norm,
+            k_gamma,
             token_block_ids,
             token_offsets,
             qjl_codebook,
             1,
             head_dim,
             torch.float32,
+            math.sqrt(math.pi / 2.0) / head_dim,
         )
         qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
 
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    def test_scaled_mse_paged_rot_matches_combined_scale_reference(self):
+        bits = 1
+        head_dim = 64
+        packed, norm, _, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim)
+        extra_scale = torch.rand_like(norm)
+        codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32)
+        scale_multiplier = 0.125
+        combined_scale = (norm * extra_scale * scale_multiplier).contiguous()
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, combined_scale, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_mse_paged_scaled_rot(
+            packed,
+            norm,
+            extra_scale,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            bits,
+            head_dim,
+            torch.float32,
+            scale_multiplier,
+        )
+
+        assert torch.equal(out, ref)
 
     @pytest.mark.parametrize("total_bits", [2, 3, 4])
     @pytest.mark.parametrize("head_dim", [16, 64])
