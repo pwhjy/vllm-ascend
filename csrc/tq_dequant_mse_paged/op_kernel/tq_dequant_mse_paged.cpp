@@ -146,7 +146,8 @@ extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
     GM_ADDR tiling
 ) {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    GET_TILING_DATA(tilingData, tiling);
+    REGISTER_TILING_DEFAULT(TqDequantMsePagedTilingData);
+    GET_TILING_DATA_WITH_STRUCT(TqDequantMsePagedTilingData, tilingData, tiling);
 
     KernelTqDequantMsePaged op;
     op.Init(

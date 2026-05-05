@@ -782,7 +782,7 @@ at::Tensor tq_dequant_mse_paged(
     int64_t bits,
     int64_t head_dim)
 {
-    TORCH_CHECK(packed_idx.scalar_type() == at::kFloat, "P2 debug: packed_idx must be float32");
+    TORCH_CHECK(packed_idx.scalar_type() == at::kByte, "packed_idx must be uint8");
     TORCH_CHECK(token_block_ids.scalar_type() == at::kInt, "token_block_ids must be int32");
     TORCH_CHECK(token_offsets.scalar_type() == at::kInt, "token_offsets must be int32");
     TORCH_CHECK(norm.scalar_type() == at::kFloat, "P2 requires norm fp32");

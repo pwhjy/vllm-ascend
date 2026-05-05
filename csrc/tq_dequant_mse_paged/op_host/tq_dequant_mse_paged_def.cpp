@@ -15,7 +15,7 @@ public:
     {
         this->Input("packedIdx")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
+            .DataType({ge::DT_UINT8})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("norm")
