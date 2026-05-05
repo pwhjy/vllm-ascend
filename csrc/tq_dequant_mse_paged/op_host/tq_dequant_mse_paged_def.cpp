@@ -18,10 +18,32 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("norm")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("tokenBlockIds")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("tokenOffsets")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("codebook")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("denseRot")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND});
+        this->Attr("bits").AttrType(REQUIRED).Int(0);
+        this->Attr("headDim").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

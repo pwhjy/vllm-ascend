@@ -40,13 +40,13 @@ static ge::graphStatus TqDequantMsePagedTilingFunc(gert::TilingContext* context)
     }
 
     TqDequantMsePagedTilingData tiling;
-    tiling.totalTokens = totalTokens;
-    tiling.blockSize = blockSize;
-    tiling.numKvHeads = numKvHeads;
-    tiling.headDim = headDim;
-    tiling.packedCols = packedCols;
-    tiling.bits = bits;
-    tiling.numCore = coreNum;
+    tiling.set_totalTokens(totalTokens);
+    tiling.set_blockSize(blockSize);
+    tiling.set_numKvHeads(numKvHeads);
+    tiling.set_headDim(headDim);
+    tiling.set_packedCols(packedCols);
+    tiling.set_bits(bits);
+    tiling.set_numCore(coreNum);
 
     context->SetBlockDim(coreNum);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),

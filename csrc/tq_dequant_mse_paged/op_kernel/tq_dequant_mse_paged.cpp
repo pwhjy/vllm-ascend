@@ -33,13 +33,13 @@ public:
         codebookGm_.SetGlobalBuffer((__gm__ float*)codebook);
         denseRotGm_.SetGlobalBuffer((__gm__ float*)denseRot);
 
-        totalTokens_ = tiling.totalTokens;
-        blockSize_ = tiling.blockSize;
-        numKvHeads_ = tiling.numKvHeads;
-        headDim_ = tiling.headDim;
-        packedCols_ = tiling.packedCols;
-        bits_ = tiling.bits;
-        numCore_ = tiling.numCore;
+        totalTokens_ = tiling.get_totalTokens();
+        blockSize_ = tiling.get_blockSize();
+        numKvHeads_ = tiling.get_numKvHeads();
+        headDim_ = tiling.get_headDim();
+        packedCols_ = tiling.get_packedCols();
+        bits_ = tiling.get_bits();
+        numCore_ = tiling.get_numCore();
     }
 
     __aicore__ inline uint32_t ExtractIndex(uint64_t packedBase, uint32_t d)
