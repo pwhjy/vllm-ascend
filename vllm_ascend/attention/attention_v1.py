@@ -1667,6 +1667,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
     ) -> torch.Tensor:
         _maybe_sync_for_profile(packed_idx, norm, token_block_ids, token_offsets)
         t0 = time.perf_counter()
+        t_stage = time.perf_counter()
         dense_rot = tq_dequant_mse_paged_rot(
             packed_idx=packed_idx,
             norm=norm,
@@ -1677,8 +1678,22 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             head_dim=head_dim,
             target_dtype=target_dtype,
         )
+        _maybe_sync_for_profile(dense_rot)
+        _record_tq_profile(
+            f"{profile_label}.paged_rot",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(dense_rot.shape[0]) if dense_rot.dim() else 0,
+            bytes_out=dense_rot.numel() * dense_rot.element_size(),
+        )
+        t_stage = time.perf_counter()
         dense = apply_rotation(dense_rot, rotation_t).contiguous()
         _maybe_sync_for_profile(dense)
+        _record_tq_profile(
+            f"{profile_label}.inverse_rotate",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(dense.shape[0]) if dense.dim() else 0,
+            bytes_out=dense.numel() * dense.element_size(),
+        )
         _record_tq_profile(
             profile_label,
             (time.perf_counter() - t0) * 1000.0,
@@ -1707,6 +1722,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         t0 = time.perf_counter()
 
+        t_stage = time.perf_counter()
         k_stage1_rot = tq_dequant_mse_paged_rot(
             packed_idx=kv_cache["k_idx"],
             norm=kv_cache["k_norm"],
@@ -1717,11 +1733,27 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             head_dim=self.head_size,
             target_dtype=target_dtype,
         )
+        _maybe_sync_for_profile(k_stage1_rot)
+        _record_tq_profile(
+            f"{profile_label}.stage1_mse",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(k_stage1_rot.shape[0]) if k_stage1_rot.dim() else 0,
+            bytes_out=k_stage1_rot.numel() * k_stage1_rot.element_size(),
+        )
 
+        t_stage = time.perf_counter()
         correction = math.sqrt(math.pi / 2.0) / self.head_size
         qjl_scale_cache = (
             correction * kv_cache["k_gamma"] * kv_cache["k_norm"]
         ).contiguous()
+        _maybe_sync_for_profile(qjl_scale_cache)
+        _record_tq_profile(
+            f"{profile_label}.qjl_scale_cache",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(qjl_scale_cache.numel()),
+            bytes_out=qjl_scale_cache.numel() * qjl_scale_cache.element_size(),
+        )
+        t_stage = time.perf_counter()
         qjl_scaled = tq_dequant_mse_paged_rot(
             packed_idx=kv_cache["k_qjl"],
             norm=qjl_scale_cache,
@@ -1732,13 +1764,41 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             head_dim=self.head_size,
             target_dtype=target_dtype,
         )
+        _maybe_sync_for_profile(qjl_scaled)
+        _record_tq_profile(
+            f"{profile_label}.qjl_unpack_scale",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(qjl_scaled.shape[0]) if qjl_scaled.dim() else 0,
+            bytes_out=qjl_scaled.numel() * qjl_scaled.element_size(),
+        )
+        t_stage = time.perf_counter()
         qjl_rot = apply_rotation(qjl_scaled, layer._tq_k_qjl_proj)
+        _maybe_sync_for_profile(qjl_rot)
+        _record_tq_profile(
+            f"{profile_label}.qjl_project",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(qjl_rot.shape[0]) if qjl_rot.dim() else 0,
+            bytes_out=qjl_rot.numel() * qjl_rot.element_size(),
+        )
 
-        dense_k = apply_rotation(
-            k_stage1_rot + qjl_rot,
-            layer._tq_k_rot_t,
-        ).contiguous()
+        t_stage = time.perf_counter()
+        k_rot = k_stage1_rot + qjl_rot
+        _maybe_sync_for_profile(k_rot)
+        _record_tq_profile(
+            f"{profile_label}.combine",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(k_rot.shape[0]) if k_rot.dim() else 0,
+            bytes_out=k_rot.numel() * k_rot.element_size(),
+        )
+        t_stage = time.perf_counter()
+        dense_k = apply_rotation(k_rot, layer._tq_k_rot_t).contiguous()
         _maybe_sync_for_profile(dense_k)
+        _record_tq_profile(
+            f"{profile_label}.inverse_rotate",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(dense_k.shape[0]) if dense_k.dim() else 0,
+            bytes_out=dense_k.numel() * dense_k.element_size(),
+        )
         _record_tq_profile(
             profile_label,
             (time.perf_counter() - t0) * 1000.0,
@@ -1763,8 +1823,19 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
         cache_block_size = kv_cache["v_idx"].shape[1]
 
+        t_map = time.perf_counter()
         token_block_ids, token_offsets = build_token_map_from_block_table(
             block_table=block_table, seq_lens=seq_lens, block_size=cache_block_size,
+        )
+        _maybe_sync_for_profile(token_block_ids, token_offsets)
+        _record_tq_profile(
+            f"{profile_label}.token_map",
+            (time.perf_counter() - t_map) * 1000.0,
+            vectors=int(token_block_ids.numel()),
+            bytes_out=(
+                token_block_ids.numel() * token_block_ids.element_size()
+                + token_offsets.numel() * token_offsets.element_size()
+            ),
         )
 
         # V (always MSE)
