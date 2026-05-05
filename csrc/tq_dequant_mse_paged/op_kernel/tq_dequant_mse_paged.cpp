@@ -68,24 +68,6 @@ public:
         return (v >> bitOff) & mask;
     }
 
-    __aicore__ inline uint32_t ExtractIndexBit1(uint64_t packedBase, uint32_t d)
-    {
-        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 3));
-        return (static_cast<uint32_t>(v) >> (d & 7U)) & 0x1U;
-    }
-
-    __aicore__ inline uint32_t ExtractIndexBit2(uint64_t packedBase, uint32_t d)
-    {
-        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 2));
-        return (static_cast<uint32_t>(v) >> ((d & 3U) << 1)) & 0x3U;
-    }
-
-    __aicore__ inline uint32_t ExtractIndexBit4(uint64_t packedBase, uint32_t d)
-    {
-        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 1));
-        return (static_cast<uint32_t>(v) >> ((d & 1U) << 2)) & 0xFU;
-    }
-
     __aicore__ inline void LoadCodebook()
     {
         cb0_ = codebookGm_.GetValue(0);
@@ -160,6 +142,95 @@ public:
         denseRotGm_.SetValue(outBase + d, cb * scale);
     }
 
+    __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
+    {
+        return lhs < rhs ? lhs : rhs;
+    }
+
+    __aicore__ inline void ProcessBits1(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+            uint32_t dBase = byteCol << 3;
+            if (dBase >= headDim_) {
+                return;
+            }
+            uint32_t count = MinU32(8U, headDim_ - dBase);
+            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint32_t value = static_cast<uint32_t>(byteValue);
+            for (uint32_t lane = 0; lane < count; ++lane) {
+                StoreDequantizedValue(
+                    outBase, dBase + lane, scale,
+                    (value >> lane) & 0x1U);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessBits2(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+            uint32_t dBase = byteCol << 2;
+            if (dBase >= headDim_) {
+                return;
+            }
+            uint32_t count = MinU32(4U, headDim_ - dBase);
+            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint32_t value = static_cast<uint32_t>(byteValue);
+            for (uint32_t lane = 0; lane < count; ++lane) {
+                StoreDequantizedValue(
+                    outBase, dBase + lane, scale,
+                    (value >> (lane << 1)) & 0x3U);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessBits3(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        uint32_t d = 0;
+        uint32_t byteCol = 0;
+        for (; d + 7U < headDim_ && byteCol + 2U < packedCols_; d += 8U, byteCol += 3U) {
+            uint32_t value = static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol));
+            value |= static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol + 1U)) << 8;
+            value |= static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol + 2U)) << 16;
+            for (uint32_t lane = 0; lane < 8U; ++lane) {
+                StoreDequantizedValue(
+                    outBase, d + lane, scale,
+                    (value >> (lane * 3U)) & 0x7U);
+            }
+        }
+        for (; d < headDim_; ++d) {
+            StoreDequantizedValue(
+                outBase, d, scale,
+                ExtractIndex(packedBase, d));
+        }
+    }
+
+    __aicore__ inline void ProcessBits4(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+            uint32_t dBase = byteCol << 1;
+            if (dBase >= headDim_) {
+                return;
+            }
+            uint32_t count = MinU32(2U, headDim_ - dBase);
+            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint32_t value = static_cast<uint32_t>(byteValue);
+            for (uint32_t lane = 0; lane < count; ++lane) {
+                StoreDequantizedValue(
+                    outBase, dBase + lane, scale,
+                    (value >> (lane << 2)) & 0xFU);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessGeneric(uint64_t packedBase, uint64_t outBase, float scale)
+    {
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            StoreDequantizedValue(
+                outBase, d, scale,
+                ExtractIndex(packedBase, d));
+        }
+    }
+
     __aicore__ inline void Process()
     {
         uint32_t coreId = GetBlockIdx();
@@ -204,29 +275,15 @@ public:
                     * headDim_);
 
             if (bits_ == 1U) {
-                for (uint32_t d = 0; d < headDim_; ++d) {
-                    StoreDequantizedValue(
-                        outBase, d, scale,
-                        ExtractIndexBit1(packedBase, d));
-                }
+                ProcessBits1(packedBase, outBase, scale);
             } else if (bits_ == 2U) {
-                for (uint32_t d = 0; d < headDim_; ++d) {
-                    StoreDequantizedValue(
-                        outBase, d, scale,
-                        ExtractIndexBit2(packedBase, d));
-                }
+                ProcessBits2(packedBase, outBase, scale);
+            } else if (bits_ == 3U) {
+                ProcessBits3(packedBase, outBase, scale);
             } else if (bits_ == 4U) {
-                for (uint32_t d = 0; d < headDim_; ++d) {
-                    StoreDequantizedValue(
-                        outBase, d, scale,
-                        ExtractIndexBit4(packedBase, d));
-                }
+                ProcessBits4(packedBase, outBase, scale);
             } else {
-                for (uint32_t d = 0; d < headDim_; ++d) {
-                    StoreDequantizedValue(
-                        outBase, d, scale,
-                        ExtractIndex(packedBase, d));
-                }
+                ProcessGeneric(packedBase, outBase, scale);
             }
         }
     }
