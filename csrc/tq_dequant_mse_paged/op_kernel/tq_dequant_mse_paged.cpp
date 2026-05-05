@@ -68,6 +68,98 @@ public:
         return (v >> bitOff) & mask;
     }
 
+    __aicore__ inline uint32_t ExtractIndexBit1(uint64_t packedBase, uint32_t d)
+    {
+        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 3));
+        return (static_cast<uint32_t>(v) >> (d & 7U)) & 0x1U;
+    }
+
+    __aicore__ inline uint32_t ExtractIndexBit2(uint64_t packedBase, uint32_t d)
+    {
+        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 2));
+        return (static_cast<uint32_t>(v) >> ((d & 3U) << 1)) & 0x3U;
+    }
+
+    __aicore__ inline uint32_t ExtractIndexBit4(uint64_t packedBase, uint32_t d)
+    {
+        uint8_t v = packedIdxGm_.GetValue(packedBase + (d >> 1));
+        return (static_cast<uint32_t>(v) >> ((d & 1U) << 2)) & 0xFU;
+    }
+
+    __aicore__ inline void LoadCodebook()
+    {
+        cb0_ = codebookGm_.GetValue(0);
+        cb1_ = codebookGm_.GetValue(1);
+        if (bits_ >= 2) {
+            cb2_ = codebookGm_.GetValue(2);
+            cb3_ = codebookGm_.GetValue(3);
+        }
+        if (bits_ >= 3) {
+            cb4_ = codebookGm_.GetValue(4);
+            cb5_ = codebookGm_.GetValue(5);
+            cb6_ = codebookGm_.GetValue(6);
+            cb7_ = codebookGm_.GetValue(7);
+        }
+        if (bits_ >= 4) {
+            cb8_ = codebookGm_.GetValue(8);
+            cb9_ = codebookGm_.GetValue(9);
+            cb10_ = codebookGm_.GetValue(10);
+            cb11_ = codebookGm_.GetValue(11);
+            cb12_ = codebookGm_.GetValue(12);
+            cb13_ = codebookGm_.GetValue(13);
+            cb14_ = codebookGm_.GetValue(14);
+            cb15_ = codebookGm_.GetValue(15);
+        }
+    }
+
+    __aicore__ inline float LookupCodebook(uint32_t idx)
+    {
+        switch (idx) {
+            case 0U:
+                return cb0_;
+            case 1U:
+                return cb1_;
+            case 2U:
+                return cb2_;
+            case 3U:
+                return cb3_;
+            case 4U:
+                return cb4_;
+            case 5U:
+                return cb5_;
+            case 6U:
+                return cb6_;
+            case 7U:
+                return cb7_;
+            case 8U:
+                return cb8_;
+            case 9U:
+                return cb9_;
+            case 10U:
+                return cb10_;
+            case 11U:
+                return cb11_;
+            case 12U:
+                return cb12_;
+            case 13U:
+                return cb13_;
+            case 14U:
+                return cb14_;
+            default:
+                return cb15_;
+        }
+    }
+
+    __aicore__ inline void StoreDequantizedValue(
+        uint64_t outBase,
+        uint32_t d,
+        float scale,
+        uint32_t idx
+    ) {
+        float cb = LookupCodebook(idx);
+        denseRotGm_.SetValue(outBase + d, cb * scale);
+    }
+
     __aicore__ inline void Process()
     {
         uint32_t coreId = GetBlockIdx();
@@ -86,6 +178,8 @@ public:
         if (endPair > totalPairs) {
             endPair = totalPairs;
         }
+
+        LoadCodebook();
 
         for (uint64_t pair = startPair; pair < endPair; ++pair) {
             uint32_t kvHead = pair % numKvHeads_;
@@ -109,12 +203,30 @@ public:
                 ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
                     * headDim_);
 
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                uint32_t idx = ExtractIndex(packedBase, d);
-                float cb = codebookGm_.GetValue(idx);
-                float y = cb * scale;
-
-                denseRotGm_.SetValue(outBase + d, y);
+            if (bits_ == 1U) {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    StoreDequantizedValue(
+                        outBase, d, scale,
+                        ExtractIndexBit1(packedBase, d));
+                }
+            } else if (bits_ == 2U) {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    StoreDequantizedValue(
+                        outBase, d, scale,
+                        ExtractIndexBit2(packedBase, d));
+                }
+            } else if (bits_ == 4U) {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    StoreDequantizedValue(
+                        outBase, d, scale,
+                        ExtractIndexBit4(packedBase, d));
+                }
+            } else {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    StoreDequantizedValue(
+                        outBase, d, scale,
+                        ExtractIndex(packedBase, d));
+                }
             }
         }
     }
@@ -134,6 +246,23 @@ private:
     uint32_t packedCols_{0};
     uint32_t bits_{0};
     uint32_t numCore_{0};
+
+    float cb0_{0.0F};
+    float cb1_{0.0F};
+    float cb2_{0.0F};
+    float cb3_{0.0F};
+    float cb4_{0.0F};
+    float cb5_{0.0F};
+    float cb6_{0.0F};
+    float cb7_{0.0F};
+    float cb8_{0.0F};
+    float cb9_{0.0F};
+    float cb10_{0.0F};
+    float cb11_{0.0F};
+    float cb12_{0.0F};
+    float cb13_{0.0F};
+    float cb14_{0.0F};
+    float cb15_{0.0F};
 };
 
 extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
