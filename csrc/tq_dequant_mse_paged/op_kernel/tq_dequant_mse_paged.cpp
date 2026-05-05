@@ -7,9 +7,20 @@
  */
 
 #include "kernel_operator.h"
-#include "tq_dequant_mse_paged_tiling.h"
 
 using namespace AscendC;
+
+// Device-side tiling data — mirrors op_host/tq_dequant_mse_paged_tiling.h
+// but with public fields (device-side convention).
+struct TqDequantMsePagedTilingData {
+    uint32_t totalTokens;
+    uint32_t blockSize;
+    uint32_t numKvHeads;
+    uint32_t headDim;
+    uint32_t packedCols;
+    uint32_t bits;
+    uint32_t numCore;
+};
 
 class KernelTqDequantMsePaged {
 public:
@@ -22,10 +33,8 @@ public:
         GM_ADDR tokenOffsets,
         GM_ADDR codebook,
         GM_ADDR denseRot,
-        const TqDequantMsePagedTilingData& tiling
+        const TqDequantMsePagedTilingData* tiling
     ) {
-        // Input is declared DT_INT8 in the OpDef, but the bytes are the
-        // same — reinterpret as uint8_t for bit extraction.
         packedIdxGm_.SetGlobalBuffer((__gm__ uint8_t*)packedIdx);
         normGm_.SetGlobalBuffer((__gm__ float*)norm);
         tokenBlockIdsGm_.SetGlobalBuffer((__gm__ int32_t*)tokenBlockIds);
@@ -33,13 +42,13 @@ public:
         codebookGm_.SetGlobalBuffer((__gm__ float*)codebook);
         denseRotGm_.SetGlobalBuffer((__gm__ float*)denseRot);
 
-        totalTokens_ = tiling.get_totalTokens();
-        blockSize_ = tiling.get_blockSize();
-        numKvHeads_ = tiling.get_numKvHeads();
-        headDim_ = tiling.get_headDim();
-        packedCols_ = tiling.get_packedCols();
-        bits_ = tiling.get_bits();
-        numCore_ = tiling.get_numCore();
+        totalTokens_ = tiling->totalTokens;
+        blockSize_ = tiling->blockSize;
+        numKvHeads_ = tiling->numKvHeads;
+        headDim_ = tiling->headDim;
+        packedCols_ = tiling->packedCols;
+        bits_ = tiling->bits;
+        numCore_ = tiling->numCore;
     }
 
     __aicore__ inline uint32_t ExtractIndex(uint64_t packedBase, uint32_t d)
@@ -147,7 +156,7 @@ extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
         tokenOffsets,
         codebook,
         denseRot,
-        tilingData
+        &tilingData
     );
     op.Process();
 }
