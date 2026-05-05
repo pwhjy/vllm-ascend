@@ -10,14 +10,20 @@ from .dequant import (
     build_token_map_from_block_table,
     custom_dequant_enabled,
     debug_compare_enabled,
+    prod_custom_dequant_enabled,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
+    tq_dequant_prod_paged_reference_rot,
+    tq_dequant_prod_paged_rot,
 )
 
 __all__ = [
     "build_token_map_from_block_table",
     "custom_dequant_enabled",
     "debug_compare_enabled",
+    "prod_custom_dequant_enabled",
     "tq_dequant_mse_paged_reference_rot",
     "tq_dequant_mse_paged_rot",
+    "tq_dequant_prod_paged_reference_rot",
+    "tq_dequant_prod_paged_rot",
 ]
