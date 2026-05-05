@@ -1,11 +1,7 @@
 /*
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
  * This file is a part of the vllm-ascend project.
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- *
- * Host-side tiling logic for TqDequantMsePaged.
  */
 
 #include "tq_dequant_mse_paged_tiling.h"

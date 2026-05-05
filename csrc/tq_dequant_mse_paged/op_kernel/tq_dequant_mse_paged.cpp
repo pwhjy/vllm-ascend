@@ -1,14 +1,9 @@
 /*
  * Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
  * This file is a part of the vllm-ascend project.
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
  *
  * Ascend C kernel: TurboQuant MSE paged dequant (scalar GM, correctness-first).
- *
- * Replaces: paged gather + bit unpack + codebook lookup + norm rescale
- * Output is in rotated space (no inverse rotation).
  */
 
 #include "kernel_operator.h"
@@ -29,6 +24,8 @@ public:
         GM_ADDR denseRot,
         const TqDequantMsePagedTilingData& tiling
     ) {
+        // Input is declared DT_INT8 in the OpDef, but the bytes are the
+        // same — reinterpret as uint8_t for bit extraction.
         packedIdxGm_.SetGlobalBuffer((__gm__ uint8_t*)packedIdx);
         normGm_.SetGlobalBuffer((__gm__ float*)norm);
         tokenBlockIdsGm_.SetGlobalBuffer((__gm__ int32_t*)tokenBlockIds);
