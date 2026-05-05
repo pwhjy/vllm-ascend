@@ -29,7 +29,6 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
     pack_bits,
     turboquant_decode_prod,
     turboquant_encode_prod,
-    unpack_bits,
 )
 
 
@@ -334,14 +333,11 @@ class TestTqDequantMsePagedRot:
             block_table, seq_lens, block_size,
         )
 
-        def _gather(cache):
-            return cache[token_block_ids.long(), token_offsets.long()]
-
         ref = turboquant_decode_prod(
-            _gather(k_idx),
-            _gather(k_qjl),
-            _gather(k_gamma),
-            _gather(k_norm),
+            k_idx[token_block_ids.long(), token_offsets.long()],
+            k_qjl[token_block_ids.long(), token_offsets.long()],
+            k_gamma[token_block_ids.long(), token_offsets.long()],
+            k_norm[token_block_ids.long(), token_offsets.long()],
             rotation_t,
             codebook,
             qjl_proj,
@@ -360,14 +356,21 @@ class TestTqDequantMsePagedRot:
             head_dim,
             torch.float32,
         )
-        qjl = unpack_bits(_gather(k_qjl), 1, head_dim).to(torch.float32)
-        qjl = qjl * 2.0 - 1.0
-        qjl_rot = (
-            math.sqrt(math.pi / 2.0) / head_dim
-            * _gather(k_gamma).to(torch.float32)
-            * _gather(k_norm).to(torch.float32)
-            * apply_rotation(qjl, qjl_proj)
+        qjl_scale_cache = (
+            math.sqrt(math.pi / 2.0) / head_dim * k_gamma * k_norm
+        ).contiguous()
+        qjl_codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32)
+        qjl_scaled = tq_dequant_mse_paged_rot(
+            k_qjl,
+            qjl_scale_cache,
+            token_block_ids,
+            token_offsets,
+            qjl_codebook,
+            1,
+            head_dim,
+            torch.float32,
         )
+        qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
 
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)

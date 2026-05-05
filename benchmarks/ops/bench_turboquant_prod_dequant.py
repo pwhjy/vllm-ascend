@@ -115,6 +115,7 @@ def _make_inputs(args, total_bits: int):
     codebook, _ = build_turboquant_codebook(
         args.head_dim, stage1_bits, device, torch.float32,
     )
+    qjl_codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32, device=device)
     qjl_proj = build_qjl_projection(args.head_dim, args.seed + 1, device, torch.float32)
     rotation = build_rotation_matrix(args.head_dim, args.seed + 2, device, torch.float32)
     rotation_t = rotation.transpose(0, 1).contiguous()
@@ -126,6 +127,7 @@ def _make_inputs(args, total_bits: int):
         token_block_ids,
         token_offsets,
         codebook,
+        qjl_codebook,
         qjl_proj,
         rotation_t,
     )
@@ -144,6 +146,7 @@ def _run_case(args, total_bits: int) -> None:
         token_block_ids,
         token_offsets,
         codebook,
+        qjl_codebook,
         qjl_proj,
         rotation_t,
     ) = _make_inputs(args, total_bits)
@@ -164,7 +167,7 @@ def _run_case(args, total_bits: int) -> None:
             torch.float32,
         )
 
-    def hybrid_fn():
+    def torch_hybrid_fn():
         stage1_rot = tq_dequant_mse_paged_rot(
             packed_idx,
             norm,
@@ -184,6 +187,32 @@ def _run_case(args, total_bits: int) -> None:
         qjl_rot = correction * gathered_gamma * gathered_norm * apply_rotation(qjl, qjl_proj)
         return apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
 
+    def hybrid_fn():
+        stage1_rot = tq_dequant_mse_paged_rot(
+            packed_idx,
+            norm,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            stage1_bits,
+            args.head_dim,
+            torch.float32,
+        )
+        correction = math.sqrt(math.pi / 2.0) / args.head_dim
+        qjl_scale_cache = (correction * gamma * norm).contiguous()
+        qjl_scaled = tq_dequant_mse_paged_rot(
+            packed_qjl,
+            qjl_scale_cache,
+            token_block_ids,
+            token_offsets,
+            qjl_codebook,
+            1,
+            args.head_dim,
+            torch.float32,
+        )
+        qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
+        return apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
+
     def custom_prod_fn():
         dense_rot = tq_dequant_prod_paged_rot(
             packed_idx,
@@ -201,25 +230,32 @@ def _run_case(args, total_bits: int) -> None:
         return apply_rotation(dense_rot, rotation_t).contiguous()
 
     ref = ref_fn()
+    torch_hybrid = torch_hybrid_fn()
     hybrid = hybrid_fn()
     custom_prod = custom_prod_fn()
     _sync()
 
     ref_ms = _bench(ref_fn, warmup=args.warmup, iters=args.iters)
+    torch_hybrid_ms = _bench(torch_hybrid_fn, warmup=args.warmup, iters=args.iters)
     hybrid_ms = _bench(hybrid_fn, warmup=args.warmup, iters=args.iters)
     custom_ms = _bench(custom_prod_fn, warmup=args.warmup, iters=args.iters)
 
+    torch_hybrid_diff = (torch_hybrid - ref).abs().max().item() if ref.numel() else 0.0
     hybrid_diff = (hybrid - ref).abs().max().item() if ref.numel() else 0.0
     custom_diff = (custom_prod - ref).abs().max().item() if ref.numel() else 0.0
 
     print(
         f"bits={total_bits} "
         f"ref={ref_ms:.3f} ms "
+        f"torch_hybrid={torch_hybrid_ms:.3f} ms "
         f"hybrid={hybrid_ms:.3f} ms "
         f"prod_custom={custom_ms:.3f} ms "
+        f"torch_hybrid_speedup={ref_ms / torch_hybrid_ms:.2f}x "
         f"hybrid_speedup={ref_ms / hybrid_ms:.2f}x "
+        f"hybrid_vs_torch={torch_hybrid_ms / hybrid_ms:.2f}x "
         f"prod_speedup={ref_ms / custom_ms:.2f}x "
         f"custom_vs_hybrid={hybrid_ms / custom_ms:.2f}x "
+        f"torch_hybrid_diff={torch_hybrid_diff:.3g} "
         f"hybrid_diff={hybrid_diff:.3g} "
         f"prod_diff={custom_diff:.3g}"
     )

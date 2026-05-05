@@ -76,7 +76,6 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
     turboquant_decode_prod,
     turboquant_encode_mse,
     turboquant_encode_prod,
-    unpack_bits,
 )
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -1439,6 +1438,11 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         layer._tq_k_rot_t = layer._tq_k_rot.transpose(0, 1).contiguous()
         layer._tq_v_rot_t = layer._tq_v_rot.transpose(0, 1).contiguous()
         layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype)
+        layer._tq_qjl_codebook = torch.tensor(
+            [-1.0, 1.0],
+            dtype=torch.float32,
+            device=device,
+        ).contiguous()
         layer.tq_runtime_prepared = True
 
     def _quantize_kv_to_turboquant(
@@ -1740,20 +1744,21 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             target_dtype=target_dtype,
         )
 
-        gathered_qjl = kv_cache["k_qjl"][token_block_ids.long(), token_offsets.long()]
-        gathered_gamma = kv_cache["k_gamma"][token_block_ids.long(), token_offsets.long()]
-        gathered_norm = kv_cache["k_norm"][token_block_ids.long(), token_offsets.long()]
-
-        qjl = unpack_bits(gathered_qjl, 1, self.head_size).to(target_dtype)
-        qjl = qjl * 2.0 - 1.0
         correction = math.sqrt(math.pi / 2.0) / self.head_size
-        qjl_rot = apply_rotation(qjl, layer._tq_k_qjl_proj)
-        qjl_rot = (
-            correction
-            * gathered_gamma.to(target_dtype)
-            * gathered_norm.to(target_dtype)
-            * qjl_rot
+        qjl_scale_cache = (
+            correction * kv_cache["k_gamma"] * kv_cache["k_norm"]
+        ).contiguous()
+        qjl_scaled = tq_dequant_mse_paged_rot(
+            packed_idx=kv_cache["k_qjl"],
+            norm=qjl_scale_cache,
+            token_block_ids=token_block_ids,
+            token_offsets=token_offsets,
+            codebook=layer._tq_qjl_codebook,
+            bits=1,
+            head_dim=self.head_size,
+            target_dtype=target_dtype,
         )
+        qjl_rot = apply_rotation(qjl_scaled, layer._tq_k_qjl_proj)
 
         dense_k = apply_rotation(
             k_stage1_rot + qjl_rot,
