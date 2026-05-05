@@ -782,7 +782,7 @@ at::Tensor tq_dequant_mse_paged(
     int64_t bits,
     int64_t head_dim)
 {
-    TORCH_CHECK(packed_idx.scalar_type() == at::kByte, "packed_idx must be uint8");
+    TORCH_CHECK(packed_idx.scalar_type() == at::kFloat, "P2 debug: packed_idx must be float32");
     TORCH_CHECK(token_block_ids.scalar_type() == at::kInt, "token_block_ids must be int32");
     TORCH_CHECK(token_offsets.scalar_type() == at::kInt, "token_offsets must be int32");
     TORCH_CHECK(norm.scalar_type() == at::kFloat, "P2 requires norm fp32");
@@ -797,16 +797,12 @@ at::Tensor tq_dequant_mse_paged(
     int64_t total_tokens = token_block_ids.size(0);
     int64_t num_kv_heads = packed_idx.size(2);
 
-    // CANN does not recognise DT_UINT8; the OpDef declares DT_INT8.
-    // Reinterpret the uint8 tensor as int8 (same bytes, zero copy).
-    auto packed_idx_int8 = packed_idx.view(at::kChar);
-
     at::Tensor out = at::empty(
         {total_tokens, num_kv_heads, head_dim},
         packed_idx.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(aclnnTqDequantMsePaged,
-        packed_idx_int8, norm, token_block_ids, token_offsets,
+        packed_idx, norm, token_block_ids, token_offsets,
         codebook, bits, head_dim, out);
 
     return out;

@@ -15,13 +15,13 @@ public:
     {
         this->Input("packedIdx")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_INT8})
+            .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("norm")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("tokenBlockIds")
             .ParamType(REQUIRED)
@@ -35,8 +35,8 @@ public:
             .AutoContiguous();
         this->Input("codebook")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Output("denseRot")
             .ParamType(REQUIRED)
