@@ -6,6 +6,8 @@ of the vLLM attention backend. They run on CPU so CI can gate correctness
 before NPU hardware is available.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -15,9 +17,25 @@ from vllm_ascend.ops.turboquant.dequant import (
     tq_dequant_mse_paged_rot,
 )
 from vllm_ascend.quantization.methods.turboquant_runtime import (
+    apply_rotation,
+    build_qjl_projection,
+    build_rotation_matrix,
     build_turboquant_codebook,
     pack_bits,
+    turboquant_decode_prod,
+    turboquant_encode_prod,
+    unpack_bits,
 )
+
+
+def _npu_available() -> bool:
+    npu = getattr(torch, "npu", None)
+    if npu is None or not hasattr(npu, "is_available"):
+        return False
+    try:
+        return bool(npu.is_available())
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +86,7 @@ class TestTqDequantMsePagedRot:
     """Verify that the dispatch wrapper and reference produce identical output."""
 
     @pytest.mark.parametrize("bits", [1, 2, 3, 4])
-    @pytest.mark.parametrize("head_dim", [8, 64, 128])
+    @pytest.mark.parametrize("head_dim", [8, 64, 80, 96, 128])
     def test_matches_reference(self, bits, head_dim):
         packed, norm, codebook, token_block_ids, token_offsets = \
             _make_random_paged_inputs(bits, head_dim)
@@ -133,6 +151,145 @@ class TestTqDequantMsePagedRot:
         )
 
         assert torch.equal(out, ref)
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    @pytest.mark.parametrize("bits", [1, 2, 3, 4])
+    @pytest.mark.parametrize("head_dim", [8, 64, 80, 96, 128])
+    def test_custom_op_matches_reference_on_npu(self, monkeypatch, bits, head_dim):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
+
+        packed, norm, codebook, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim, device="npu")
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+
+        torch.npu.synchronize()
+        assert out.shape == ref.shape
+        assert torch.allclose(out, ref, atol=1e-6, rtol=0), \
+            f"Mismatch for bits={bits} head_dim={head_dim}"
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    def test_custom_op_matches_reference_from_npu_block_table(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
+
+        bits = 3
+        head_dim = 80
+        block_size = 4
+        packed, norm, codebook, _, _ = _make_random_paged_inputs(
+            bits=bits,
+            head_dim=head_dim,
+            num_blocks=24,
+            block_size=block_size,
+            total_tokens=1,
+            device="npu",
+        )
+        block_table = torch.tensor([
+            [10, 3, 0],
+            [7, 15, 21],
+        ], dtype=torch.int32, device="npu")
+        seq_lens = [5, 9]
+        token_block_ids, token_offsets = build_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+
+        torch.npu.synchronize()
+        assert out.shape == ref.shape
+        assert torch.allclose(out, ref, atol=1e-6, rtol=0)
+
+    def test_prod_hybrid_stage1_mse_plus_qjl_matches_reference(self):
+        total_bits = 3
+        stage1_bits = total_bits - 1
+        head_dim = 16
+        num_blocks = 4
+        block_size = 2
+        num_kv_heads = 2
+
+        torch.manual_seed(0)
+        x = torch.randn(
+            num_blocks * block_size, num_kv_heads, head_dim,
+            dtype=torch.float32,
+        )
+        rotation = build_rotation_matrix(head_dim, 123, "cpu", torch.float32)
+        rotation_t = rotation.transpose(0, 1).contiguous()
+        qjl_proj = build_qjl_projection(head_dim, 124, "cpu", torch.float32)
+        codebook, boundary = build_turboquant_codebook(
+            head_dim, stage1_bits, "cpu", torch.float32,
+        )
+        encoded = turboquant_encode_prod(
+            x, rotation, codebook, boundary, qjl_proj, total_bits,
+        )
+
+        def _as_cache(name):
+            return encoded[name].view(num_blocks, block_size, num_kv_heads, -1)
+
+        k_idx = _as_cache("idx")
+        k_qjl = _as_cache("qjl")
+        k_gamma = _as_cache("gamma")
+        k_norm = _as_cache("norm")
+        block_table = torch.tensor([
+            [2, 0],
+            [3, 1],
+        ], dtype=torch.int32)
+        seq_lens = [3, 4]
+        token_block_ids, token_offsets = build_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+
+        def _gather(cache):
+            return cache[token_block_ids.long(), token_offsets.long()]
+
+        ref = turboquant_decode_prod(
+            _gather(k_idx),
+            _gather(k_qjl),
+            _gather(k_gamma),
+            _gather(k_norm),
+            rotation_t,
+            codebook,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            torch.float32,
+        )
+
+        stage1_rot = tq_dequant_mse_paged_rot(
+            k_idx,
+            k_norm,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            stage1_bits,
+            head_dim,
+            torch.float32,
+        )
+        qjl = unpack_bits(_gather(k_qjl), 1, head_dim).to(torch.float32)
+        qjl = qjl * 2.0 - 1.0
+        qjl_rot = (
+            math.sqrt(math.pi / 2.0) / head_dim
+            * _gather(k_gamma).to(torch.float32)
+            * _gather(k_norm).to(torch.float32)
+            * apply_rotation(qjl, qjl_proj)
+        )
+        out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
+
+        assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------
