@@ -3,7 +3,7 @@
  * This file is a part of the vllm-ascend project.
  * Licensed under the Apache License, Version 2.0 (the "License");
  *
- * Ascend C kernel: TurboQuant MSE paged dequant with two paged scales.
+ * Ascend C kernel: TurboQuant MSE paged dequant with two paged scales and UB row tiling.
  */
 
 #include "kernel_operator.h"
@@ -54,18 +54,30 @@ public:
         numCore_ = tiling->numCore;
         signedBits1_ = tiling->signedBits1;
         scaleMultiplier_ = tiling->scaleMultiplier;
+
+        uint32_t outBlockElems = 32U / sizeof(OutT);
+        alignedHeadDim_ = AlignUpU32(headDim_, outBlockElems);
+        alignedPackedCols_ = AlignUpU32(packedCols_, 32U);
+        outputRowAligned_ = (alignedHeadDim_ == headDim_);
+        packedRowAligned_ = (alignedPackedCols_ == packedCols_);
+
+        pipe_.InitBuffer(outBuf_, alignedHeadDim_ * sizeof(OutT));
+        pipe_.InitBuffer(packedBuf_, alignedPackedCols_);
     }
 
-    __aicore__ inline uint32_t ExtractIndex(uint64_t packedBase, uint32_t d)
+    __aicore__ inline uint32_t ExtractIndex(
+        const LocalTensor<uint8_t>& packedLocal,
+        uint32_t d
+    )
     {
         uint32_t bitPos = d * bits_;
         uint32_t byteId = bitPos >> 3;
         uint32_t bitOff = bitPos & 7;
 
-        uint16_t v = static_cast<uint16_t>(packedIdxGm_.GetValue(packedBase + byteId));
+        uint16_t v = static_cast<uint16_t>(packedLocal.GetValue(byteId));
         if (bitOff + bits_ > 8) {
             uint16_t high = static_cast<uint16_t>(
-                packedIdxGm_.GetValue(packedBase + byteId + 1));
+                packedLocal.GetValue(byteId + 1));
             v = static_cast<uint16_t>(v | (high << 8));
         }
 
@@ -138,13 +150,13 @@ public:
     }
 
     __aicore__ inline void StoreDequantizedValue(
-        uint64_t outBase,
+        const LocalTensor<OutT>& outLocal,
         uint32_t d,
         float scale,
         uint32_t idx
     ) {
         float cb = LookupCodebook(idx);
-        outGm_.SetValue(outBase + d, static_cast<OutT>(cb * scale));
+        outLocal.SetValue(d, static_cast<OutT>(cb * scale));
     }
 
     __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
@@ -152,7 +164,81 @@ public:
         return lhs < rhs ? lhs : rhs;
     }
 
-    __aicore__ inline void ProcessBits1(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline uint32_t AlignUpU32(uint32_t value, uint32_t align)
+    {
+        return align == 0U ? value : ((value + align - 1U) / align) * align;
+    }
+
+    __aicore__ inline void SToMTE3Sync()
+    {
+        SetFlag<HardEvent::S_MTE3>(EVENT_ID0);
+        WaitFlag<HardEvent::S_MTE3>(EVENT_ID0);
+    }
+
+    __aicore__ inline void MTE3ToSSync()
+    {
+        SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
+    }
+
+    __aicore__ inline void MTE2ToSSync()
+    {
+        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+    }
+
+    __aicore__ inline void LoadPackedRow(
+        uint64_t packedBase,
+        const LocalTensor<uint8_t>& packedLocal
+    ) {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+        DataCopyParams copyParams;
+        copyParams.blockLen = packedCols_;
+        copyParams.blockCount = 1;
+        DataCopyPadParams padParams;
+        DataCopyPad(packedLocal, packedIdxGm_[packedBase], copyParams, padParams);
+        MTE2ToSSync();
+#else
+        if (packedRowAligned_) {
+            DataCopy(packedLocal, packedIdxGm_[packedBase], packedCols_);
+            MTE2ToSSync();
+        } else {
+            for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+                packedLocal.SetValue(byteCol, packedIdxGm_.GetValue(packedBase + byteCol));
+            }
+        }
+#endif
+    }
+
+    __aicore__ inline void StoreOutputRow(
+        uint64_t outBase,
+        const LocalTensor<OutT>& outLocal
+    ) {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+        DataCopyParams copyParams;
+        copyParams.blockLen = headDim_ * sizeof(OutT);
+        copyParams.blockCount = 1;
+        SToMTE3Sync();
+        DataCopyPad(outGm_[outBase], outLocal, copyParams);
+        MTE3ToSSync();
+#else
+        if (outputRowAligned_) {
+            SToMTE3Sync();
+            DataCopy(outGm_[outBase], outLocal, headDim_);
+            MTE3ToSSync();
+        } else {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                outGm_.SetValue(outBase + d, outLocal.GetValue(d));
+            }
+        }
+#endif
+    }
+
+    __aicore__ inline void ProcessBits1(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 3;
@@ -160,17 +246,21 @@ public:
                 return;
             }
             uint32_t count = MinU32(8U, headDim_ - dBase);
-            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint8_t byteValue = packedLocal.GetValue(byteCol);
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outLocal, dBase + lane, scale,
                     (value >> lane) & 0x1U);
             }
         }
     }
 
-    __aicore__ inline void ProcessSignedBits1(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessSignedBits1(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 3;
@@ -178,16 +268,20 @@ public:
                 return;
             }
             uint32_t count = MinU32(8U, headDim_ - dBase);
-            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint8_t byteValue = packedLocal.GetValue(byteCol);
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 float signedScale = ((value >> lane) & 0x1U) != 0U ? scale : -scale;
-                outGm_.SetValue(outBase + dBase + lane, static_cast<OutT>(signedScale));
+                outLocal.SetValue(dBase + lane, static_cast<OutT>(signedScale));
             }
         }
     }
 
-    __aicore__ inline void ProcessBits2(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits2(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 2;
@@ -195,38 +289,46 @@ public:
                 return;
             }
             uint32_t count = MinU32(4U, headDim_ - dBase);
-            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint8_t byteValue = packedLocal.GetValue(byteCol);
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outLocal, dBase + lane, scale,
                     (value >> (lane << 1)) & 0x3U);
             }
         }
     }
 
-    __aicore__ inline void ProcessBits3(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits3(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         uint32_t d = 0;
         uint32_t byteCol = 0;
         for (; d + 7U < headDim_ && byteCol + 2U < packedCols_; d += 8U, byteCol += 3U) {
-            uint32_t value = static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol));
-            value |= static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol + 1U)) << 8;
-            value |= static_cast<uint32_t>(packedIdxGm_.GetValue(packedBase + byteCol + 2U)) << 16;
+            uint32_t value = static_cast<uint32_t>(packedLocal.GetValue(byteCol));
+            value |= static_cast<uint32_t>(packedLocal.GetValue(byteCol + 1U)) << 8;
+            value |= static_cast<uint32_t>(packedLocal.GetValue(byteCol + 2U)) << 16;
             for (uint32_t lane = 0; lane < 8U; ++lane) {
                 StoreDequantizedValue(
-                    outBase, d + lane, scale,
+                    outLocal, d + lane, scale,
                     (value >> (lane * 3U)) & 0x7U);
             }
         }
         for (; d < headDim_; ++d) {
             StoreDequantizedValue(
-                outBase, d, scale,
-                ExtractIndex(packedBase, d));
+                outLocal, d, scale,
+                ExtractIndex(packedLocal, d));
         }
     }
 
-    __aicore__ inline void ProcessBits4(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessBits4(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
             uint32_t dBase = byteCol << 1;
@@ -234,22 +336,26 @@ public:
                 return;
             }
             uint32_t count = MinU32(2U, headDim_ - dBase);
-            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint8_t byteValue = packedLocal.GetValue(byteCol);
             uint32_t value = static_cast<uint32_t>(byteValue);
             for (uint32_t lane = 0; lane < count; ++lane) {
                 StoreDequantizedValue(
-                    outBase, dBase + lane, scale,
+                    outLocal, dBase + lane, scale,
                     (value >> (lane << 2)) & 0xFU);
             }
         }
     }
 
-    __aicore__ inline void ProcessGeneric(uint64_t packedBase, uint64_t outBase, float scale)
+    __aicore__ inline void ProcessGeneric(
+        const LocalTensor<uint8_t>& packedLocal,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
     {
         for (uint32_t d = 0; d < headDim_; ++d) {
             StoreDequantizedValue(
-                outBase, d, scale,
-                ExtractIndex(packedBase, d));
+                outLocal, d, scale,
+                ExtractIndex(packedLocal, d));
         }
     }
 
@@ -299,25 +405,34 @@ public:
                 ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
                     * headDim_);
 
+            LocalTensor<uint8_t> packedLocal = packedBuf_.Get<uint8_t>();
+            LocalTensor<OutT> outLocal = outBuf_.Get<OutT>();
+            LoadPackedRow(packedBase, packedLocal);
+
             if (bits_ == 1U) {
                 if (signedBits1_ != 0U) {
-                    ProcessSignedBits1(packedBase, outBase, scale);
+                    ProcessSignedBits1(packedLocal, outLocal, scale);
                 } else {
-                    ProcessBits1(packedBase, outBase, scale);
+                    ProcessBits1(packedLocal, outLocal, scale);
                 }
             } else if (bits_ == 2U) {
-                ProcessBits2(packedBase, outBase, scale);
+                ProcessBits2(packedLocal, outLocal, scale);
             } else if (bits_ == 3U) {
-                ProcessBits3(packedBase, outBase, scale);
+                ProcessBits3(packedLocal, outLocal, scale);
             } else if (bits_ == 4U) {
-                ProcessBits4(packedBase, outBase, scale);
+                ProcessBits4(packedLocal, outLocal, scale);
             } else {
-                ProcessGeneric(packedBase, outBase, scale);
+                ProcessGeneric(packedLocal, outLocal, scale);
             }
+            StoreOutputRow(outBase, outLocal);
         }
     }
 
 private:
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> outBuf_;
+    TBuf<TPosition::VECCALC> packedBuf_;
+
     GlobalTensor<uint8_t> packedIdxGm_;
     GlobalTensor<float> normGm_;
     GlobalTensor<float> extraScaleGm_;
@@ -335,6 +450,10 @@ private:
     uint32_t numCore_{0};
     uint32_t signedBits1_{0};
     float scaleMultiplier_{1.0F};
+    uint32_t alignedHeadDim_{0};
+    uint32_t alignedPackedCols_{0};
+    bool outputRowAligned_{false};
+    bool packedRowAligned_{false};
 
     float cb0_{0.0F};
     float cb1_{0.0F};
