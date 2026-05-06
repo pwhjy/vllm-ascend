@@ -586,7 +586,6 @@ public:
         LocalTensor<float> qRotLocal = qRotBuf_.Get<float>();
         LocalTensor<float> qQjlLocal = qQjlBuf_.Get<float>();
         DataCopy(qRotLocal, qRotGm_[queryBase], queryElems);
-        MTE2ToSSync();
         DataCopy(qQjlLocal, qQjlGm_[queryBase], queryElems);
         MTE2ToSSync();
 
