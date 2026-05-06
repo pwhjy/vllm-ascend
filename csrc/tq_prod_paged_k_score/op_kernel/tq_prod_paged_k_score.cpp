@@ -452,7 +452,7 @@ public:
         StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
-    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2(
+    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2Valid(
         uint32_t b,
         uint32_t kvHead,
         uint32_t pos,
@@ -460,15 +460,6 @@ public:
         const LocalTensor<float>& qQjlLocal
     ) {
         uint32_t qHeadBase = kvHead * qPerKv_;
-        int32_t seqLen = seqLensGm_.GetValue(b);
-        if (pos >= maxSeqLen_ || pos >= static_cast<uint32_t>(seqLen)) {
-            StoreInvalid(b, qHeadBase, pos);
-            StoreInvalid(b, qHeadBase + 1U, pos);
-            StoreInvalid(b, qHeadBase + 2U, pos);
-            StoreInvalid(b, qHeadBase + 3U, pos);
-            return;
-        }
-
         uint32_t blockOffset = pos / blockSize_;
         uint32_t tokenOffset = pos - blockOffset * blockSize_;
         int32_t blockId = blockTableGm_.GetValue(
@@ -560,6 +551,27 @@ public:
         StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
+    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t pos,
+        const LocalTensor<float>& qRotLocal,
+        const LocalTensor<float>& qQjlLocal
+    ) {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        int32_t seqLen = seqLensGm_.GetValue(b);
+        if (pos >= maxSeqLen_ || pos >= static_cast<uint32_t>(seqLen)) {
+            StoreInvalid(b, qHeadBase, pos);
+            StoreInvalid(b, qHeadBase + 1U, pos);
+            StoreInvalid(b, qHeadBase + 2U, pos);
+            StoreInvalid(b, qHeadBase + 3U, pos);
+            return;
+        }
+
+        ProcessKvTokenScoresQ4LocalBits2Valid(
+            b, kvHead, pos, qRotLocal, qQjlLocal);
+    }
+
     __aicore__ inline void ProcessKvTokenTileQ4Local(
         uint32_t b,
         uint32_t kvHead,
@@ -579,6 +591,17 @@ public:
         MTE2ToSSync();
 
         if (stage1Bits_ == 2U && (headDim_ & 3U) == 0U) {
+            int32_t seqLen = seqLensGm_.GetValue(b);
+            uint32_t validSeqLen = seqLen > 0
+                ? static_cast<uint32_t>(seqLen) : 0U;
+            uint32_t tileEnd = posStart + scoreTileLen_;
+            if (tileEnd <= maxSeqLen_ && tileEnd <= validSeqLen) {
+                for (uint32_t i = 0; i < scoreTileLen_; ++i) {
+                    ProcessKvTokenScoresQ4LocalBits2Valid(
+                        b, kvHead, posStart + i, qRotLocal, qQjlLocal);
+                }
+                return;
+            }
             for (uint32_t i = 0; i < scoreTileLen_; ++i) {
                 ProcessKvTokenScoresQ4LocalBits2(
                     b, kvHead, posStart + i, qRotLocal, qQjlLocal);
