@@ -64,6 +64,7 @@ from vllm_ascend.ops.turboquant.dequant import (
     custom_dequant_enabled,
     debug_compare_enabled,
     tq_dequant_mse_paged_rot,
+    tq_dequant_mse_paged_scaled_rot,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
@@ -1741,28 +1742,20 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             bytes_out=k_stage1_rot.numel() * k_stage1_rot.element_size(),
         )
 
-        t_stage = time.perf_counter()
         correction = math.sqrt(math.pi / 2.0) / self.head_size
-        qjl_scale_cache = (
-            correction * kv_cache["k_gamma"] * kv_cache["k_norm"]
-        ).contiguous()
-        _maybe_sync_for_profile(qjl_scale_cache)
-        _record_tq_profile(
-            f"{profile_label}.qjl_scale_cache",
-            (time.perf_counter() - t_stage) * 1000.0,
-            vectors=int(qjl_scale_cache.numel()),
-            bytes_out=qjl_scale_cache.numel() * qjl_scale_cache.element_size(),
-        )
         t_stage = time.perf_counter()
-        qjl_scaled = tq_dequant_mse_paged_rot(
+        qjl_scaled = tq_dequant_mse_paged_scaled_rot(
             packed_idx=kv_cache["k_qjl"],
-            norm=qjl_scale_cache,
+            norm=kv_cache["k_norm"],
+            extra_scale=kv_cache["k_gamma"],
             token_block_ids=token_block_ids,
             token_offsets=token_offsets,
             codebook=layer._tq_qjl_codebook,
             bits=1,
             head_dim=self.head_size,
             target_dtype=target_dtype,
+            scale_multiplier=correction,
+            signed_bits1=True,
         )
         _maybe_sync_for_profile(qjl_scaled)
         _record_tq_profile(

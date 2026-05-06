@@ -22,6 +22,7 @@ struct TqDequantMsePagedTilingData {
     uint32_t numCore;
 };
 
+template <typename OutT>
 class KernelTqDequantMsePaged {
 public:
     __aicore__ inline KernelTqDequantMsePaged() {}
@@ -40,7 +41,7 @@ public:
         tokenBlockIdsGm_.SetGlobalBuffer((__gm__ int32_t*)tokenBlockIds);
         tokenOffsetsGm_.SetGlobalBuffer((__gm__ int32_t*)tokenOffsets);
         codebookGm_.SetGlobalBuffer((__gm__ float*)codebook);
-        denseRotGm_.SetGlobalBuffer((__gm__ float*)denseRot);
+        denseRotGm_.SetGlobalBuffer((__gm__ OutT*)denseRot);
 
         totalTokens_ = tiling->totalTokens;
         blockSize_ = tiling->blockSize;
@@ -139,7 +140,7 @@ public:
         uint32_t idx
     ) {
         float cb = LookupCodebook(idx);
-        denseRotGm_.SetValue(outBase + d, cb * scale);
+        denseRotGm_.SetValue(outBase + d, static_cast<OutT>(cb * scale));
     }
 
     __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
@@ -294,7 +295,7 @@ private:
     GlobalTensor<int32_t> tokenBlockIdsGm_;
     GlobalTensor<int32_t> tokenOffsetsGm_;
     GlobalTensor<float> codebookGm_;
-    GlobalTensor<float> denseRotGm_;
+    GlobalTensor<OutT> denseRotGm_;
 
     uint32_t totalTokens_{0};
     uint32_t blockSize_{0};
@@ -322,6 +323,29 @@ private:
     float cb15_{0.0F};
 };
 
+template <typename OutT>
+__aicore__ inline void RunTqDequantMsePaged(
+    GM_ADDR packedIdx,
+    GM_ADDR norm,
+    GM_ADDR tokenBlockIds,
+    GM_ADDR tokenOffsets,
+    GM_ADDR codebook,
+    GM_ADDR denseRot,
+    const TqDequantMsePagedTilingData* tilingData
+) {
+    KernelTqDequantMsePaged<OutT> op;
+    op.Init(
+        packedIdx,
+        norm,
+        tokenBlockIds,
+        tokenOffsets,
+        codebook,
+        denseRot,
+        tilingData
+    );
+    op.Process();
+}
+
 extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
     GM_ADDR packedIdx,
     GM_ADDR norm,
@@ -336,8 +360,7 @@ extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
     REGISTER_TILING_DEFAULT(TqDequantMsePagedTilingData);
     GET_TILING_DATA_WITH_STRUCT(TqDequantMsePagedTilingData, tilingData, tiling);
 
-    KernelTqDequantMsePaged op;
-    op.Init(
+    RunTqDequantMsePaged<DTYPE_OUT>(
         packedIdx,
         norm,
         tokenBlockIds,
@@ -346,5 +369,4 @@ extern "C" __global__ __aicore__ void tq_dequant_mse_paged(
         denseRot,
         &tilingData
     );
-    op.Process();
 }

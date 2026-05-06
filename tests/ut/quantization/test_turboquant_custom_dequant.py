@@ -16,6 +16,7 @@ from vllm_ascend.ops.turboquant.dequant import (
     cached_token_map_from_block_table,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
+    tq_dequant_mse_paged_scaled_rot,
     tq_dequant_prod_paged_reference_rot,
     tq_dequant_prod_paged_rot,
 )
@@ -236,6 +237,31 @@ class TestTqDequantMsePagedRot:
             f"Mismatch for bits={bits} head_dim={head_dim}"
 
     @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_custom_op_writes_target_dtype_on_npu(self, monkeypatch, dtype):
+        monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
+        monkeypatch.setenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "1")
+
+        bits = 3
+        head_dim = 128
+        packed, norm, codebook, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim, device="npu")
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, dtype,
+        )
+        out = tq_dequant_mse_paged_rot(
+            packed, norm, token_block_ids, token_offsets,
+            codebook, bits, head_dim, dtype,
+        )
+
+        torch.npu.synchronize()
+        assert out.dtype == dtype
+        assert out.shape == ref.shape
+        assert torch.allclose(out.float(), ref.float(), atol=1e-3, rtol=0)
+
+    @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
     @pytest.mark.parametrize("bits", [1, 2, 3, 4])
     def test_tiny_head_dim_uses_reference_on_npu(self, monkeypatch, bits):
         monkeypatch.setenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "1")
@@ -357,24 +383,69 @@ class TestTqDequantMsePagedRot:
             head_dim,
             torch.float32,
         )
-        qjl_scale_cache = (
-            math.sqrt(math.pi / 2.0) / head_dim * k_gamma * k_norm
-        ).contiguous()
         qjl_codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32)
-        qjl_scaled = tq_dequant_mse_paged_rot(
+        qjl_scaled = tq_dequant_mse_paged_scaled_rot(
             k_qjl,
-            qjl_scale_cache,
+            k_norm,
+            k_gamma,
             token_block_ids,
             token_offsets,
             qjl_codebook,
             1,
             head_dim,
             torch.float32,
+            math.sqrt(math.pi / 2.0) / head_dim,
+            signed_bits1=True,
         )
         qjl_rot = apply_rotation(qjl_scaled, qjl_proj)
         out = apply_rotation(stage1_rot + qjl_rot, rotation_t).contiguous()
 
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    def test_scaled_mse_paged_rot_matches_combined_scale_reference(self):
+        bits = 1
+        head_dim = 64
+        packed, norm, _, token_block_ids, token_offsets = \
+            _make_random_paged_inputs(bits, head_dim)
+        extra_scale = torch.rand_like(norm)
+        codebook = torch.tensor([-1.0, 1.0], dtype=torch.float32)
+        scale_multiplier = 0.125
+        combined_scale = (norm * extra_scale * scale_multiplier).contiguous()
+
+        ref = tq_dequant_mse_paged_reference_rot(
+            packed, combined_scale, token_block_ids, token_offsets,
+            codebook, bits, head_dim, torch.float32,
+        )
+        out = tq_dequant_mse_paged_scaled_rot(
+            packed,
+            norm,
+            extra_scale,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            bits,
+            head_dim,
+            torch.float32,
+            scale_multiplier,
+        )
+
+        assert torch.equal(out, ref)
+
+        out_signed = tq_dequant_mse_paged_scaled_rot(
+            packed,
+            norm,
+            extra_scale,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            bits,
+            head_dim,
+            torch.float32,
+            scale_multiplier,
+            signed_bits1=True,
+        )
+
+        assert torch.equal(out_signed, ref)
 
     @pytest.mark.parametrize("total_bits", [2, 3, 4])
     @pytest.mark.parametrize("head_dim", [16, 64])

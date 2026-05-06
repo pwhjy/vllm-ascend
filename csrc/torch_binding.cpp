@@ -47,6 +47,7 @@
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "tq_dequant_mse_paged/tq_dequant_mse_paged_torch_adpt.h"
+#include "tq_dequant_mse_paged_scaled/tq_dequant_mse_paged_scaled_torch_adpt.h"
 #include "tq_dequant_prod_paged/tq_dequant_prod_paged_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -809,6 +810,109 @@ at::Tensor tq_dequant_mse_paged(
     return out;
 }
 
+namespace {
+
+at::ScalarType tq_dequant_out_dtype_from_code(int64_t out_dtype)
+{
+    switch (out_dtype) {
+        case 0:
+            return at::kFloat;
+        case 1:
+            return at::kHalf;
+        default:
+            TORCH_CHECK(false, "unsupported TurboQuant output dtype code: ", out_dtype);
+    }
+    return at::kFloat;
+}
+
+void check_tq_dequant_mse_paged_inputs(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits)
+{
+    TORCH_CHECK(packed_idx.scalar_type() == at::kByte, "packed_idx must be uint8");
+    TORCH_CHECK(token_block_ids.scalar_type() == at::kInt, "token_block_ids must be int32");
+    TORCH_CHECK(token_offsets.scalar_type() == at::kInt, "token_offsets must be int32");
+    TORCH_CHECK(norm.scalar_type() == at::kFloat, "P2 requires norm fp32");
+    TORCH_CHECK(codebook.scalar_type() == at::kFloat, "P2 requires codebook fp32");
+    TORCH_CHECK(packed_idx.dim() == 4,
+                "packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(norm.dim() == 4, "norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(token_block_ids.dim() == 1, "token_block_ids must be 1D");
+    TORCH_CHECK(token_offsets.dim() == 1, "token_offsets must be 1D");
+    TORCH_CHECK(bits >= 1 && bits <= 4, "bits must be in [1, 4]");
+}
+
+}  // namespace
+
+at::Tensor tq_dequant_mse_paged_out(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits,
+    int64_t head_dim,
+    int64_t out_dtype)
+{
+    check_tq_dequant_mse_paged_inputs(
+        packed_idx, norm, token_block_ids, token_offsets, codebook, bits);
+
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+    at::ScalarType scalar_type = tq_dequant_out_dtype_from_code(out_dtype);
+
+    at::Tensor out = at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(scalar_type));
+
+    EXEC_NPU_CMD(aclnnTqDequantMsePaged,
+        packed_idx, norm, token_block_ids, token_offsets,
+        codebook, bits, head_dim, out);
+
+    return out;
+}
+
+at::Tensor tq_dequant_mse_paged_scaled_out(
+    const at::Tensor& packed_idx,
+    const at::Tensor& norm,
+    const at::Tensor& extra_scale,
+    const at::Tensor& token_block_ids,
+    const at::Tensor& token_offsets,
+    const at::Tensor& codebook,
+    int64_t bits,
+    int64_t head_dim,
+    int64_t out_dtype,
+    double scale_multiplier,
+    int64_t signed_bits1)
+{
+    check_tq_dequant_mse_paged_inputs(
+        packed_idx, norm, token_block_ids, token_offsets, codebook, bits);
+    TORCH_CHECK(extra_scale.scalar_type() == at::kFloat,
+                "extra_scale must be fp32");
+    TORCH_CHECK(extra_scale.dim() == 4,
+                "extra_scale must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(extra_scale.sizes() == norm.sizes(),
+                "extra_scale must have the same shape as norm");
+
+    int64_t total_tokens = token_block_ids.size(0);
+    int64_t num_kv_heads = packed_idx.size(2);
+    at::ScalarType scalar_type = tq_dequant_out_dtype_from_code(out_dtype);
+
+    at::Tensor out = at::empty(
+        {total_tokens, num_kv_heads, head_dim},
+        packed_idx.options().dtype(scalar_type));
+
+    EXEC_NPU_CMD(aclnnTqDequantMsePagedScaled,
+        packed_idx, norm, extra_scale, token_block_ids, token_offsets,
+        codebook, bits, head_dim, scale_multiplier, signed_bits1, out);
+
+    return out;
+}
+
 at::Tensor tq_dequant_prod_paged(
     const at::Tensor& packed_idx,
     const at::Tensor& packed_qjl,
@@ -1166,6 +1270,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     Tensor codebook, int bits, int head_dim) -> Tensor"
     );
     ops.impl("tq_dequant_mse_paged", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged);
+    ops.def(
+        "tq_dequant_mse_paged_out(Tensor packed_idx, Tensor norm, "
+        "                         Tensor token_block_ids, Tensor token_offsets, "
+        "                         Tensor codebook, int bits, int head_dim, "
+        "                         int out_dtype) -> Tensor"
+    );
+    ops.impl("tq_dequant_mse_paged_out", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged_out);
+    ops.def(
+        "tq_dequant_mse_paged_scaled_out(Tensor packed_idx, Tensor norm, "
+        "                                Tensor extra_scale, "
+        "                                Tensor token_block_ids, Tensor token_offsets, "
+        "                                Tensor codebook, int bits, int head_dim, "
+        "                                int out_dtype, float scale_multiplier, "
+        "                                int signed_bits1) -> Tensor"
+    );
+    ops.impl("tq_dequant_mse_paged_scaled_out", torch::kPrivateUse1, &vllm_ascend::tq_dequant_mse_paged_scaled_out);
 
     ops.def(
         "tq_dequant_prod_paged(Tensor packed_idx, Tensor packed_qjl, "

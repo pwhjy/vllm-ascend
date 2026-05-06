@@ -9,9 +9,9 @@
 
 namespace ops {
 
-class TqDequantMsePaged : public OpDef {
+class TqDequantMsePagedScaled : public OpDef {
 public:
-    explicit TqDequantMsePaged(const char* name) : OpDef(name)
+    explicit TqDequantMsePagedScaled(const char* name) : OpDef(name)
     {
         this->Input("packedIdx")
             .ParamType(REQUIRED)
@@ -19,6 +19,11 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("norm")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("extraScale")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
@@ -44,6 +49,8 @@ public:
             .Format({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("bits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
+        this->Attr("scaleMultiplier").AttrType(REQUIRED).Float(1.0);
+        this->Attr("signedBits1").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
@@ -59,6 +66,6 @@ public:
     }
 };
 
-OP_ADD(TqDequantMsePaged);
+OP_ADD(TqDequantMsePagedScaled);
 
 }  // namespace ops
