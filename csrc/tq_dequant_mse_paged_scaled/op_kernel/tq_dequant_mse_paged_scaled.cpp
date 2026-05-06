@@ -277,6 +277,27 @@ public:
         }
     }
 
+    __aicore__ inline void ProcessSignedBits1FromGm(
+        uint64_t packedBase,
+        const LocalTensor<OutT>& outLocal,
+        float scale
+    )
+    {
+        for (uint32_t byteCol = 0; byteCol < packedCols_; ++byteCol) {
+            uint32_t dBase = byteCol << 3;
+            if (dBase >= headDim_) {
+                return;
+            }
+            uint32_t count = MinU32(8U, headDim_ - dBase);
+            uint8_t byteValue = packedIdxGm_.GetValue(packedBase + byteCol);
+            uint32_t value = static_cast<uint32_t>(byteValue);
+            for (uint32_t lane = 0; lane < count; ++lane) {
+                float signedScale = ((value >> lane) & 0x1U) != 0U ? scale : -scale;
+                outLocal.SetValue(dBase + lane, static_cast<OutT>(signedScale));
+            }
+        }
+    }
+
     __aicore__ inline void ProcessBits2(
         const LocalTensor<uint8_t>& packedLocal,
         const LocalTensor<OutT>& outLocal,
@@ -378,7 +399,9 @@ public:
             endPair = totalPairs;
         }
 
-        LoadCodebook();
+        if (bits_ != 1U || signedBits1_ == 0U) {
+            LoadCodebook();
+        }
 
         LocalTensor<uint8_t> packedLocal = packedBuf_.Get<uint8_t>();
         LocalTensor<OutT> outTileLocal = outBuf_.Get<OutT>();
@@ -407,21 +430,25 @@ public:
                 scaleMultiplier_);
 
             LocalTensor<OutT> outLocal = outTileLocal[rowInTile * alignedHeadDim_];
-            LoadPackedRow(packedBase, packedLocal);
 
             if (bits_ == 1U) {
                 if (signedBits1_ != 0U) {
-                    ProcessSignedBits1(packedLocal, outLocal, scale);
+                    ProcessSignedBits1FromGm(packedBase, outLocal, scale);
                 } else {
+                    LoadPackedRow(packedBase, packedLocal);
                     ProcessBits1(packedLocal, outLocal, scale);
                 }
             } else if (bits_ == 2U) {
+                LoadPackedRow(packedBase, packedLocal);
                 ProcessBits2(packedLocal, outLocal, scale);
             } else if (bits_ == 3U) {
+                LoadPackedRow(packedBase, packedLocal);
                 ProcessBits3(packedLocal, outLocal, scale);
             } else if (bits_ == 4U) {
+                LoadPackedRow(packedBase, packedLocal);
                 ProcessBits4(packedLocal, outLocal, scale);
             } else {
+                LoadPackedRow(packedBase, packedLocal);
                 ProcessGeneric(packedLocal, outLocal, scale);
             }
 
