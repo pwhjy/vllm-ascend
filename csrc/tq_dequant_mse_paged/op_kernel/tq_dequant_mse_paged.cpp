@@ -56,8 +56,9 @@ public:
         alignedPackedCols_ = AlignUpU32(packedCols_, 32U);
         outputRowAligned_ = (alignedHeadDim_ == headDim_);
         packedRowAligned_ = (alignedPackedCols_ == packedCols_);
+        outputRowsPerTile_ = headDim_ <= 256U ? 16U : 4U;
 
-        pipe_.InitBuffer(outBuf_, alignedHeadDim_ * sizeof(OutT));
+        pipe_.InitBuffer(outBuf_, outputRowsPerTile_ * alignedHeadDim_ * sizeof(OutT));
         pipe_.InitBuffer(packedBuf_, alignedPackedCols_);
     }
 
@@ -206,28 +207,27 @@ public:
 #endif
     }
 
-    __aicore__ inline void StoreOutputRow(
+    __aicore__ inline void StoreOutputRows(
         uint64_t outBase,
-        const LocalTensor<OutT>& outLocal
+        const LocalTensor<OutT>& outLocal,
+        uint32_t rowCount
     ) {
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-        DataCopyParams copyParams;
-        copyParams.blockLen = headDim_ * sizeof(OutT);
-        copyParams.blockCount = 1;
-        SToMTE3Sync();
-        DataCopyPad(denseRotGm_[outBase], outLocal, copyParams);
-        MTE3ToSSync();
-#else
+        if (rowCount == 0U) {
+            return;
+        }
         if (outputRowAligned_) {
             SToMTE3Sync();
-            DataCopy(denseRotGm_[outBase], outLocal, headDim_);
+            DataCopy(denseRotGm_[outBase], outLocal, rowCount * headDim_);
             MTE3ToSSync();
         } else {
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                denseRotGm_.SetValue(outBase + d, outLocal.GetValue(d));
+            for (uint32_t row = 0; row < rowCount; ++row) {
+                uint64_t rowBase = outBase + static_cast<uint64_t>(row) * headDim_;
+                LocalTensor<OutT> rowLocal = outLocal[row * alignedHeadDim_];
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    denseRotGm_.SetValue(rowBase + d, rowLocal.GetValue(d));
+                }
             }
         }
-#endif
     }
 
     __aicore__ inline void ProcessBits1(
@@ -355,6 +355,11 @@ public:
 
         LoadCodebook();
 
+        LocalTensor<uint8_t> packedLocal = packedBuf_.Get<uint8_t>();
+        LocalTensor<OutT> outTileLocal = outBuf_.Get<OutT>();
+        uint64_t tileStartPair = startPair;
+        uint32_t rowInTile = 0;
+
         for (uint64_t pair = startPair; pair < endPair; ++pair) {
             uint32_t kvHead = pair % numKvHeads_;
             uint32_t token = pair / numKvHeads_;
@@ -373,12 +378,7 @@ public:
                     * numKvHeads_ + kvHead);
             float scale = normGm_.GetValue(normIndex);
 
-            uint64_t outBase =
-                ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
-                    * headDim_);
-
-            LocalTensor<uint8_t> packedLocal = packedBuf_.Get<uint8_t>();
-            LocalTensor<OutT> outLocal = outBuf_.Get<OutT>();
+            LocalTensor<OutT> outLocal = outTileLocal[rowInTile * alignedHeadDim_];
             LoadPackedRow(packedBase, packedLocal);
 
             if (bits_ == 1U) {
@@ -392,7 +392,13 @@ public:
             } else {
                 ProcessGeneric(packedLocal, outLocal, scale);
             }
-            StoreOutputRow(outBase, outLocal);
+
+            ++rowInTile;
+            if (rowInTile == outputRowsPerTile_ || pair + 1U == endPair) {
+                StoreOutputRows(tileStartPair * headDim_, outTileLocal, rowInTile);
+                tileStartPair = pair + 1U;
+                rowInTile = 0U;
+            }
         }
     }
 
@@ -417,6 +423,7 @@ private:
     uint32_t numCore_{0};
     uint32_t alignedHeadDim_{0};
     uint32_t alignedPackedCols_{0};
+    uint32_t outputRowsPerTile_{1};
     bool outputRowAligned_{false};
     bool packedRowAligned_{false};
 
