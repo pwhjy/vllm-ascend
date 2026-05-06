@@ -104,6 +104,14 @@ public:
         WaitFlag<HardEvent::V_S>(eventId);
     }
 
+    __aicore__ inline void VToMTE3Sync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(eventId);
+        WaitFlag<HardEvent::V_MTE3>(eventId);
+    }
+
     __aicore__ inline void SToVSync()
     {
         event_t eventId = static_cast<event_t>(
@@ -391,9 +399,8 @@ public:
         uint32_t qHeadBase = kvHead * qPerKv_;
         uint64_t outBase =
             (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
-        for (uint32_t i = 0; i < 4U * headDim_; ++i) {
-            outRotGm_.SetValue(outBase + i, accLocal.GetValue(i));
-        }
+        VToMTE3Sync();
+        DataCopy(outRotGm_[outBase], accLocal, 4U * headDim_);
     }
 
     __aicore__ inline void ProcessKvHead(uint32_t b, uint32_t kvHead)
