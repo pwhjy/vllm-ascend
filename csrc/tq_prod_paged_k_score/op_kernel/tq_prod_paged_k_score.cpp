@@ -22,6 +22,8 @@ struct TqProdPagedKScoreTilingData {
     uint32_t packedCols;
     uint32_t qjlCols;
     uint32_t stage1Bits;
+    uint32_t scoreTileLen;
+    uint32_t maxSeqTiles;
     uint32_t numCore;
     float scale;
     float correction;
@@ -66,9 +68,14 @@ public:
         packedCols_ = tiling->packedCols;
         qjlCols_ = tiling->qjlCols;
         stage1Bits_ = tiling->stage1Bits;
+        scoreTileLen_ = tiling->scoreTileLen;
+        maxSeqTiles_ = tiling->maxSeqTiles;
         numCore_ = tiling->numCore;
         scale_ = tiling->scale;
         correction_ = tiling->correction;
+
+        pipe_.InitBuffer(qRotBuf_, 8U * headDim_ * sizeof(float));
+        pipe_.InitBuffer(qQjlBuf_, 8U * headDim_ * sizeof(float));
     }
 
     __aicore__ inline uint32_t ExtractIndex(uint64_t packedBase, uint32_t d)
@@ -95,6 +102,12 @@ public:
         uint8_t byteValue = packedQjlGm_.GetValue(qjlBase + byteId);
         return ((static_cast<uint32_t>(byteValue) >> bitOff) & 0x1U) != 0U
             ? 1.0F : -1.0F;
+    }
+
+    __aicore__ inline void MTE2ToSSync()
+    {
+        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
     }
 
     __aicore__ inline void LoadCodebook()
@@ -357,13 +370,105 @@ public:
         }
     }
 
+    __aicore__ inline void ProcessKvTokenScoresQ4Local(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t pos,
+        const LocalTensor<float>& qRotLocal,
+        const LocalTensor<float>& qQjlLocal
+    ) {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        int32_t seqLen = seqLensGm_.GetValue(b);
+        if (pos >= maxSeqLen_ || pos >= static_cast<uint32_t>(seqLen)) {
+            StoreInvalid(b, qHeadBase, pos);
+            StoreInvalid(b, qHeadBase + 1U, pos);
+            StoreInvalid(b, qHeadBase + 2U, pos);
+            StoreInvalid(b, qHeadBase + 3U, pos);
+            return;
+        }
+
+        uint32_t blockOffset = pos / blockSize_;
+        uint32_t tokenOffset = pos - blockOffset * blockSize_;
+        int32_t blockId = blockTableGm_.GetValue(
+            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+        uint64_t cacheIndex =
+            ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                * numKvHeads_ + kvHead);
+        uint64_t packedBase = cacheIndex * packedCols_;
+        uint64_t qjlBase = cacheIndex * qjlCols_;
+        float gamma = gammaGm_.GetValue(cacheIndex);
+        float norm = normGm_.GetValue(cacheIndex);
+
+        float mseAcc0 = 0.0F;
+        float mseAcc1 = 0.0F;
+        float mseAcc2 = 0.0F;
+        float mseAcc3 = 0.0F;
+        float qjlAcc0 = 0.0F;
+        float qjlAcc1 = 0.0F;
+        float qjlAcc2 = 0.0F;
+        float qjlAcc3 = 0.0F;
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractIndex(packedBase, d);
+            float cb = LookupCodebook(idx);
+            float qjlSign = ExtractQjlSign(qjlBase, d);
+
+            float qRot0 = qRotLocal.GetValue(d);
+            float qQjl0 = qQjlLocal.GetValue(d);
+            float qRot1 = qRotLocal.GetValue(headDim_ + d);
+            float qQjl1 = qQjlLocal.GetValue(headDim_ + d);
+            float qRot2 = qRotLocal.GetValue((headDim_ << 1) + d);
+            float qQjl2 = qQjlLocal.GetValue((headDim_ << 1) + d);
+            float qRot3 = qRotLocal.GetValue(3U * headDim_ + d);
+            float qQjl3 = qQjlLocal.GetValue(3U * headDim_ + d);
+
+            mseAcc0 += qRot0 * cb;
+            mseAcc1 += qRot1 * cb;
+            mseAcc2 += qRot2 * cb;
+            mseAcc3 += qRot3 * cb;
+            qjlAcc0 += qQjl0 * qjlSign;
+            qjlAcc1 += qQjl1 * qjlSign;
+            qjlAcc2 += qQjl2 * qjlSign;
+            qjlAcc3 += qQjl3 * qjlSign;
+        }
+
+        StoreScore(b, qHeadBase, pos, mseAcc0, qjlAcc0, gamma, norm);
+        StoreScore(b, qHeadBase + 1U, pos, mseAcc1, qjlAcc1, gamma, norm);
+        StoreScore(b, qHeadBase + 2U, pos, mseAcc2, qjlAcc2, gamma, norm);
+        StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
+    }
+
+    __aicore__ inline void ProcessKvTokenTileQ4Local(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t tile
+    ) {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        uint32_t posStart = tile * scoreTileLen_;
+        uint64_t queryBase =
+            (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
+        uint32_t queryElems = 4U * headDim_;
+
+        LocalTensor<float> qRotLocal = qRotBuf_.Get<float>();
+        LocalTensor<float> qQjlLocal = qQjlBuf_.Get<float>();
+        DataCopy(qRotLocal, qRotGm_[queryBase], queryElems);
+        MTE2ToSSync();
+        DataCopy(qQjlLocal, qQjlGm_[queryBase], queryElems);
+        MTE2ToSSync();
+
+        for (uint32_t i = 0; i < scoreTileLen_; ++i) {
+            ProcessKvTokenScoresQ4Local(
+                b, kvHead, posStart + i, qRotLocal, qQjlLocal);
+        }
+    }
+
     __aicore__ inline void Process()
     {
         uint32_t coreId = GetBlockIdx();
         uint64_t totalTasks =
             static_cast<uint64_t>(batch_) *
             static_cast<uint64_t>(numKvHeads_) *
-            static_cast<uint64_t>(maxSeqLen_);
+            static_cast<uint64_t>(maxSeqTiles_);
         if (totalTasks == 0) {
             return;
         }
@@ -378,15 +483,23 @@ public:
 
         LoadCodebook();
         for (uint64_t linear = start; linear < end; ++linear) {
-            uint32_t pos = static_cast<uint32_t>(linear % maxSeqLen_);
-            uint64_t kvLinear = linear / maxSeqLen_;
+            uint32_t tile = static_cast<uint32_t>(linear % maxSeqTiles_);
+            uint64_t kvLinear = linear / maxSeqTiles_;
             uint32_t kvHead = static_cast<uint32_t>(kvLinear % numKvHeads_);
             uint32_t b = static_cast<uint32_t>(kvLinear / numKvHeads_);
-            ProcessKvTokenScores(b, kvHead, pos);
+            if (qPerKv_ == 4U && scoreTileLen_ > 1U) {
+                ProcessKvTokenTileQ4Local(b, kvHead, tile);
+            } else {
+                ProcessKvTokenScores(b, kvHead, tile);
+            }
         }
     }
 
 private:
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> qRotBuf_;
+    TBuf<TPosition::VECCALC> qQjlBuf_;
+
     GlobalTensor<float> qRotGm_;
     GlobalTensor<float> qQjlGm_;
     GlobalTensor<uint8_t> packedIdxGm_;
@@ -409,6 +522,8 @@ private:
     uint32_t packedCols_{0};
     uint32_t qjlCols_{0};
     uint32_t stage1Bits_{0};
+    uint32_t scoreTileLen_{1};
+    uint32_t maxSeqTiles_{0};
     uint32_t numCore_{0};
     float scale_{1.0F};
     float correction_{0.0F};

@@ -45,13 +45,17 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     if (qPerKv == 0) {
         qPerKv = 1;
     }
+    uint32_t scoreTileLen = qPerKv == 4U ? 16U : 1U;
+    uint32_t maxSeqTiles =
+        scoreTileLen == 0U ? maxSeqLen :
+        (maxSeqLen + scoreTileLen - 1U) / scoreTileLen;
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
     uint64_t usefulCore =
         static_cast<uint64_t>(batch) *
         static_cast<uint64_t>(numKvHeads) *
-        static_cast<uint64_t>(maxSeqLen);
+        static_cast<uint64_t>(maxSeqTiles);
     if (usefulCore > 0 && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);
     }
@@ -71,6 +75,8 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     tiling.set_packedCols(packedCols);
     tiling.set_qjlCols(qjlCols);
     tiling.set_stage1Bits(stage1Bits);
+    tiling.set_scoreTileLen(scoreTileLen);
+    tiling.set_maxSeqTiles(maxSeqTiles);
     tiling.set_numCore(coreNum);
     tiling.set_scale(scale);
     tiling.set_correction(correction);
