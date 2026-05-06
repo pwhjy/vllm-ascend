@@ -709,6 +709,46 @@ at::Tensor tq_prod_paged_k_score_meta(
         q_rot.options().dtype(at::kFloat).device(at::kMeta));
 }
 
+at::Tensor tq_prod_mse_paged_attention_meta(
+    const at::Tensor& q_rot,
+    const at::Tensor& q_qjl,
+    const at::Tensor& k_packed_idx,
+    const at::Tensor& k_packed_qjl,
+    const at::Tensor& k_gamma,
+    const at::Tensor& k_norm,
+    const at::Tensor& v_packed_idx,
+    const at::Tensor& v_norm,
+    const at::Tensor& block_table,
+    const at::Tensor& seq_lens,
+    const at::Tensor& k_codebook,
+    const at::Tensor& v_codebook,
+    int64_t k_total_bits,
+    int64_t v_bits,
+    int64_t head_dim,
+    double scale,
+    int64_t max_seq_len)
+{
+    (void)q_qjl;
+    (void)k_packed_idx;
+    (void)k_packed_qjl;
+    (void)k_gamma;
+    (void)k_norm;
+    (void)v_packed_idx;
+    (void)v_norm;
+    (void)block_table;
+    (void)seq_lens;
+    (void)k_codebook;
+    (void)v_codebook;
+    (void)k_total_bits;
+    (void)v_bits;
+    (void)scale;
+    (void)max_seq_len;
+
+    return at::empty(
+        {q_rot.size(0), q_rot.size(1), head_dim},
+        q_rot.options().dtype(at::kFloat).device(at::kMeta));
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -820,6 +860,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
     // TurboQuant compressed K-score
     ops.impl("tq_prod_paged_k_score", &vllm_ascend::meta::tq_prod_paged_k_score_meta);
+    // TurboQuant fused decode attention prototype
+    ops.impl("tq_prod_mse_paged_attention",
+             &vllm_ascend::meta::tq_prod_mse_paged_attention_meta);
 }
 }
 #endif

@@ -50,6 +50,7 @@
 #include "tq_dequant_mse_paged_scaled/tq_dequant_mse_paged_scaled_torch_adpt.h"
 #include "tq_dequant_prod_paged/tq_dequant_prod_paged_torch_adpt.h"
 #include "tq_prod_paged_k_score/tq_prod_paged_k_score_torch_adpt.h"
+#include "tq_prod_mse_paged_attention/tq_prod_mse_paged_attention_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -1017,6 +1018,88 @@ at::Tensor tq_prod_paged_k_score(
     return out;
 }
 
+at::Tensor tq_prod_mse_paged_attention(
+    const at::Tensor& q_rot,
+    const at::Tensor& q_qjl,
+    const at::Tensor& k_packed_idx,
+    const at::Tensor& k_packed_qjl,
+    const at::Tensor& k_gamma,
+    const at::Tensor& k_norm,
+    const at::Tensor& v_packed_idx,
+    const at::Tensor& v_norm,
+    const at::Tensor& block_table,
+    const at::Tensor& seq_lens,
+    const at::Tensor& k_codebook,
+    const at::Tensor& v_codebook,
+    int64_t k_total_bits,
+    int64_t v_bits,
+    int64_t head_dim,
+    double scale,
+    int64_t max_seq_len)
+{
+    TORCH_CHECK(q_rot.scalar_type() == at::kFloat, "q_rot must be fp32");
+    TORCH_CHECK(q_qjl.scalar_type() == at::kFloat, "q_qjl must be fp32");
+    TORCH_CHECK(k_packed_idx.scalar_type() == at::kByte,
+                "k_packed_idx must be uint8");
+    TORCH_CHECK(k_packed_qjl.scalar_type() == at::kByte,
+                "k_packed_qjl must be uint8");
+    TORCH_CHECK(k_gamma.scalar_type() == at::kFloat, "k_gamma must be fp32");
+    TORCH_CHECK(k_norm.scalar_type() == at::kFloat, "k_norm must be fp32");
+    TORCH_CHECK(v_packed_idx.scalar_type() == at::kByte,
+                "v_packed_idx must be uint8");
+    TORCH_CHECK(v_norm.scalar_type() == at::kFloat, "v_norm must be fp32");
+    TORCH_CHECK(block_table.scalar_type() == at::kInt,
+                "block_table must be int32");
+    TORCH_CHECK(seq_lens.scalar_type() == at::kInt,
+                "seq_lens must be int32");
+    TORCH_CHECK(k_codebook.scalar_type() == at::kFloat,
+                "k_codebook must be fp32");
+    TORCH_CHECK(v_codebook.scalar_type() == at::kFloat,
+                "v_codebook must be fp32");
+    TORCH_CHECK(q_rot.dim() == 3, "q_rot must be [batch, num_heads, head_dim]");
+    TORCH_CHECK(q_qjl.sizes() == q_rot.sizes(),
+                "q_qjl must have the same shape as q_rot");
+    TORCH_CHECK(k_packed_idx.dim() == 4,
+                "k_packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(k_packed_qjl.dim() == 4,
+                "k_packed_qjl must be [num_blocks, block_size, num_kv_heads, qjl_cols]");
+    TORCH_CHECK(k_gamma.dim() == 4,
+                "k_gamma must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(k_norm.dim() == 4,
+                "k_norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(v_packed_idx.dim() == 4,
+                "v_packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(v_norm.dim() == 4,
+                "v_norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(block_table.dim() == 2,
+                "block_table must be [batch, max_blocks_per_seq]");
+    TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must be [batch]");
+    TORCH_CHECK(q_rot.size(0) == block_table.size(0),
+                "q_rot batch must match block_table");
+    TORCH_CHECK(q_rot.size(0) == seq_lens.size(0),
+                "q_rot batch must match seq_lens");
+    TORCH_CHECK(q_rot.size(1) % k_packed_idx.size(2) == 0,
+                "num_heads must be divisible by num_kv_heads");
+    TORCH_CHECK(q_rot.size(2) == head_dim,
+                "q_rot last dim must match head_dim");
+    TORCH_CHECK(k_total_bits >= 2 && k_total_bits <= 5,
+                "prod k_total_bits must be in [2, 5]");
+    TORCH_CHECK(v_bits >= 1 && v_bits <= 3, "v_bits must be in [1, 3]");
+    TORCH_CHECK(max_seq_len >= 0, "max_seq_len must be non-negative");
+
+    at::Tensor out = at::empty(
+        {q_rot.size(0), q_rot.size(1), head_dim},
+        q_rot.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnTqProdMsePagedAttention,
+        q_rot, q_qjl, k_packed_idx, k_packed_qjl, k_gamma, k_norm,
+        v_packed_idx, v_norm, block_table, seq_lens,
+        k_codebook, v_codebook,
+        k_total_bits, v_bits, head_dim, scale, max_seq_len, out);
+
+    return out;
+}
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -1362,5 +1445,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                      float scale, int max_seq_len) -> Tensor"
     );
     ops.impl("tq_prod_paged_k_score", torch::kPrivateUse1, &vllm_ascend::tq_prod_paged_k_score);
+    ops.def(
+        "tq_prod_mse_paged_attention(Tensor q_rot, Tensor q_qjl, "
+        "                            Tensor k_packed_idx, Tensor k_packed_qjl, "
+        "                            Tensor k_gamma, Tensor k_norm, "
+        "                            Tensor v_packed_idx, Tensor v_norm, "
+        "                            Tensor block_table, Tensor seq_lens, "
+        "                            Tensor k_codebook, Tensor v_codebook, "
+        "                            int k_total_bits, int v_bits, int head_dim, "
+        "                            float scale, int max_seq_len) -> Tensor"
+    );
+    ops.impl("tq_prod_mse_paged_attention", torch::kPrivateUse1,
+             &vllm_ascend::tq_prod_mse_paged_attention);
 }
 #endif
