@@ -174,6 +174,20 @@ public:
         }
     }
 
+    __aicore__ inline float LookupCodebook2(uint32_t idx)
+    {
+        switch (idx) {
+            case 0U:
+                return cb0_;
+            case 1U:
+                return cb1_;
+            case 2U:
+                return cb2_;
+            default:
+                return cb3_;
+        }
+    }
+
     __aicore__ inline void StoreInvalid(uint32_t b, uint32_t qHead, uint32_t pos)
     {
         uint64_t outOffset =
@@ -438,6 +452,114 @@ public:
         StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
+    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t pos,
+        const LocalTensor<float>& qRotLocal,
+        const LocalTensor<float>& qQjlLocal
+    ) {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        int32_t seqLen = seqLensGm_.GetValue(b);
+        if (pos >= maxSeqLen_ || pos >= static_cast<uint32_t>(seqLen)) {
+            StoreInvalid(b, qHeadBase, pos);
+            StoreInvalid(b, qHeadBase + 1U, pos);
+            StoreInvalid(b, qHeadBase + 2U, pos);
+            StoreInvalid(b, qHeadBase + 3U, pos);
+            return;
+        }
+
+        uint32_t blockOffset = pos / blockSize_;
+        uint32_t tokenOffset = pos - blockOffset * blockSize_;
+        int32_t blockId = blockTableGm_.GetValue(
+            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+        uint64_t cacheIndex =
+            ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                * numKvHeads_ + kvHead);
+        uint64_t packedBase = cacheIndex * packedCols_;
+        uint64_t qjlBase = cacheIndex * qjlCols_;
+        float gamma = gammaGm_.GetValue(cacheIndex);
+        float norm = normGm_.GetValue(cacheIndex);
+
+        float mseAcc0 = 0.0F;
+        float mseAcc1 = 0.0F;
+        float mseAcc2 = 0.0F;
+        float mseAcc3 = 0.0F;
+        float qjlAcc0 = 0.0F;
+        float qjlAcc1 = 0.0F;
+        float qjlAcc2 = 0.0F;
+        float qjlAcc3 = 0.0F;
+
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        uint32_t groups = headDim_ >> 2;
+        for (uint32_t g = 0; g < groups; ++g) {
+            uint32_t idxBits = static_cast<uint32_t>(
+                packedIdxGm_.GetValue(packedBase + g));
+            uint32_t qjlBits = static_cast<uint32_t>(
+                packedQjlGm_.GetValue(qjlBase + (g >> 1)));
+            uint32_t qjlShift = (g & 1U) << 2;
+
+            float cb0 = LookupCodebook2(idxBits & 0x3U);
+            float cb1 = LookupCodebook2((idxBits >> 2) & 0x3U);
+            float cb2 = LookupCodebook2((idxBits >> 4) & 0x3U);
+            float cb3 = LookupCodebook2((idxBits >> 6) & 0x3U);
+            float sign0 = (((qjlBits >> qjlShift) & 0x1U) != 0U)
+                ? 1.0F : -1.0F;
+            float sign1 = (((qjlBits >> (qjlShift + 1U)) & 0x1U) != 0U)
+                ? 1.0F : -1.0F;
+            float sign2 = (((qjlBits >> (qjlShift + 2U)) & 0x1U) != 0U)
+                ? 1.0F : -1.0F;
+            float sign3 = (((qjlBits >> (qjlShift + 3U)) & 0x1U) != 0U)
+                ? 1.0F : -1.0F;
+
+            uint32_t d0 = g << 2;
+            uint32_t d1 = d0 + 1U;
+            uint32_t d2 = d0 + 2U;
+            uint32_t d3 = d0 + 3U;
+
+            mseAcc0 += qRotLocal.GetValue(d0) * cb0
+                + qRotLocal.GetValue(d1) * cb1
+                + qRotLocal.GetValue(d2) * cb2
+                + qRotLocal.GetValue(d3) * cb3;
+            mseAcc1 += qRotLocal.GetValue(q1Base + d0) * cb0
+                + qRotLocal.GetValue(q1Base + d1) * cb1
+                + qRotLocal.GetValue(q1Base + d2) * cb2
+                + qRotLocal.GetValue(q1Base + d3) * cb3;
+            mseAcc2 += qRotLocal.GetValue(q2Base + d0) * cb0
+                + qRotLocal.GetValue(q2Base + d1) * cb1
+                + qRotLocal.GetValue(q2Base + d2) * cb2
+                + qRotLocal.GetValue(q2Base + d3) * cb3;
+            mseAcc3 += qRotLocal.GetValue(q3Base + d0) * cb0
+                + qRotLocal.GetValue(q3Base + d1) * cb1
+                + qRotLocal.GetValue(q3Base + d2) * cb2
+                + qRotLocal.GetValue(q3Base + d3) * cb3;
+
+            qjlAcc0 += qQjlLocal.GetValue(d0) * sign0
+                + qQjlLocal.GetValue(d1) * sign1
+                + qQjlLocal.GetValue(d2) * sign2
+                + qQjlLocal.GetValue(d3) * sign3;
+            qjlAcc1 += qQjlLocal.GetValue(q1Base + d0) * sign0
+                + qQjlLocal.GetValue(q1Base + d1) * sign1
+                + qQjlLocal.GetValue(q1Base + d2) * sign2
+                + qQjlLocal.GetValue(q1Base + d3) * sign3;
+            qjlAcc2 += qQjlLocal.GetValue(q2Base + d0) * sign0
+                + qQjlLocal.GetValue(q2Base + d1) * sign1
+                + qQjlLocal.GetValue(q2Base + d2) * sign2
+                + qQjlLocal.GetValue(q2Base + d3) * sign3;
+            qjlAcc3 += qQjlLocal.GetValue(q3Base + d0) * sign0
+                + qQjlLocal.GetValue(q3Base + d1) * sign1
+                + qQjlLocal.GetValue(q3Base + d2) * sign2
+                + qQjlLocal.GetValue(q3Base + d3) * sign3;
+        }
+
+        StoreScore(b, qHeadBase, pos, mseAcc0, qjlAcc0, gamma, norm);
+        StoreScore(b, qHeadBase + 1U, pos, mseAcc1, qjlAcc1, gamma, norm);
+        StoreScore(b, qHeadBase + 2U, pos, mseAcc2, qjlAcc2, gamma, norm);
+        StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
+    }
+
     __aicore__ inline void ProcessKvTokenTileQ4Local(
         uint32_t b,
         uint32_t kvHead,
@@ -455,6 +577,14 @@ public:
         MTE2ToSSync();
         DataCopy(qQjlLocal, qQjlGm_[queryBase], queryElems);
         MTE2ToSSync();
+
+        if (stage1Bits_ == 2U && (headDim_ & 3U) == 0U) {
+            for (uint32_t i = 0; i < scoreTileLen_; ++i) {
+                ProcessKvTokenScoresQ4LocalBits2(
+                    b, kvHead, posStart + i, qRotLocal, qQjlLocal);
+            }
+            return;
+        }
 
         for (uint32_t i = 0; i < scoreTileLen_; ++i) {
             ProcessKvTokenScoresQ4Local(
