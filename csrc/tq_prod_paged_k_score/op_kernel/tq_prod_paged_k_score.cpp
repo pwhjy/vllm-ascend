@@ -452,21 +452,15 @@ public:
         StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
-    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2Valid(
+    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2Cache(
         uint32_t b,
         uint32_t kvHead,
         uint32_t pos,
+        uint64_t cacheIndex,
         const LocalTensor<float>& qRotLocal,
         const LocalTensor<float>& qQjlLocal
     ) {
         uint32_t qHeadBase = kvHead * qPerKv_;
-        uint32_t blockOffset = pos / blockSize_;
-        uint32_t tokenOffset = pos - blockOffset * blockSize_;
-        int32_t blockId = blockTableGm_.GetValue(
-            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
-        uint64_t cacheIndex =
-            ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
-                * numKvHeads_ + kvHead);
         uint64_t packedBase = cacheIndex * packedCols_;
         uint64_t qjlBase = cacheIndex * qjlCols_;
         float gamma = gammaGm_.GetValue(cacheIndex);
@@ -551,6 +545,24 @@ public:
         StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
+    __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2Valid(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t pos,
+        const LocalTensor<float>& qRotLocal,
+        const LocalTensor<float>& qQjlLocal
+    ) {
+        uint32_t blockOffset = pos / blockSize_;
+        uint32_t tokenOffset = pos - blockOffset * blockSize_;
+        int32_t blockId = blockTableGm_.GetValue(
+            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+        uint64_t cacheIndex =
+            ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                * numKvHeads_ + kvHead);
+        ProcessKvTokenScoresQ4LocalBits2Cache(
+            b, kvHead, pos, cacheIndex, qRotLocal, qQjlLocal);
+    }
+
     __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2(
         uint32_t b,
         uint32_t kvHead,
@@ -596,9 +608,26 @@ public:
                 ? static_cast<uint32_t>(seqLen) : 0U;
             uint32_t tileEnd = posStart + scoreTileLen_;
             if (tileEnd <= maxSeqLen_ && tileEnd <= validSeqLen) {
-                for (uint32_t i = 0; i < scoreTileLen_; ++i) {
-                    ProcessKvTokenScoresQ4LocalBits2Valid(
-                        b, kvHead, posStart + i, qRotLocal, qQjlLocal);
+                uint32_t blockOffset = posStart / blockSize_;
+                uint32_t tokenOffset = posStart - blockOffset * blockSize_;
+                if (tokenOffset + scoreTileLen_ <= blockSize_) {
+                    int32_t blockId = blockTableGm_.GetValue(
+                        static_cast<uint64_t>(b) * maxBlocksPerSeq_
+                            + blockOffset);
+                    uint64_t cacheIndex =
+                        ((static_cast<uint64_t>(blockId) * blockSize_
+                            + tokenOffset) * numKvHeads_ + kvHead);
+                    for (uint32_t i = 0; i < scoreTileLen_; ++i) {
+                        ProcessKvTokenScoresQ4LocalBits2Cache(
+                            b, kvHead, posStart + i,
+                            cacheIndex + static_cast<uint64_t>(i) * numKvHeads_,
+                            qRotLocal, qQjlLocal);
+                    }
+                } else {
+                    for (uint32_t i = 0; i < scoreTileLen_; ++i) {
+                        ProcessKvTokenScoresQ4LocalBits2Valid(
+                            b, kvHead, posStart + i, qRotLocal, qQjlLocal);
+                    }
                 }
                 return;
             }
