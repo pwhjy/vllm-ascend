@@ -675,6 +675,40 @@ at::Tensor tq_dequant_prod_paged_meta(
         packed_idx.options().dtype(at::kFloat).device(at::kMeta));
 }
 
+at::Tensor tq_prod_paged_k_score_meta(
+    const at::Tensor& q_rot,
+    const at::Tensor& q_qjl,
+    const at::Tensor& packed_idx,
+    const at::Tensor& packed_qjl,
+    const at::Tensor& gamma,
+    const at::Tensor& norm,
+    const at::Tensor& block_table,
+    const at::Tensor& seq_lens,
+    const at::Tensor& codebook,
+    int64_t total_bits,
+    int64_t head_dim,
+    double scale,
+    int64_t max_seq_len)
+{
+    (void)q_qjl;
+    (void)packed_idx;
+    (void)packed_qjl;
+    (void)gamma;
+    (void)norm;
+    (void)block_table;
+    (void)seq_lens;
+    (void)codebook;
+    (void)total_bits;
+    (void)head_dim;
+    (void)scale;
+    int64_t batch = q_rot.size(0);
+    int64_t num_heads = q_rot.size(1);
+
+    return at::empty(
+        {batch, num_heads, max_seq_len},
+        q_rot.options().dtype(at::kFloat).device(at::kMeta));
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -784,6 +818,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("tq_dequant_mse_paged_scaled_out", &vllm_ascend::meta::tq_dequant_mse_paged_scaled_out_meta);
     // TurboQuant prod paged dequant
     ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
+    // TurboQuant compressed K-score
+    ops.impl("tq_prod_paged_k_score", &vllm_ascend::meta::tq_prod_paged_k_score_meta);
 }
 }
 #endif
