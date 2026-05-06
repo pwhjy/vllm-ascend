@@ -369,21 +369,21 @@ public:
                 vLocal.SetValue(d, v);
             }
             SToVSync();
-            Muls(tmpLocal, vLocal, w0, headDim_);
+            Duplicate(tmpLocal, w0, headDim_);
             PipeBarrier<PIPE_V>();
-            Add(accLocal, accLocal, tmpLocal, headDim_);
+            MulAddDst(accLocal, vLocal, tmpLocal, headDim_);
             PipeBarrier<PIPE_V>();
-            Muls(tmpLocal, vLocal, w1, headDim_);
+            Duplicate(tmpLocal, w1, headDim_);
             PipeBarrier<PIPE_V>();
-            Add(accLocal[q1Base], accLocal[q1Base], tmpLocal, headDim_);
+            MulAddDst(accLocal[q1Base], vLocal, tmpLocal, headDim_);
             PipeBarrier<PIPE_V>();
-            Muls(tmpLocal, vLocal, w2, headDim_);
+            Duplicate(tmpLocal, w2, headDim_);
             PipeBarrier<PIPE_V>();
-            Add(accLocal[q2Base], accLocal[q2Base], tmpLocal, headDim_);
+            MulAddDst(accLocal[q2Base], vLocal, tmpLocal, headDim_);
             PipeBarrier<PIPE_V>();
-            Muls(tmpLocal, vLocal, w3, headDim_);
+            Duplicate(tmpLocal, w3, headDim_);
             PipeBarrier<PIPE_V>();
-            Add(accLocal[q3Base], accLocal[q3Base], tmpLocal, headDim_);
+            MulAddDst(accLocal[q3Base], vLocal, tmpLocal, headDim_);
             PipeBarrier<PIPE_V>();
             VToSSync();
         }
