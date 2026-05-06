@@ -21,8 +21,6 @@ BEGIN_TILING_DATA_DEF(TqProdPagedKScoreTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, packedCols);
     TILING_DATA_FIELD_DEF(uint32_t, qjlCols);
     TILING_DATA_FIELD_DEF(uint32_t, stage1Bits);
-    TILING_DATA_FIELD_DEF(uint32_t, scoreTileLen);
-    TILING_DATA_FIELD_DEF(uint32_t, maxSeqTiles);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
     TILING_DATA_FIELD_DEF(float, scale);
     TILING_DATA_FIELD_DEF(float, correction);
