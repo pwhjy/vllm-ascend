@@ -133,14 +133,77 @@ public:
         }
     }
 
+    __aicore__ inline void LoadScaledCodebook(float scale)
+    {
+        scb0_ = static_cast<OutT>(cb0_ * scale);
+        scb1_ = static_cast<OutT>(cb1_ * scale);
+        if (bits_ >= 2) {
+            scb2_ = static_cast<OutT>(cb2_ * scale);
+            scb3_ = static_cast<OutT>(cb3_ * scale);
+        }
+        if (bits_ >= 3) {
+            scb4_ = static_cast<OutT>(cb4_ * scale);
+            scb5_ = static_cast<OutT>(cb5_ * scale);
+            scb6_ = static_cast<OutT>(cb6_ * scale);
+            scb7_ = static_cast<OutT>(cb7_ * scale);
+        }
+        if (bits_ >= 4) {
+            scb8_ = static_cast<OutT>(cb8_ * scale);
+            scb9_ = static_cast<OutT>(cb9_ * scale);
+            scb10_ = static_cast<OutT>(cb10_ * scale);
+            scb11_ = static_cast<OutT>(cb11_ * scale);
+            scb12_ = static_cast<OutT>(cb12_ * scale);
+            scb13_ = static_cast<OutT>(cb13_ * scale);
+            scb14_ = static_cast<OutT>(cb14_ * scale);
+            scb15_ = static_cast<OutT>(cb15_ * scale);
+        }
+    }
+
+    __aicore__ inline OutT LookupScaledCodebook(uint32_t idx)
+    {
+        switch (idx) {
+            case 0U:
+                return scb0_;
+            case 1U:
+                return scb1_;
+            case 2U:
+                return scb2_;
+            case 3U:
+                return scb3_;
+            case 4U:
+                return scb4_;
+            case 5U:
+                return scb5_;
+            case 6U:
+                return scb6_;
+            case 7U:
+                return scb7_;
+            case 8U:
+                return scb8_;
+            case 9U:
+                return scb9_;
+            case 10U:
+                return scb10_;
+            case 11U:
+                return scb11_;
+            case 12U:
+                return scb12_;
+            case 13U:
+                return scb13_;
+            case 14U:
+                return scb14_;
+            default:
+                return scb15_;
+        }
+    }
+
     __aicore__ inline void StoreDequantizedValue(
         uint64_t outBase,
         uint32_t d,
-        float scale,
+        float,
         uint32_t idx
     ) {
-        float cb = LookupCodebook(idx);
-        denseRotGm_.SetValue(outBase + d, static_cast<OutT>(cb * scale));
+        denseRotGm_.SetValue(outBase + d, LookupScaledCodebook(idx));
     }
 
     __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
@@ -270,6 +333,7 @@ public:
                   static_cast<uint64_t>(offset))
                     * numKvHeads_ + kvHead);
             float scale = normGm_.GetValue(normIndex);
+            LoadScaledCodebook(scale);
 
             uint64_t outBase =
                 ((static_cast<uint64_t>(token) * numKvHeads_ + kvHead)
@@ -321,6 +385,23 @@ private:
     float cb13_{0.0F};
     float cb14_{0.0F};
     float cb15_{0.0F};
+
+    OutT scb0_{};
+    OutT scb1_{};
+    OutT scb2_{};
+    OutT scb3_{};
+    OutT scb4_{};
+    OutT scb5_{};
+    OutT scb6_{};
+    OutT scb7_{};
+    OutT scb8_{};
+    OutT scb9_{};
+    OutT scb10_{};
+    OutT scb11_{};
+    OutT scb12_{};
+    OutT scb13_{};
+    OutT scb14_{};
+    OutT scb15_{};
 };
 
 template <typename OutT>
