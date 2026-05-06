@@ -50,7 +50,7 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
     uint64_t usefulCore =
         static_cast<uint64_t>(batch) *
-        static_cast<uint64_t>(numHeads) *
+        static_cast<uint64_t>(numKvHeads) *
         static_cast<uint64_t>(maxSeqLen);
     if (usefulCore > 0 && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);

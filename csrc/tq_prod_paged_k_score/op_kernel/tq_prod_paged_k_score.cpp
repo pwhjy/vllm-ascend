@@ -168,6 +168,21 @@ public:
         scoresGm_.SetValue(outOffset, -3.4028234663852886e38F);
     }
 
+    __aicore__ inline void StoreScore(
+        uint32_t b,
+        uint32_t qHead,
+        uint32_t pos,
+        float mseAcc,
+        float qjlAcc,
+        float gamma,
+        float norm
+    ) {
+        float score = (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
+        uint64_t outOffset =
+            ((static_cast<uint64_t>(b) * numHeads_ + qHead) * maxSeqLen_) + pos;
+        scoresGm_.SetValue(outOffset, score);
+    }
+
     __aicore__ inline void ProcessScore(uint32_t b, uint32_t qHead, uint32_t pos)
     {
         int32_t seqLen = seqLensGm_.GetValue(b);
@@ -202,38 +217,172 @@ public:
             qjlAcc += qQjl * ExtractQjlSign(qjlBase, d);
         }
 
-        float score = (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
-        uint64_t outOffset =
-            ((static_cast<uint64_t>(b) * numHeads_ + qHead) * maxSeqLen_) + pos;
-        scoresGm_.SetValue(outOffset, score);
+        StoreScore(b, qHead, pos, mseAcc, qjlAcc, gamma, norm);
+    }
+
+    __aicore__ inline void ProcessKvTokenScores(uint32_t b, uint32_t kvHead, uint32_t pos)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        if (qPerKv_ > 8U) {
+            for (uint32_t q = 0; q < qPerKv_; ++q) {
+                ProcessScore(b, qHeadBase + q, pos);
+            }
+            return;
+        }
+
+        int32_t seqLen = seqLensGm_.GetValue(b);
+        if (pos >= static_cast<uint32_t>(seqLen)) {
+            for (uint32_t q = 0; q < qPerKv_; ++q) {
+                StoreInvalid(b, qHeadBase + q, pos);
+            }
+            return;
+        }
+
+        uint32_t blockOffset = pos / blockSize_;
+        uint32_t tokenOffset = pos - blockOffset * blockSize_;
+        int32_t blockId = blockTableGm_.GetValue(
+            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+
+        uint64_t cacheIndex =
+            ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                * numKvHeads_ + kvHead);
+        uint64_t packedBase = cacheIndex * packedCols_;
+        uint64_t qjlBase = cacheIndex * qjlCols_;
+        float gamma = gammaGm_.GetValue(cacheIndex);
+        float norm = normGm_.GetValue(cacheIndex);
+
+        uint64_t queryBase =
+            (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
+        float mseAcc0 = 0.0F;
+        float mseAcc1 = 0.0F;
+        float mseAcc2 = 0.0F;
+        float mseAcc3 = 0.0F;
+        float mseAcc4 = 0.0F;
+        float mseAcc5 = 0.0F;
+        float mseAcc6 = 0.0F;
+        float mseAcc7 = 0.0F;
+        float qjlAcc0 = 0.0F;
+        float qjlAcc1 = 0.0F;
+        float qjlAcc2 = 0.0F;
+        float qjlAcc3 = 0.0F;
+        float qjlAcc4 = 0.0F;
+        float qjlAcc5 = 0.0F;
+        float qjlAcc6 = 0.0F;
+        float qjlAcc7 = 0.0F;
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractIndex(packedBase, d);
+            float cb = LookupCodebook(idx);
+            float qjlSign = ExtractQjlSign(qjlBase, d);
+            if (qPerKv_ >= 1U) {
+                float qRot = qRotGm_.GetValue(queryBase + d);
+                float qQjl = qQjlGm_.GetValue(queryBase + d);
+                mseAcc0 += qRot * cb;
+                qjlAcc0 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 2U) {
+                uint64_t qBase = queryBase + headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc1 += qRot * cb;
+                qjlAcc1 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 3U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(2U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc2 += qRot * cb;
+                qjlAcc2 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 4U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(3U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc3 += qRot * cb;
+                qjlAcc3 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 5U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(4U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc4 += qRot * cb;
+                qjlAcc4 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 6U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(5U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc5 += qRot * cb;
+                qjlAcc5 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 7U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(6U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc6 += qRot * cb;
+                qjlAcc6 += qQjl * qjlSign;
+            }
+            if (qPerKv_ >= 8U) {
+                uint64_t qBase = queryBase + static_cast<uint64_t>(7U) * headDim_;
+                float qRot = qRotGm_.GetValue(qBase + d);
+                float qQjl = qQjlGm_.GetValue(qBase + d);
+                mseAcc7 += qRot * cb;
+                qjlAcc7 += qQjl * qjlSign;
+            }
+        }
+
+        if (qPerKv_ >= 1U) {
+            StoreScore(b, qHeadBase, pos, mseAcc0, qjlAcc0, gamma, norm);
+        }
+        if (qPerKv_ >= 2U) {
+            StoreScore(b, qHeadBase + 1U, pos, mseAcc1, qjlAcc1, gamma, norm);
+        }
+        if (qPerKv_ >= 3U) {
+            StoreScore(b, qHeadBase + 2U, pos, mseAcc2, qjlAcc2, gamma, norm);
+        }
+        if (qPerKv_ >= 4U) {
+            StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
+        }
+        if (qPerKv_ >= 5U) {
+            StoreScore(b, qHeadBase + 4U, pos, mseAcc4, qjlAcc4, gamma, norm);
+        }
+        if (qPerKv_ >= 6U) {
+            StoreScore(b, qHeadBase + 5U, pos, mseAcc5, qjlAcc5, gamma, norm);
+        }
+        if (qPerKv_ >= 7U) {
+            StoreScore(b, qHeadBase + 6U, pos, mseAcc6, qjlAcc6, gamma, norm);
+        }
+        if (qPerKv_ >= 8U) {
+            StoreScore(b, qHeadBase + 7U, pos, mseAcc7, qjlAcc7, gamma, norm);
+        }
     }
 
     __aicore__ inline void Process()
     {
         uint32_t coreId = GetBlockIdx();
-        uint64_t totalScores =
+        uint64_t totalTasks =
             static_cast<uint64_t>(batch_) *
-            static_cast<uint64_t>(numHeads_) *
+            static_cast<uint64_t>(numKvHeads_) *
             static_cast<uint64_t>(maxSeqLen_);
-        if (totalScores == 0) {
+        if (totalTasks == 0) {
             return;
         }
 
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
-        uint64_t scoresPerCore = (totalScores + coreCount - 1) / coreCount;
-        uint64_t start = static_cast<uint64_t>(coreId) * scoresPerCore;
-        uint64_t end = start + scoresPerCore;
-        if (end > totalScores) {
-            end = totalScores;
+        uint64_t tasksPerCore = (totalTasks + coreCount - 1) / coreCount;
+        uint64_t start = static_cast<uint64_t>(coreId) * tasksPerCore;
+        uint64_t end = start + tasksPerCore;
+        if (end > totalTasks) {
+            end = totalTasks;
         }
 
         LoadCodebook();
         for (uint64_t linear = start; linear < end; ++linear) {
             uint32_t pos = static_cast<uint32_t>(linear % maxSeqLen_);
-            uint64_t qLinear = linear / maxSeqLen_;
-            uint32_t qHead = static_cast<uint32_t>(qLinear % numHeads_);
-            uint32_t b = static_cast<uint32_t>(qLinear / numHeads_);
-            ProcessScore(b, qHead, pos);
+            uint64_t kvLinear = linear / maxSeqLen_;
+            uint32_t kvHead = static_cast<uint32_t>(kvLinear % numKvHeads_);
+            uint32_t b = static_cast<uint32_t>(kvLinear / numKvHeads_);
+            ProcessKvTokenScores(b, kvHead, pos);
         }
     }
 
