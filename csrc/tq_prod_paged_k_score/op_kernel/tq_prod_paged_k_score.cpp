@@ -446,22 +446,10 @@ public:
             qjlAcc3 += qQjl3 * qjlSign;
         }
 
-        float qjlScale = correction_ * gamma;
-        float outScale = norm * scale_;
-        uint64_t outOffset =
-            ((static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * maxSeqLen_)
-                + pos;
-        scoresGm_.SetValue(
-            outOffset, (mseAcc0 + qjlScale * qjlAcc0) * outScale);
-        scoresGm_.SetValue(
-            outOffset + maxSeqLen_,
-            (mseAcc1 + qjlScale * qjlAcc1) * outScale);
-        scoresGm_.SetValue(
-            outOffset + static_cast<uint64_t>(2U) * maxSeqLen_,
-            (mseAcc2 + qjlScale * qjlAcc2) * outScale);
-        scoresGm_.SetValue(
-            outOffset + static_cast<uint64_t>(3U) * maxSeqLen_,
-            (mseAcc3 + qjlScale * qjlAcc3) * outScale);
+        StoreScore(b, qHeadBase, pos, mseAcc0, qjlAcc0, gamma, norm);
+        StoreScore(b, qHeadBase + 1U, pos, mseAcc1, qjlAcc1, gamma, norm);
+        StoreScore(b, qHeadBase + 2U, pos, mseAcc2, qjlAcc2, gamma, norm);
+        StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
     __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2Valid(
@@ -557,22 +545,10 @@ public:
                 + qQjlLocal.GetValue(q3Base + d3) * sign3;
         }
 
-        float qjlScale = correction_ * gamma;
-        float outScale = norm * scale_;
-        uint64_t outOffset =
-            ((static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * maxSeqLen_)
-                + pos;
-        scoresGm_.SetValue(
-            outOffset, (mseAcc0 + qjlScale * qjlAcc0) * outScale);
-        scoresGm_.SetValue(
-            outOffset + maxSeqLen_,
-            (mseAcc1 + qjlScale * qjlAcc1) * outScale);
-        scoresGm_.SetValue(
-            outOffset + static_cast<uint64_t>(2U) * maxSeqLen_,
-            (mseAcc2 + qjlScale * qjlAcc2) * outScale);
-        scoresGm_.SetValue(
-            outOffset + static_cast<uint64_t>(3U) * maxSeqLen_,
-            (mseAcc3 + qjlScale * qjlAcc3) * outScale);
+        StoreScore(b, qHeadBase, pos, mseAcc0, qjlAcc0, gamma, norm);
+        StoreScore(b, qHeadBase + 1U, pos, mseAcc1, qjlAcc1, gamma, norm);
+        StoreScore(b, qHeadBase + 2U, pos, mseAcc2, qjlAcc2, gamma, norm);
+        StoreScore(b, qHeadBase + 3U, pos, mseAcc3, qjlAcc3, gamma, norm);
     }
 
     __aicore__ inline void ProcessKvTokenScoresQ4LocalBits2(
