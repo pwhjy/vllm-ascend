@@ -45,7 +45,7 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     if (qPerKv == 0) {
         qPerKv = 1;
     }
-    uint32_t scoreTileLen = qPerKv == 4U ? 64U : 1U;
+    uint32_t scoreTileLen = qPerKv == 4U ? 128U : 1U;
     uint32_t maxSeqTiles =
         scoreTileLen == 0U ? maxSeqLen :
         (maxSeqLen + scoreTileLen - 1U) / scoreTileLen;
