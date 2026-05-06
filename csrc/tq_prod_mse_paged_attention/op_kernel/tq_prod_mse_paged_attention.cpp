@@ -85,6 +85,8 @@ public:
         pipe_.InitBuffer(qQjlBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(scoreBuf_, 4U * safeSeqLen * sizeof(float));
         pipe_.InitBuffer(accBuf_, 4U * headDim_ * sizeof(float));
+        pipe_.InitBuffer(vBuf_, headDim_ * sizeof(float));
+        pipe_.InitBuffer(tmpBuf_, headDim_ * sizeof(float));
         pipe_.InitBuffer(reduceBuf_, 64U * sizeof(float));
     }
 
@@ -346,9 +348,10 @@ public:
         const LocalTensor<float>& scoreLocal,
         const LocalTensor<float>& accLocal
     ) {
-        for (uint32_t i = 0; i < 4U * headDim_; ++i) {
-            accLocal.SetValue(i, 0.0F);
-        }
+        LocalTensor<float> vLocal = vBuf_.Get<float>();
+        LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
+        Duplicate(accLocal, 0.0F, 4U * headDim_);
+        PipeBarrier<PIPE_V>();
 
         uint32_t q1Base = headDim_;
         uint32_t q2Base = headDim_ << 1;
@@ -363,14 +366,26 @@ public:
             float w3 = scoreLocal.GetValue(3U * maxSeqLen_ + pos);
             for (uint32_t d = 0; d < headDim_; ++d) {
                 float v = LookupVCodebook(ExtractVIndex(vPackedBase, d)) * vNorm;
-                accLocal.SetValue(d, accLocal.GetValue(d) + w0 * v);
-                accLocal.SetValue(q1Base + d,
-                    accLocal.GetValue(q1Base + d) + w1 * v);
-                accLocal.SetValue(q2Base + d,
-                    accLocal.GetValue(q2Base + d) + w2 * v);
-                accLocal.SetValue(q3Base + d,
-                    accLocal.GetValue(q3Base + d) + w3 * v);
+                vLocal.SetValue(d, v);
             }
+            SToVSync();
+            Muls(tmpLocal, vLocal, w0, headDim_);
+            PipeBarrier<PIPE_V>();
+            Add(accLocal, accLocal, tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Muls(tmpLocal, vLocal, w1, headDim_);
+            PipeBarrier<PIPE_V>();
+            Add(accLocal[q1Base], accLocal[q1Base], tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Muls(tmpLocal, vLocal, w2, headDim_);
+            PipeBarrier<PIPE_V>();
+            Add(accLocal[q2Base], accLocal[q2Base], tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Muls(tmpLocal, vLocal, w3, headDim_);
+            PipeBarrier<PIPE_V>();
+            Add(accLocal[q3Base], accLocal[q3Base], tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            VToSSync();
         }
 
         uint32_t qHeadBase = kvHead * qPerKv_;
@@ -452,6 +467,8 @@ private:
     TBuf<TPosition::VECCALC> qQjlBuf_;
     TBuf<TPosition::VECCALC> scoreBuf_;
     TBuf<TPosition::VECCALC> accBuf_;
+    TBuf<TPosition::VECCALC> vBuf_;
+    TBuf<TPosition::VECCALC> tmpBuf_;
     TBuf<TPosition::VECCALC> reduceBuf_;
 
     GlobalTensor<float> qRotGm_;
