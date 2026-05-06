@@ -22,6 +22,8 @@ struct TqProdPagedKScoreTilingData {
     uint32_t packedCols;
     uint32_t qjlCols;
     uint32_t stage1Bits;
+    uint32_t scoreTileLen;
+    uint32_t maxSeqTiles;
     uint32_t numCore;
     float scale;
     float correction;
@@ -66,6 +68,8 @@ public:
         packedCols_ = tiling->packedCols;
         qjlCols_ = tiling->qjlCols;
         stage1Bits_ = tiling->stage1Bits;
+        scoreTileLen_ = tiling->scoreTileLen;
+        maxSeqTiles_ = tiling->maxSeqTiles;
         numCore_ = tiling->numCore;
         scale_ = tiling->scale;
         correction_ = tiling->correction;
@@ -357,6 +361,228 @@ public:
         }
     }
 
+    __aicore__ inline void StoreInvalidQ4(uint32_t b, uint32_t qHeadBase, uint32_t pos)
+    {
+        if (pos >= maxSeqLen_) {
+            return;
+        }
+        StoreInvalid(b, qHeadBase, pos);
+        StoreInvalid(b, qHeadBase + 1U, pos);
+        StoreInvalid(b, qHeadBase + 2U, pos);
+        StoreInvalid(b, qHeadBase + 3U, pos);
+    }
+
+    __aicore__ inline void ProcessKvTokenTileQ4(uint32_t b, uint32_t kvHead, uint32_t tile)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        uint32_t pos0 = tile * 4U;
+        uint32_t pos1 = pos0 + 1U;
+        uint32_t pos2 = pos0 + 2U;
+        uint32_t pos3 = pos0 + 3U;
+        int32_t seqLen = seqLensGm_.GetValue(b);
+        bool valid0 = pos0 < maxSeqLen_ && pos0 < static_cast<uint32_t>(seqLen);
+        bool valid1 = pos1 < maxSeqLen_ && pos1 < static_cast<uint32_t>(seqLen);
+        bool valid2 = pos2 < maxSeqLen_ && pos2 < static_cast<uint32_t>(seqLen);
+        bool valid3 = pos3 < maxSeqLen_ && pos3 < static_cast<uint32_t>(seqLen);
+
+        if (!valid0) {
+            StoreInvalidQ4(b, qHeadBase, pos0);
+        }
+        if (!valid1) {
+            StoreInvalidQ4(b, qHeadBase, pos1);
+        }
+        if (!valid2) {
+            StoreInvalidQ4(b, qHeadBase, pos2);
+        }
+        if (!valid3) {
+            StoreInvalidQ4(b, qHeadBase, pos3);
+        }
+        if (!valid0 && !valid1 && !valid2 && !valid3) {
+            return;
+        }
+
+        uint64_t cacheIndex0 = 0;
+        uint64_t cacheIndex1 = 0;
+        uint64_t cacheIndex2 = 0;
+        uint64_t cacheIndex3 = 0;
+        if (valid0) {
+            uint32_t blockOffset = pos0 / blockSize_;
+            uint32_t tokenOffset = pos0 - blockOffset * blockSize_;
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            cacheIndex0 =
+                ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                    * numKvHeads_ + kvHead);
+        }
+        if (valid1) {
+            uint32_t blockOffset = pos1 / blockSize_;
+            uint32_t tokenOffset = pos1 - blockOffset * blockSize_;
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            cacheIndex1 =
+                ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                    * numKvHeads_ + kvHead);
+        }
+        if (valid2) {
+            uint32_t blockOffset = pos2 / blockSize_;
+            uint32_t tokenOffset = pos2 - blockOffset * blockSize_;
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            cacheIndex2 =
+                ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                    * numKvHeads_ + kvHead);
+        }
+        if (valid3) {
+            uint32_t blockOffset = pos3 / blockSize_;
+            uint32_t tokenOffset = pos3 - blockOffset * blockSize_;
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            cacheIndex3 =
+                ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
+                    * numKvHeads_ + kvHead);
+        }
+
+        uint64_t packedBase0 = cacheIndex0 * packedCols_;
+        uint64_t packedBase1 = cacheIndex1 * packedCols_;
+        uint64_t packedBase2 = cacheIndex2 * packedCols_;
+        uint64_t packedBase3 = cacheIndex3 * packedCols_;
+        uint64_t qjlBase0 = cacheIndex0 * qjlCols_;
+        uint64_t qjlBase1 = cacheIndex1 * qjlCols_;
+        uint64_t qjlBase2 = cacheIndex2 * qjlCols_;
+        uint64_t qjlBase3 = cacheIndex3 * qjlCols_;
+
+        float mse00 = 0.0F;
+        float mse01 = 0.0F;
+        float mse02 = 0.0F;
+        float mse03 = 0.0F;
+        float mse10 = 0.0F;
+        float mse11 = 0.0F;
+        float mse12 = 0.0F;
+        float mse13 = 0.0F;
+        float mse20 = 0.0F;
+        float mse21 = 0.0F;
+        float mse22 = 0.0F;
+        float mse23 = 0.0F;
+        float mse30 = 0.0F;
+        float mse31 = 0.0F;
+        float mse32 = 0.0F;
+        float mse33 = 0.0F;
+        float qjl00 = 0.0F;
+        float qjl01 = 0.0F;
+        float qjl02 = 0.0F;
+        float qjl03 = 0.0F;
+        float qjl10 = 0.0F;
+        float qjl11 = 0.0F;
+        float qjl12 = 0.0F;
+        float qjl13 = 0.0F;
+        float qjl20 = 0.0F;
+        float qjl21 = 0.0F;
+        float qjl22 = 0.0F;
+        float qjl23 = 0.0F;
+        float qjl30 = 0.0F;
+        float qjl31 = 0.0F;
+        float qjl32 = 0.0F;
+        float qjl33 = 0.0F;
+
+        uint64_t queryBase =
+            (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
+        uint64_t queryBase1 = queryBase + headDim_;
+        uint64_t queryBase2 = queryBase + static_cast<uint64_t>(2U) * headDim_;
+        uint64_t queryBase3 = queryBase + static_cast<uint64_t>(3U) * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float qRot0 = qRotGm_.GetValue(queryBase + d);
+            float qQjl0 = qQjlGm_.GetValue(queryBase + d);
+            float qRot1 = qRotGm_.GetValue(queryBase1 + d);
+            float qQjl1 = qQjlGm_.GetValue(queryBase1 + d);
+            float qRot2 = qRotGm_.GetValue(queryBase2 + d);
+            float qQjl2 = qQjlGm_.GetValue(queryBase2 + d);
+            float qRot3 = qRotGm_.GetValue(queryBase3 + d);
+            float qQjl3 = qQjlGm_.GetValue(queryBase3 + d);
+
+            if (valid0) {
+                float cb = LookupCodebook(ExtractIndex(packedBase0, d));
+                float sign = ExtractQjlSign(qjlBase0, d);
+                mse00 += qRot0 * cb;
+                mse10 += qRot1 * cb;
+                mse20 += qRot2 * cb;
+                mse30 += qRot3 * cb;
+                qjl00 += qQjl0 * sign;
+                qjl10 += qQjl1 * sign;
+                qjl20 += qQjl2 * sign;
+                qjl30 += qQjl3 * sign;
+            }
+            if (valid1) {
+                float cb = LookupCodebook(ExtractIndex(packedBase1, d));
+                float sign = ExtractQjlSign(qjlBase1, d);
+                mse01 += qRot0 * cb;
+                mse11 += qRot1 * cb;
+                mse21 += qRot2 * cb;
+                mse31 += qRot3 * cb;
+                qjl01 += qQjl0 * sign;
+                qjl11 += qQjl1 * sign;
+                qjl21 += qQjl2 * sign;
+                qjl31 += qQjl3 * sign;
+            }
+            if (valid2) {
+                float cb = LookupCodebook(ExtractIndex(packedBase2, d));
+                float sign = ExtractQjlSign(qjlBase2, d);
+                mse02 += qRot0 * cb;
+                mse12 += qRot1 * cb;
+                mse22 += qRot2 * cb;
+                mse32 += qRot3 * cb;
+                qjl02 += qQjl0 * sign;
+                qjl12 += qQjl1 * sign;
+                qjl22 += qQjl2 * sign;
+                qjl32 += qQjl3 * sign;
+            }
+            if (valid3) {
+                float cb = LookupCodebook(ExtractIndex(packedBase3, d));
+                float sign = ExtractQjlSign(qjlBase3, d);
+                mse03 += qRot0 * cb;
+                mse13 += qRot1 * cb;
+                mse23 += qRot2 * cb;
+                mse33 += qRot3 * cb;
+                qjl03 += qQjl0 * sign;
+                qjl13 += qQjl1 * sign;
+                qjl23 += qQjl2 * sign;
+                qjl33 += qQjl3 * sign;
+            }
+        }
+
+        if (valid0) {
+            float gamma = gammaGm_.GetValue(cacheIndex0);
+            float norm = normGm_.GetValue(cacheIndex0);
+            StoreScore(b, qHeadBase, pos0, mse00, qjl00, gamma, norm);
+            StoreScore(b, qHeadBase + 1U, pos0, mse10, qjl10, gamma, norm);
+            StoreScore(b, qHeadBase + 2U, pos0, mse20, qjl20, gamma, norm);
+            StoreScore(b, qHeadBase + 3U, pos0, mse30, qjl30, gamma, norm);
+        }
+        if (valid1) {
+            float gamma = gammaGm_.GetValue(cacheIndex1);
+            float norm = normGm_.GetValue(cacheIndex1);
+            StoreScore(b, qHeadBase, pos1, mse01, qjl01, gamma, norm);
+            StoreScore(b, qHeadBase + 1U, pos1, mse11, qjl11, gamma, norm);
+            StoreScore(b, qHeadBase + 2U, pos1, mse21, qjl21, gamma, norm);
+            StoreScore(b, qHeadBase + 3U, pos1, mse31, qjl31, gamma, norm);
+        }
+        if (valid2) {
+            float gamma = gammaGm_.GetValue(cacheIndex2);
+            float norm = normGm_.GetValue(cacheIndex2);
+            StoreScore(b, qHeadBase, pos2, mse02, qjl02, gamma, norm);
+            StoreScore(b, qHeadBase + 1U, pos2, mse12, qjl12, gamma, norm);
+            StoreScore(b, qHeadBase + 2U, pos2, mse22, qjl22, gamma, norm);
+            StoreScore(b, qHeadBase + 3U, pos2, mse32, qjl32, gamma, norm);
+        }
+        if (valid3) {
+            float gamma = gammaGm_.GetValue(cacheIndex3);
+            float norm = normGm_.GetValue(cacheIndex3);
+            StoreScore(b, qHeadBase, pos3, mse03, qjl03, gamma, norm);
+            StoreScore(b, qHeadBase + 1U, pos3, mse13, qjl13, gamma, norm);
+            StoreScore(b, qHeadBase + 2U, pos3, mse23, qjl23, gamma, norm);
+            StoreScore(b, qHeadBase + 3U, pos3, mse33, qjl33, gamma, norm);
+        }
+    }
+
     __aicore__ inline void Process()
     {
         uint32_t coreId = GetBlockIdx();
@@ -378,11 +604,15 @@ public:
 
         LoadCodebook();
         for (uint64_t linear = start; linear < end; ++linear) {
-            uint32_t pos = static_cast<uint32_t>(linear % maxSeqLen_);
-            uint64_t kvLinear = linear / maxSeqLen_;
+            uint32_t tile = static_cast<uint32_t>(linear % maxSeqTiles_);
+            uint64_t kvLinear = linear / maxSeqTiles_;
             uint32_t kvHead = static_cast<uint32_t>(kvLinear % numKvHeads_);
             uint32_t b = static_cast<uint32_t>(kvLinear / numKvHeads_);
-            ProcessKvTokenScores(b, kvHead, pos);
+            if (qPerKv_ == 4U && scoreTileLen_ == 4U) {
+                ProcessKvTokenTileQ4(b, kvHead, tile);
+            } else {
+                ProcessKvTokenScores(b, kvHead, tile);
+            }
         }
     }
 
@@ -409,6 +639,8 @@ private:
     uint32_t packedCols_{0};
     uint32_t qjlCols_{0};
     uint32_t stage1Bits_{0};
+    uint32_t scoreTileLen_{1};
+    uint32_t maxSeqTiles_{0};
     uint32_t numCore_{0};
     float scale_{1.0F};
     float correction_{0.0F};
