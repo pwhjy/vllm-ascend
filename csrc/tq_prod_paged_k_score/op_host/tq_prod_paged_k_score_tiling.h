@@ -23,6 +23,7 @@ BEGIN_TILING_DATA_DEF(TqProdPagedKScoreTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, stage1Bits);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
     TILING_DATA_FIELD_DEF(float, scale);
+    TILING_DATA_FIELD_DEF(float, correction);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(TqProdPagedKScore, TqProdPagedKScoreTilingData)

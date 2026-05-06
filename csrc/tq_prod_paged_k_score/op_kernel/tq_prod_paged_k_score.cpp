@@ -24,6 +24,7 @@ struct TqProdPagedKScoreTilingData {
     uint32_t stage1Bits;
     uint32_t numCore;
     float scale;
+    float correction;
 };
 
 class KernelTqProdPagedKScore {
@@ -67,7 +68,7 @@ public:
         stage1Bits_ = tiling->stage1Bits;
         numCore_ = tiling->numCore;
         scale_ = tiling->scale;
-        correction_ = 1.2533141373155001F / static_cast<float>(headDim_);
+        correction_ = tiling->correction;
     }
 
     __aicore__ inline uint32_t ExtractIndex(uint64_t packedBase, uint32_t d)

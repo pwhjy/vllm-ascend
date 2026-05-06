@@ -40,6 +40,7 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     uint32_t maxSeqLen = static_cast<uint32_t>(
         maxSeqLenPtr != nullptr ? *maxSeqLenPtr : 0);
     uint32_t stage1Bits = totalBits > 0 ? totalBits - 1U : 0U;
+    float correction = headDim == 0U ? 0.0F : 1.2533141373155001F / headDim;
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0) {
         qPerKv = 1;
@@ -72,6 +73,7 @@ static ge::graphStatus TqProdPagedKScoreTilingFunc(gert::TilingContext* context)
     tiling.set_stage1Bits(stage1Bits);
     tiling.set_numCore(coreNum);
     tiling.set_scale(scale);
+    tiling.set_correction(correction);
 
     context->SetBlockDim(coreNum);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
