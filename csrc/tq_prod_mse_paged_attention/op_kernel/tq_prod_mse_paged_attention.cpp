@@ -548,37 +548,20 @@ public:
                 repeatParams.dstRepStride = repeatStride;
                 repeatParams.src0RepStride = repeatStride;
                 repeatParams.src1RepStride = 0;
-                if (headDim_ == 128U) {
-                    MulAddDst(
-                        accLocal,
-                        tmpLocal,
-                        vLocal,
-                        64U,
-                        4U,
-                        repeatParams);
-                    MulAddDst(
-                        accLocal[64U],
-                        tmpLocal[64U],
-                        vLocal[64U],
-                        64U,
-                        4U,
-                        repeatParams);
-                } else {
-                    uint32_t offset = 0U;
-                    while (offset < headDim_) {
-                        uint64_t mask = headDim_ - offset;
-                        if (mask > 64U) {
-                            mask = 64U;
-                        }
-                        MulAddDst(
-                            accLocal[offset],
-                            tmpLocal[offset],
-                            vLocal[offset],
-                            mask,
-                            4U,
-                            repeatParams);
-                        offset += 64U;
+                uint32_t offset = 0U;
+                while (offset < headDim_) {
+                    uint64_t mask = headDim_ - offset;
+                    if (mask > 64U) {
+                        mask = 64U;
                     }
+                    MulAddDst(
+                        accLocal[offset],
+                        tmpLocal[offset],
+                        vLocal[offset],
+                        mask,
+                        4U,
+                        repeatParams);
+                    offset += 64U;
                 }
                 PipeBarrier<PIPE_V>();
             } else {
