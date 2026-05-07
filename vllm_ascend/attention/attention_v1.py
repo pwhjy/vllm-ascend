@@ -60,9 +60,10 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.ops.turboquant.dequant import (
+    attention_debug_compare_enabled,
     cached_token_map_from_block_table,
     custom_dequant_enabled,
-    debug_compare_enabled,
+    dequant_debug_compare_enabled,
     fused_attention_custom_enabled,
     tq_prod_mse_paged_attention,
     tq_dequant_mse_paged_rot,
@@ -1877,7 +1878,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             vectors=len(seq_lens),
         )
 
-        if debug_compare_enabled():
+        if dequant_debug_compare_enabled():
             ref_k, ref_v = self._dequant_paged_kv_to_dense_reference(
                 kv_cache, block_table, seq_lens, target_dtype, layer,
                 profile_label=f"{profile_label}.debug_reference",
@@ -1917,7 +1918,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             except Exception:
                 if (
                     os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
-                    or debug_compare_enabled()
+                    or dequant_debug_compare_enabled()
                 ):
                     raise
 
@@ -2053,7 +2054,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             except Exception:
                 if (
                     os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
-                    or debug_compare_enabled()
+                    or attention_debug_compare_enabled()
                 ):
                     raise
 

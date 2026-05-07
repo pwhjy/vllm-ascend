@@ -44,7 +44,19 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION",
     "VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT",
     "VLLM_ASCEND_TQ_CUSTOM_STRICT",
+)
+
+DEBUG_COMPARE_ENV_KEYS = (
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT",
 )
 
 KV_MEMORY_RE = re.compile(r"Available KV cache memory:\s*([0-9.]+)\s*GiB")
@@ -101,10 +113,29 @@ def _parse_extra_env(values: list[str] | None) -> dict[str, str]:
     return env
 
 
+def _debug_compare_requested(
+    args: argparse.Namespace,
+    extra_env: dict[str, str],
+) -> bool:
+    return (
+        args.debug_compare_all
+        or args.debug_compare_attention
+        or args.debug_compare_dequant
+        or args.debug_compare_k_score
+        or args.debug_compare_prod_dequant
+        or any(key in extra_env for key in DEBUG_COMPARE_ENV_KEYS)
+    )
+
+
 def _set_turboquant_env(
     variant: str,
     score_tile_len: int,
     baseline_mode: str,
+    debug_compare_all: bool,
+    debug_compare_attention: bool,
+    debug_compare_dequant: bool,
+    debug_compare_k_score: bool,
+    debug_compare_prod_dequant: bool,
 ) -> None:
     if variant == "plain":
         for key in TURBOQUANT_ENV_KEYS:
@@ -126,8 +157,35 @@ def _set_turboquant_env(
         "1" if variant == "fused" else "0"
     )
     os.environ["VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN"] = str(score_tile_len)
-    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = os.getenv(
-        "VLLM_ASCEND_TQ_DEBUG_COMPARE", "0"
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = (
+        "1"
+        if debug_compare_all
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
+        else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION"] = (
+        "1"
+        if (variant == "fused" and debug_compare_attention)
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION", "0") == "1"
+        else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT"] = (
+        "1"
+        if debug_compare_dequant
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT", "0") == "1"
+        else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE"] = (
+        "1"
+        if debug_compare_k_score
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE", "0") == "1"
+        else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT"] = (
+        "1"
+        if debug_compare_prod_dequant
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT", "0") == "1"
+        else "0"
     )
     os.environ["VLLM_ASCEND_TQ_CUSTOM_STRICT"] = "1"
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
@@ -279,6 +337,11 @@ def _run_worker(args: argparse.Namespace) -> int:
         args._worker_variant,
         args.score_tile_len,
         args.baseline_mode,
+        args.debug_compare_all,
+        args.debug_compare_attention,
+        args.debug_compare_dequant,
+        args.debug_compare_k_score,
+        args.debug_compare_prod_dequant,
     )
     if args.modelscope:
         os.environ["VLLM_USE_MODELSCOPE"] = "True"
@@ -557,6 +620,16 @@ def _worker_command(
         cmd.append("--modelscope")
     if args.no_tqdm:
         cmd.append("--no-tqdm")
+    if args.debug_compare_all:
+        cmd.append("--debug-compare-all")
+    if args.debug_compare_attention:
+        cmd.append("--debug-compare-attention")
+    if args.debug_compare_dequant:
+        cmd.append("--debug-compare-dequant")
+    if args.debug_compare_k_score:
+        cmd.append("--debug-compare-k-score")
+    if args.debug_compare_prod_dequant:
+        cmd.append("--debug-compare-prod-dequant")
     for prompt in args.prompt or []:
         cmd.extend(["--prompt", prompt])
     if args.prompts_file:
@@ -642,8 +715,24 @@ def _run_compare(args: argparse.Namespace) -> int:
     plain_comparison_json = output_dir / "plain_comparison.json"
     run_stats_json = output_dir / "run_stats.json"
 
+    extra_env = _parse_extra_env(args.env)
     env = os.environ.copy()
-    env.update(_parse_extra_env(args.env))
+    if not _debug_compare_requested(args, extra_env):
+        ignored_debug_env = [
+            key for key in DEBUG_COMPARE_ENV_KEYS if key in env
+        ]
+        for key in ignored_debug_env:
+            env.pop(key, None)
+        if ignored_debug_env:
+            print(
+                "NOTE: ignoring inherited TurboQuant debug compare env: "
+                + ", ".join(ignored_debug_env)
+            )
+            print(
+                "      Use --debug-compare-all, "
+                "--debug-compare-attention, or --env KEY=VALUE to enable it."
+            )
+    env.update(extra_env)
 
     child_processes: dict[str, dict[str, Any]] = {}
     if args.include_plain_baseline:
@@ -799,6 +888,37 @@ def build_parser() -> argparse.ArgumentParser:
             "'reference' disables TurboQuant custom dequant for the baseline; "
             "'custom' keeps the faster custom MSE dequant baseline."
         ),
+    )
+    parser.add_argument(
+        "--debug-compare-all",
+        action="store_true",
+        help=(
+            "Enable all TurboQuant custom-op debug comparisons inside workers. "
+            "This is equivalent to VLLM_ASCEND_TQ_DEBUG_COMPARE=1."
+        ),
+    )
+    parser.add_argument(
+        "--debug-compare-attention",
+        action="store_true",
+        help=(
+            "Enable only the PR5 fused attention debug comparison in the "
+            "fused worker."
+        ),
+    )
+    parser.add_argument(
+        "--debug-compare-dequant",
+        action="store_true",
+        help="Enable TurboQuant MSE dequant debug comparisons.",
+    )
+    parser.add_argument(
+        "--debug-compare-k-score",
+        action="store_true",
+        help="Enable TurboQuant compressed K-score debug comparisons.",
+    )
+    parser.add_argument(
+        "--debug-compare-prod-dequant",
+        action="store_true",
+        help="Enable TurboQuant prod dequant debug comparisons.",
     )
     parser.add_argument(
         "--include-plain-baseline",

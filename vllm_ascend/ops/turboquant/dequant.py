@@ -73,6 +73,34 @@ def debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
 
 
+def attention_debug_compare_enabled() -> bool:
+    return (
+        debug_compare_enabled()
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION", "0") == "1"
+    )
+
+
+def dequant_debug_compare_enabled() -> bool:
+    return (
+        debug_compare_enabled()
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT", "0") == "1"
+    )
+
+
+def k_score_debug_compare_enabled() -> bool:
+    return (
+        debug_compare_enabled()
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE", "0") == "1"
+    )
+
+
+def prod_dequant_debug_compare_enabled() -> bool:
+    return (
+        debug_compare_enabled()
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT", "0") == "1"
+    )
+
+
 def token_map_cache_size() -> int:
     return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
 
@@ -545,7 +573,7 @@ def tq_dequant_prod_paged_k_score(
         int(max_seq_len),
     )
 
-    if debug_compare_enabled():
+    if k_score_debug_compare_enabled():
         ref = _reference()
         torch.npu.synchronize()
         valid = torch.isfinite(ref)
@@ -793,7 +821,7 @@ def tq_prod_mse_paged_attention(
         v_rotation_t.to(device=query.device, dtype=torch.float32),
     ).contiguous()
 
-    if debug_compare_enabled():
+    if attention_debug_compare_enabled():
         ref = _reference()
         torch.npu.synchronize()
         max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
@@ -880,7 +908,7 @@ def tq_dequant_mse_paged_rot(
             int(head_dim),
         ).to(target_dtype)
 
-    if debug_compare_enabled():
+    if dequant_debug_compare_enabled():
         ref = tq_dequant_mse_paged_reference_rot(
             packed_idx, norm, token_block_ids, token_offsets,
             codebook, bits, head_dim, target_dtype,
@@ -954,7 +982,7 @@ def tq_dequant_mse_paged_scaled_rot(
             target_dtype=target_dtype,
         )
 
-    if debug_compare_enabled():
+    if dequant_debug_compare_enabled():
         combined_scale = (norm * extra_scale * float(scale_multiplier)).contiguous()
         ref = tq_dequant_mse_paged_reference_rot(
             packed_idx, combined_scale, token_block_ids, token_offsets,
@@ -1030,7 +1058,7 @@ def tq_dequant_prod_paged_rot(
 
     out = out.to(target_dtype)
 
-    if debug_compare_enabled():
+    if prod_dequant_debug_compare_enabled():
         ref = tq_dequant_prod_paged_reference_rot(
             packed_idx, packed_qjl, gamma, norm,
             token_block_ids, token_offsets,
