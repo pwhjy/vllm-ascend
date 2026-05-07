@@ -82,16 +82,16 @@ public:
         scale_ = tiling->scale;
         correction_ = tiling->correction;
 
-        uint32_t safeSeqLen = maxSeqLen_ == 0U ? 1U : maxSeqLen_;
         if (scoreTileLen_ == 0U) {
             scoreTileLen_ = 64U;
         }
         if (scoreTileLen_ > 256U) {
             scoreTileLen_ = 256U;
         }
-        if (scoreTileLen_ > safeSeqLen) {
-            scoreTileLen_ = safeSeqLen;
+        if (scoreTileLen_ < 8U) {
+            scoreTileLen_ = 8U;
         }
+        scoreTileLen_ = ((scoreTileLen_ + 7U) / 8U) * 8U;
         pipe_.InitBuffer(qRotBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(qQjlBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(scoreBuf_, 4U * scoreTileLen_ * sizeof(float));

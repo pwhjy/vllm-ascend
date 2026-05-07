@@ -84,7 +84,8 @@ def fused_attention_score_tile_len() -> int:
         )
     except ValueError:
         tile_len = 64
-    return min(256, max(1, tile_len))
+    tile_len = min(256, max(8, tile_len))
+    return ((tile_len + 7) // 8) * 8
 
 
 _TQ_CUSTOM_OUT_DTYPE_CODES = {

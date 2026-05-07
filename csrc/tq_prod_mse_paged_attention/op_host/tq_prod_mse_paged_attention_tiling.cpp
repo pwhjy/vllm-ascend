@@ -11,6 +11,21 @@
 
 namespace optiling {
 
+static uint32_t NormalizeScoreTileLen(int64_t scoreTileLenAttr)
+{
+    // This is a UB row stride, so keep it 32-byte aligned even for short seqs.
+    uint32_t scoreTileLen = scoreTileLenAttr > 0
+        ? static_cast<uint32_t>(scoreTileLenAttr)
+        : 64U;
+    if (scoreTileLen > 256U) {
+        scoreTileLen = 256U;
+    }
+    if (scoreTileLen < 8U) {
+        scoreTileLen = 8U;
+    }
+    return ((scoreTileLen + 7U) / 8U) * 8U;
+}
+
 static ge::graphStatus TqProdMsePagedAttentionTilingFunc(
     gert::TilingContext* context)
 {
@@ -48,18 +63,7 @@ static ge::graphStatus TqProdMsePagedAttentionTilingFunc(
         maxSeqLenPtr != nullptr ? *maxSeqLenPtr : 0);
     int64_t scoreTileLenAttr =
         scoreTileLenPtr != nullptr ? *scoreTileLenPtr : 64;
-    uint32_t scoreTileLen = scoreTileLenAttr > 0
-        ? static_cast<uint32_t>(scoreTileLenAttr)
-        : 64U;
-    if (scoreTileLen > 256U) {
-        scoreTileLen = 256U;
-    }
-    if (maxSeqLen > 0U && scoreTileLen > maxSeqLen) {
-        scoreTileLen = maxSeqLen;
-    }
-    if (scoreTileLen == 0U) {
-        scoreTileLen = 1U;
-    }
+    uint32_t scoreTileLen = NormalizeScoreTileLen(scoreTileLenAttr);
 
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
