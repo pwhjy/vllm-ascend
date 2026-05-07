@@ -203,6 +203,35 @@ public:
         return (value >> bitOff) & mask;
     }
 
+    __aicore__ inline void LoadVLocal(
+        uint64_t vPackedBase,
+        float vNorm,
+        const LocalTensor<float>& vLocal
+    ) {
+        if (vBits_ == 2U && (headDim_ & 3U) == 0U) {
+            uint32_t groups = headDim_ >> 2;
+            for (uint32_t g = 0; g < groups; ++g) {
+                uint32_t idxBits = static_cast<uint32_t>(
+                    vPackedIdxGm_.GetValue(vPackedBase + g));
+                uint32_t d = g << 2;
+                vLocal.SetValue(
+                    d, LookupVCodebook(idxBits & 0x3U) * vNorm);
+                vLocal.SetValue(
+                    d + 1U, LookupVCodebook((idxBits >> 2) & 0x3U) * vNorm);
+                vLocal.SetValue(
+                    d + 2U, LookupVCodebook((idxBits >> 4) & 0x3U) * vNorm);
+                vLocal.SetValue(
+                    d + 3U, LookupVCodebook((idxBits >> 6) & 0x3U) * vNorm);
+            }
+            return;
+        }
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float v = LookupVCodebook(ExtractVIndex(vPackedBase, d)) * vNorm;
+            vLocal.SetValue(d, v);
+        }
+    }
+
     __aicore__ inline uint64_t CacheIndex(
         uint32_t b,
         uint32_t kvHead,
@@ -457,10 +486,7 @@ public:
             float w1 = scoreLocal.GetValue(scoreTileLen_ + i);
             float w2 = scoreLocal.GetValue((scoreTileLen_ << 1) + i);
             float w3 = scoreLocal.GetValue(3U * scoreTileLen_ + i);
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                float v = LookupVCodebook(ExtractVIndex(vPackedBase, d)) * vNorm;
-                vLocal.SetValue(d, v);
-            }
+            LoadVLocal(vPackedBase, vNorm, vLocal);
             SToVSync();
             if ((headDim_ & 7U) == 0U) {
                 Duplicate(tmpLocal, w0, headDim_);
