@@ -96,7 +96,7 @@ public:
         pipe_.InitBuffer(qQjlBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(scoreBuf_, 4U * scoreTileLen_ * sizeof(float));
         pipe_.InitBuffer(accBuf_, 4U * headDim_ * sizeof(float));
-        pipe_.InitBuffer(vBuf_, 2U * headDim_ * sizeof(float));
+        pipe_.InitBuffer(vBuf_, headDim_ * sizeof(float));
         pipe_.InitBuffer(tmpBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(reduceBuf_, 64U * sizeof(float));
     }
@@ -508,70 +508,6 @@ public:
         VToSSync();
     }
 
-    __aicore__ inline void AccumulateVLocal(
-        const LocalTensor<float>& vLocal,
-        const LocalTensor<float>& tmpLocal,
-        const LocalTensor<float>& accLocal,
-        float w0,
-        float w1,
-        float w2,
-        float w3
-    ) {
-        uint32_t q1Base = headDim_;
-        uint32_t q2Base = headDim_ << 1;
-        uint32_t q3Base = 3U * headDim_;
-
-        if ((headDim_ & 7U) == 0U) {
-            Duplicate(tmpLocal, w0, headDim_);
-            Duplicate(tmpLocal[q1Base], w1, headDim_);
-            Duplicate(tmpLocal[q2Base], w2, headDim_);
-            Duplicate(tmpLocal[q3Base], w3, headDim_);
-            PipeBarrier<PIPE_V>();
-
-            uint8_t repeatStride = static_cast<uint8_t>(headDim_ >> 3);
-            BinaryRepeatParams repeatParams;
-            repeatParams.dstBlkStride = 1;
-            repeatParams.src0BlkStride = 1;
-            repeatParams.src1BlkStride = 1;
-            repeatParams.dstRepStride = repeatStride;
-            repeatParams.src0RepStride = repeatStride;
-            repeatParams.src1RepStride = 0;
-            uint32_t offset = 0U;
-            while (offset < headDim_) {
-                uint64_t mask = headDim_ - offset;
-                if (mask > 64U) {
-                    mask = 64U;
-                }
-                MulAddDst(
-                    accLocal[offset],
-                    tmpLocal[offset],
-                    vLocal[offset],
-                    mask,
-                    4U,
-                    repeatParams);
-                offset += 64U;
-            }
-            PipeBarrier<PIPE_V>();
-        } else {
-            Duplicate(tmpLocal, w0, headDim_);
-            PipeBarrier<PIPE_V>();
-            MulAddDst(accLocal, vLocal, tmpLocal, headDim_);
-            PipeBarrier<PIPE_V>();
-            Duplicate(tmpLocal, w1, headDim_);
-            PipeBarrier<PIPE_V>();
-            MulAddDst(accLocal[q1Base], vLocal, tmpLocal, headDim_);
-            PipeBarrier<PIPE_V>();
-            Duplicate(tmpLocal, w2, headDim_);
-            PipeBarrier<PIPE_V>();
-            MulAddDst(accLocal[q2Base], vLocal, tmpLocal, headDim_);
-            PipeBarrier<PIPE_V>();
-            Duplicate(tmpLocal, w3, headDim_);
-            PipeBarrier<PIPE_V>();
-            MulAddDst(accLocal[q3Base], vLocal, tmpLocal, headDim_);
-            PipeBarrier<PIPE_V>();
-        }
-    }
-
     __aicore__ inline void AccumulateTileV(
         uint32_t b,
         uint32_t kvHead,
@@ -583,40 +519,68 @@ public:
         LocalTensor<float> vLocal = vBuf_.Get<float>();
         LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
 
-        for (uint32_t i = 0; i < tileLen; i += 2U) {
-            uint32_t pos0 = tileStart + i;
-            uint64_t cacheIndex0 = CacheIndex(b, kvHead, pos0);
-            uint64_t vPackedBase0 = cacheIndex0 * vPackedCols_;
-            float vNorm0 = vNormGm_.GetValue(cacheIndex0);
-            float w00 = scoreLocal.GetValue(i);
-            float w01 = scoreLocal.GetValue(scoreTileLen_ + i);
-            float w02 = scoreLocal.GetValue((scoreTileLen_ << 1) + i);
-            float w03 = scoreLocal.GetValue(3U * scoreTileLen_ + i);
-            LoadVLocal(vPackedBase0, vNorm0, vLocal);
-
-            bool hasSecond = i + 1U < tileLen;
-            float w10 = 0.0F;
-            float w11 = 0.0F;
-            float w12 = 0.0F;
-            float w13 = 0.0F;
-            if (hasSecond) {
-                uint32_t pos1 = pos0 + 1U;
-                uint64_t cacheIndex1 = CacheIndex(b, kvHead, pos1);
-                uint64_t vPackedBase1 = cacheIndex1 * vPackedCols_;
-                float vNorm1 = vNormGm_.GetValue(cacheIndex1);
-                uint32_t i1 = i + 1U;
-                w10 = scoreLocal.GetValue(i1);
-                w11 = scoreLocal.GetValue(scoreTileLen_ + i1);
-                w12 = scoreLocal.GetValue((scoreTileLen_ << 1) + i1);
-                w13 = scoreLocal.GetValue(3U * scoreTileLen_ + i1);
-                LoadVLocal(vPackedBase1, vNorm1, vLocal[headDim_]);
-            }
-
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t i = 0; i < tileLen; ++i) {
+            uint32_t pos = tileStart + i;
+            uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
+            uint64_t vPackedBase = cacheIndex * vPackedCols_;
+            float vNorm = vNormGm_.GetValue(cacheIndex);
+            float w0 = scoreLocal.GetValue(i);
+            float w1 = scoreLocal.GetValue(scoreTileLen_ + i);
+            float w2 = scoreLocal.GetValue((scoreTileLen_ << 1) + i);
+            float w3 = scoreLocal.GetValue(3U * scoreTileLen_ + i);
+            LoadVLocal(vPackedBase, vNorm, vLocal);
             SToVSync();
-            AccumulateVLocal(vLocal, tmpLocal, accLocal, w00, w01, w02, w03);
-            if (hasSecond) {
-                AccumulateVLocal(
-                    vLocal[headDim_], tmpLocal, accLocal, w10, w11, w12, w13);
+            if ((headDim_ & 7U) == 0U) {
+                Duplicate(tmpLocal, w0, headDim_);
+                Duplicate(tmpLocal[q1Base], w1, headDim_);
+                Duplicate(tmpLocal[q2Base], w2, headDim_);
+                Duplicate(tmpLocal[q3Base], w3, headDim_);
+                PipeBarrier<PIPE_V>();
+
+                uint8_t repeatStride = static_cast<uint8_t>(headDim_ >> 3);
+                BinaryRepeatParams repeatParams;
+                repeatParams.dstBlkStride = 1;
+                repeatParams.src0BlkStride = 1;
+                repeatParams.src1BlkStride = 1;
+                repeatParams.dstRepStride = repeatStride;
+                repeatParams.src0RepStride = repeatStride;
+                repeatParams.src1RepStride = 0;
+                uint32_t offset = 0U;
+                while (offset < headDim_) {
+                    uint64_t mask = headDim_ - offset;
+                    if (mask > 64U) {
+                        mask = 64U;
+                    }
+                    MulAddDst(
+                        accLocal[offset],
+                        tmpLocal[offset],
+                        vLocal[offset],
+                        mask,
+                        4U,
+                        repeatParams);
+                    offset += 64U;
+                }
+                PipeBarrier<PIPE_V>();
+            } else {
+                Duplicate(tmpLocal, w0, headDim_);
+                PipeBarrier<PIPE_V>();
+                MulAddDst(accLocal, vLocal, tmpLocal, headDim_);
+                PipeBarrier<PIPE_V>();
+                Duplicate(tmpLocal, w1, headDim_);
+                PipeBarrier<PIPE_V>();
+                MulAddDst(accLocal[q1Base], vLocal, tmpLocal, headDim_);
+                PipeBarrier<PIPE_V>();
+                Duplicate(tmpLocal, w2, headDim_);
+                PipeBarrier<PIPE_V>();
+                MulAddDst(accLocal[q2Base], vLocal, tmpLocal, headDim_);
+                PipeBarrier<PIPE_V>();
+                Duplicate(tmpLocal, w3, headDim_);
+                PipeBarrier<PIPE_V>();
+                MulAddDst(accLocal[q3Base], vLocal, tmpLocal, headDim_);
+                PipeBarrier<PIPE_V>();
             }
             VToSSync();
         }
