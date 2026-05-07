@@ -521,6 +521,20 @@ def _parse_child_log(log_text: str) -> dict[str, Any]:
     return stats
 
 
+def _warn_if_plain_model_looks_quantized(model: str) -> None:
+    plain_model = Path(model)
+    if (
+        plain_model.is_dir()
+        and (plain_model / "quant_model_description.json").exists()
+    ):
+        print(
+            "WARNING: --plain-model points to a directory with "
+            "quant_model_description.json; vllm-ascend may auto-detect "
+            "Ascend quantization. Use a model directory without that file "
+            "for a true non-TurboQuant baseline."
+        )
+
+
 def _aggregate_profile_stat(
     target: dict[str, Any],
     source: dict[str, Any],
@@ -854,18 +868,26 @@ def _run_compare(args: argparse.Namespace) -> int:
     env.update(extra_env)
 
     child_processes: dict[str, dict[str, Any]] = {}
+    if args.plain_only:
+        _warn_if_plain_model_looks_quantized(args.plain_model or args.model)
+        child_processes["plain"] = _run_child(
+            args, "plain", plain_json, env, output_dir / "plain.log"
+        )
+        plain = _read_json(plain_json)
+        worker_stats = {"plain": _summarize_worker_stats(plain)}
+        run_stats = {
+            "profile_turboquant": args.profile_turboquant,
+            "profile_turboquant_sync": args.profile_turboquant_sync,
+            "workers": worker_stats,
+            "child_processes": child_processes,
+        }
+        _write_json(run_stats_json, run_stats)
+        print(f"Results: {output_dir}")
+        _print_run_stats_summary(run_stats)
+        return 0
+
     if args.include_plain_baseline:
-        plain_model = Path(args.plain_model or args.model)
-        if (
-            plain_model.is_dir()
-            and (plain_model / "quant_model_description.json").exists()
-        ):
-            print(
-                "WARNING: --plain-model points to a directory with "
-                "quant_model_description.json; vllm-ascend may auto-detect "
-                "Ascend quantization. Use a model directory without that file "
-                "for a true non-TurboQuant baseline."
-            )
+        _warn_if_plain_model_looks_quantized(args.plain_model or args.model)
         child_processes["plain"] = _run_child(
             args, "plain", plain_json, env, output_dir / "plain.log"
         )
@@ -1064,12 +1086,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also run a non-TurboQuant/plain model baseline for context.",
     )
     parser.add_argument(
+        "--plain-only",
+        action="store_true",
+        help=(
+            "Run only the non-TurboQuant/plain worker and write plain.json "
+            "plus run_stats.json."
+        ),
+    )
+    parser.add_argument(
         "--plain-model",
-        help="Model path for --include-plain-baseline. Defaults to --model.",
+        help=(
+            "Model path for --include-plain-baseline or --plain-only. "
+            "Defaults to --model."
+        ),
     )
     parser.add_argument(
         "--plain-tokenizer",
-        help="Tokenizer path for --include-plain-baseline. Defaults to --tokenizer.",
+        help=(
+            "Tokenizer path for --include-plain-baseline or --plain-only. "
+            "Defaults to --tokenizer."
+        ),
     )
     parser.add_argument(
         "--plain-quantization",
