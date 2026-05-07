@@ -20,8 +20,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 from argparse import BooleanOptionalAction
 from pathlib import Path
@@ -43,6 +45,15 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE",
     "VLLM_ASCEND_TQ_CUSTOM_STRICT",
+)
+
+KV_MEMORY_RE = re.compile(r"Available KV cache memory:\s*([0-9.]+)\s*GiB")
+KV_TOKENS_RE = re.compile(r"GPU KV cache size:\s*([0-9,]+)\s*tokens")
+KV_CONCURRENCY_RE = re.compile(
+    r"Maximum concurrency for\s*([0-9,]+)\s*tokens per request:\s*([0-9.]+)x"
+)
+ENGINE_INIT_RE = re.compile(
+    r"init engine .* took\s*([0-9.]+)\s*seconds"
 )
 
 
@@ -147,6 +158,119 @@ def _build_llm_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return kwargs
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_kv_cache_stats(llm: Any, args: argparse.Namespace) -> dict[str, Any]:
+    vllm_config = getattr(llm.llm_engine, "vllm_config", None)
+    cache_config = getattr(vllm_config, "cache_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+
+    num_gpu_blocks = _safe_int(getattr(cache_config, "num_gpu_blocks", None))
+    num_cpu_blocks = _safe_int(getattr(cache_config, "num_cpu_blocks", None))
+    block_size = _safe_int(getattr(cache_config, "block_size", args.block_size))
+    max_model_len = _safe_int(getattr(model_config, "max_model_len", args.max_model_len))
+    dcp_size = _safe_int(
+        getattr(parallel_config, "decode_context_parallel_size", None)
+    ) or 1
+    pcp_size = _safe_int(
+        getattr(parallel_config, "prefill_context_parallel_size", None)
+    ) or 1
+
+    capacity_tokens = None
+    max_concurrency = None
+    if num_gpu_blocks is not None and block_size is not None:
+        capacity_tokens = num_gpu_blocks * block_size * dcp_size * pcp_size
+        if max_model_len:
+            max_concurrency = capacity_tokens / max_model_len
+
+    stats: dict[str, Any] = {
+        "num_gpu_blocks": num_gpu_blocks,
+        "num_cpu_blocks": num_cpu_blocks,
+        "block_size": block_size,
+        "capacity_tokens_estimate": capacity_tokens,
+        "max_model_len": max_model_len,
+        "max_concurrency_estimate": max_concurrency,
+        "gpu_memory_utilization": _safe_float(
+            getattr(cache_config, "gpu_memory_utilization", args.gpu_memory_utilization)
+        ),
+        "kv_cache_dtype": str(getattr(cache_config, "cache_dtype", None)),
+        "decode_context_parallel_size": dcp_size,
+        "prefill_context_parallel_size": pcp_size,
+        "source": "vllm_config.cache_config",
+    }
+
+    model_executor = getattr(llm.llm_engine, "model_executor", None)
+    model_runner = getattr(model_executor, "model_runner", None)
+    kv_cache_config = getattr(model_runner, "kv_cache_config", None)
+    if kv_cache_config is not None:
+        kv_groups = getattr(kv_cache_config, "kv_cache_groups", []) or []
+        group_block_sizes = []
+        for group in kv_groups:
+            spec = getattr(group, "kv_cache_spec", None)
+            group_block_sizes.append(_safe_int(getattr(spec, "block_size", None)))
+        group_block_sizes = [size for size in group_block_sizes if size is not None]
+        group_count = len(kv_groups)
+        exact_num_blocks = _safe_int(getattr(kv_cache_config, "num_blocks", None))
+        if exact_num_blocks is not None and group_count and group_block_sizes:
+            exact_tokens = (
+                exact_num_blocks
+                // group_count
+                * min(group_block_sizes)
+                * dcp_size
+                * pcp_size
+            )
+            stats.update(
+                {
+                    "num_gpu_blocks": exact_num_blocks,
+                    "kv_cache_group_count": group_count,
+                    "group_block_sizes": group_block_sizes,
+                    "capacity_tokens": exact_tokens,
+                    "max_concurrency": (
+                        exact_tokens / max_model_len if max_model_len else None
+                    ),
+                    "source": "model_runner.kv_cache_config",
+                }
+            )
+
+    return stats
+
+
+def _build_throughput_stats(
+    outputs: list[dict[str, Any]],
+    init_seconds: float,
+    generate_seconds: float,
+) -> dict[str, Any]:
+    prompt_tokens = sum(len(row["prompt_token_ids"]) for row in outputs)
+    generated_tokens = sum(len(row["generated_token_ids"]) for row in outputs)
+    total_tokens = prompt_tokens + generated_tokens
+    seconds = max(generate_seconds, 1e-12)
+    total_seconds = max(init_seconds + generate_seconds, 1e-12)
+    return {
+        "num_requests": len(outputs),
+        "prompt_tokens": prompt_tokens,
+        "generated_tokens": generated_tokens,
+        "total_tokens": total_tokens,
+        "output_tokens_per_second": generated_tokens / seconds,
+        "total_tokens_per_second": total_tokens / seconds,
+        "requests_per_second": len(outputs) / seconds,
+        "end_to_end_output_tokens_per_second": generated_tokens / total_seconds,
+        "end_to_end_total_tokens_per_second": total_tokens / total_seconds,
+    }
+
+
 def _run_worker(args: argparse.Namespace) -> int:
     assert args._worker_variant is not None
     assert args._output_json is not None
@@ -176,12 +300,17 @@ def _run_worker(args: argparse.Namespace) -> int:
         max_tokens=args.max_tokens,
         seed=args.seed,
     )
+    init_start = time.perf_counter()
     llm = LLM(**_build_llm_kwargs(args))
+    init_seconds = time.perf_counter() - init_start
+    kv_cache_stats = _collect_kv_cache_stats(llm, args)
+    generate_start = time.perf_counter()
     request_outputs = llm.generate(
         prompts,
         sampling_params=sampling_params,
         use_tqdm=not args.no_tqdm,
     )
+    generate_seconds = time.perf_counter() - generate_start
 
     outputs: list[dict[str, Any]] = []
     for index, request_output in enumerate(request_outputs):
@@ -197,6 +326,11 @@ def _run_worker(args: argparse.Namespace) -> int:
             }
         )
 
+    throughput = _build_throughput_stats(
+        outputs,
+        init_seconds,
+        generate_seconds,
+    )
     env_snapshot = {key: os.getenv(key) for key in TURBOQUANT_ENV_KEYS}
     _write_json(
         Path(args._output_json),
@@ -212,6 +346,13 @@ def _run_worker(args: argparse.Namespace) -> int:
                 "seed": args.seed,
             },
             "env": env_snapshot,
+            "timing": {
+                "init_seconds": init_seconds,
+                "generate_seconds": generate_seconds,
+                "end_to_end_seconds": init_seconds + generate_seconds,
+            },
+            "throughput": throughput,
+            "kv_cache": kv_cache_stats,
             "outputs": outputs,
         },
     )
@@ -283,6 +424,70 @@ def _compare_outputs(
         "num_prompts": min(len(left_outputs), len(right_outputs)),
         "mismatches": mismatches,
     }
+
+
+def _parse_child_log(log_text: str) -> dict[str, Any]:
+    kv_memory_matches = KV_MEMORY_RE.findall(log_text)
+    kv_token_matches = KV_TOKENS_RE.findall(log_text)
+    kv_concurrency_matches = KV_CONCURRENCY_RE.findall(log_text)
+    engine_init_matches = ENGINE_INIT_RE.findall(log_text)
+
+    stats: dict[str, Any] = {}
+    if kv_memory_matches:
+        stats["available_kv_cache_gib"] = float(kv_memory_matches[-1])
+        stats["available_kv_cache_bytes_estimate"] = int(
+            stats["available_kv_cache_gib"] * (1024**3)
+        )
+    if kv_token_matches:
+        stats["kv_cache_capacity_tokens"] = int(
+            kv_token_matches[-1].replace(",", "")
+        )
+    if kv_concurrency_matches:
+        max_model_len, concurrency = kv_concurrency_matches[-1]
+        stats["max_model_len_for_concurrency"] = int(
+            max_model_len.replace(",", "")
+        )
+        stats["max_concurrency"] = float(concurrency)
+    if engine_init_matches:
+        stats["engine_init_seconds_from_log"] = float(engine_init_matches[-1])
+    return stats
+
+
+def _summarize_worker_stats(worker_json: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "variant": worker_json.get("variant"),
+        "model": worker_json.get("model"),
+        "quantization": worker_json.get("quantization"),
+        "timing": worker_json.get("timing", {}),
+        "throughput": worker_json.get("throughput", {}),
+        "kv_cache": worker_json.get("kv_cache", {}),
+    }
+
+
+def _print_run_stats_summary(run_stats: dict[str, Any]) -> None:
+    print("\nRun stats:")
+    workers = run_stats.get("workers", {})
+    child_processes = run_stats.get("child_processes", {})
+    for variant, stats in workers.items():
+        timing = stats.get("timing", {})
+        throughput = stats.get("throughput", {})
+        kv_cache = stats.get("kv_cache", {})
+        log_stats = child_processes.get(variant, {}).get("log_stats", {})
+        kv_tokens = (
+            log_stats.get("kv_cache_capacity_tokens")
+            or kv_cache.get("capacity_tokens")
+            or kv_cache.get("capacity_tokens_estimate")
+        )
+        kv_gib = log_stats.get("available_kv_cache_gib")
+        generated_tps = throughput.get("output_tokens_per_second")
+        print(
+            f"  {variant}: "
+            f"init={timing.get('init_seconds', 0.0):.3f}s "
+            f"generate={timing.get('generate_seconds', 0.0):.3f}s "
+            f"out_tok/s={generated_tps or 0.0:.2f} "
+            f"kv_tokens={kv_tokens}"
+            + (f" kv_gib={kv_gib:.2f}" if kv_gib is not None else "")
+        )
 
 
 def _worker_command(
@@ -366,21 +571,60 @@ def _run_child(
     variant: str,
     output_json: Path,
     env: dict[str, str],
-) -> None:
+    log_path: Path,
+) -> dict[str, Any]:
     cmd = _worker_command(args, variant, output_json)
     print(f"\n=== Running {variant} ===")
     print(" ".join(cmd))
     timeout = None if args.timeout_sec <= 0 else args.timeout_sec
-    result = subprocess.run(
-        cmd,
-        cwd=str(_repo_root()),
-        env=env,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"{variant} run failed with exit code {result.returncode}")
+    start = time.perf_counter()
+    log_lines: list[str] = []
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(_repo_root()),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+
+        def _tee_output() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="")
+                log_file.write(line)
+                log_file.flush()
+                log_lines.append(line)
+
+        reader = threading.Thread(target=_tee_output, daemon=True)
+        reader.start()
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            reader.join(timeout=5)
+            raise SystemExit(
+                f"{variant} run timed out after {args.timeout_sec} seconds"
+            ) from None
+        reader.join()
+
+    elapsed = time.perf_counter() - start
+    if returncode != 0:
+        raise SystemExit(f"{variant} run failed with exit code {returncode}")
+
+    log_text = "".join(log_lines)
+    return {
+        "variant": variant,
+        "returncode": returncode,
+        "process_seconds": elapsed,
+        "log_path": str(log_path),
+        "log_stats": _parse_child_log(log_text),
+    }
 
 
 def _run_compare(args: argparse.Namespace) -> int:
@@ -396,10 +640,12 @@ def _run_compare(args: argparse.Namespace) -> int:
     fused_json = output_dir / "fused.json"
     comparison_json = output_dir / "comparison.json"
     plain_comparison_json = output_dir / "plain_comparison.json"
+    run_stats_json = output_dir / "run_stats.json"
 
     env = os.environ.copy()
     env.update(_parse_extra_env(args.env))
 
+    child_processes: dict[str, dict[str, Any]] = {}
     if args.include_plain_baseline:
         plain_model = Path(args.plain_model or args.model)
         if (
@@ -412,22 +658,34 @@ def _run_compare(args: argparse.Namespace) -> int:
                 "Ascend quantization. Use a model directory without that file "
                 "for a true non-TurboQuant baseline."
             )
-        _run_child(args, "plain", plain_json, env)
-    _run_child(args, "baseline", baseline_json, env)
-    _run_child(args, "fused", fused_json, env)
+        child_processes["plain"] = _run_child(
+            args, "plain", plain_json, env, output_dir / "plain.log"
+        )
+    child_processes["baseline"] = _run_child(
+        args, "baseline", baseline_json, env, output_dir / "baseline.log"
+    )
+    child_processes["fused"] = _run_child(
+        args, "fused", fused_json, env, output_dir / "fused.log"
+    )
 
     baseline = _read_json(baseline_json)
     fused = _read_json(fused_json)
+    worker_stats = {
+        "baseline": _summarize_worker_stats(baseline),
+        "fused": _summarize_worker_stats(fused),
+    }
     comparison = _compare_outputs(baseline, fused)
     comparison.update(
         {
             "baseline_json": str(baseline_json),
             "fused_json": str(fused_json),
             "baseline_mode": args.baseline_mode,
+            "run_stats_json": str(run_stats_json),
         }
     )
     if args.include_plain_baseline:
         plain = _read_json(plain_json)
+        worker_stats["plain"] = _summarize_worker_stats(plain)
         plain_comparison = _compare_outputs(
             plain,
             baseline,
@@ -446,8 +704,22 @@ def _run_compare(args: argparse.Namespace) -> int:
                 ),
             }
         )
+        plain_comparison["run_stats"] = {
+            "plain": worker_stats["plain"],
+            "turboquant_baseline": worker_stats["baseline"],
+        }
+        plain_comparison["child_processes"] = {
+            "plain": child_processes["plain"],
+            "turboquant_baseline": child_processes["baseline"],
+        }
         _write_json(plain_comparison_json, plain_comparison)
         comparison["plain_comparison_json"] = str(plain_comparison_json)
+    run_stats = {
+        "workers": worker_stats,
+        "child_processes": child_processes,
+    }
+    _write_json(run_stats_json, run_stats)
+    comparison["run_stats"] = run_stats
     _write_json(comparison_json, comparison)
 
     if comparison["passed"]:
@@ -465,6 +737,7 @@ def _run_compare(args: argparse.Namespace) -> int:
     print(f"Results: {output_dir}")
     if args.include_plain_baseline:
         print(f"Plain comparison: {plain_comparison_json}")
+    _print_run_stats_summary(run_stats)
     return 0 if comparison["passed"] else 1
 
 
