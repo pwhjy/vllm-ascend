@@ -63,6 +63,8 @@ from vllm_ascend.ops.turboquant.dequant import (
     cached_token_map_from_block_table,
     custom_dequant_enabled,
     debug_compare_enabled,
+    fused_attention_custom_enabled,
+    tq_prod_mse_paged_attention,
     tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_scaled_rot,
 )
@@ -1972,6 +1974,50 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         return output
 
+    def _run_turboquant_fused_decode_attention(
+        self,
+        query: torch.Tensor,
+        kv_cache: dict[str, torch.Tensor],
+        block_table: torch.Tensor,
+        seq_lens: list[int],
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        _maybe_sync_for_profile(query, block_table)
+        t0 = time.perf_counter()
+        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
+
+        batch_size = len(seq_lens)
+        fused_out = tq_prod_mse_paged_attention(
+            query[:batch_size],
+            kv_cache["k_idx"],
+            kv_cache["k_qjl"],
+            kv_cache["k_gamma"],
+            kv_cache["k_norm"],
+            kv_cache["v_idx"],
+            kv_cache["v_norm"],
+            block_table,
+            seq_lens,
+            layer._tq_k_codebook,
+            layer._tq_v_codebook,
+            layer._tq_k_rot,
+            layer._tq_k_qjl_proj,
+            layer._tq_v_rot_t,
+            int(layer.tq_k_total_bits),
+            int(layer.tq_v_stage1_bits),
+            self.head_size,
+            scale=self.scale,
+            max_seq_len=max(seq_lens, default=0),
+        )
+        output[:batch_size] = fused_out.to(dtype=output.dtype)
+        _maybe_sync_for_profile(output)
+        _record_tq_profile(
+            "turboquant_decode.fused_attention",
+            (time.perf_counter() - t0) * 1000.0,
+            vectors=batch_size,
+        )
+        return output
+
     def _forward_turboquant_decode(
         self,
         query: torch.Tensor,
@@ -1982,6 +2028,35 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         _maybe_sync_for_profile(query, attn_metadata.block_tables)
         t_total_0 = time.perf_counter()
         kv_seq_lens = attn_metadata.seq_lens_list
+        if (
+            fused_attention_custom_enabled()
+            and isinstance(self.key_cache, dict)
+            and getattr(layer, "tq_k_variant", "prod") == "prod"
+            and "k_qjl" in self.key_cache
+            and "k_gamma" in self.key_cache
+        ):
+            try:
+                output = self._run_turboquant_fused_decode_attention(
+                    query,
+                    self.key_cache,
+                    attn_metadata.block_tables,
+                    kv_seq_lens,
+                    output,
+                    layer,
+                )
+                _record_tq_profile(
+                    "turboquant_decode.total",
+                    (time.perf_counter() - t_total_0) * 1000.0,
+                    vectors=len(kv_seq_lens),
+                )
+                return output
+            except Exception:
+                if (
+                    os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+                    or debug_compare_enabled()
+                ):
+                    raise
+
         dense_k, dense_v = self._dequant_paged_kv_to_dense(
             self.key_cache,  # type: ignore[arg-type]
             attn_metadata.block_tables,

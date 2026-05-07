@@ -17,6 +17,8 @@ from vllm_ascend.ops.turboquant.dequant import (
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_scaled_rot,
+    tq_dequant_prod_paged_k_score,
+    tq_dequant_prod_paged_k_score_reference,
     tq_dequant_prod_paged_reference_rot,
     tq_dequant_prod_paged_rot,
 )
@@ -481,6 +483,115 @@ class TestTqDequantMsePagedRot:
         out = apply_rotation(out_rot, rotation_t).contiguous()
 
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    def test_prod_paged_compressed_k_score_matches_dense_score(self):
+        total_bits = 3
+        head_dim = 32
+        num_blocks = 8
+        block_size = 4
+        batch = 2
+        num_heads = 4
+        num_kv_heads = 2
+        scale = head_dim ** -0.5
+
+        packed_idx, packed_qjl, gamma, norm, codebook, qjl_proj, \
+            _, _ = _make_random_prod_paged_inputs(
+                total_bits,
+                head_dim,
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+            )
+        rotation = build_rotation_matrix(head_dim, 99, "cpu", torch.float32)
+        rotation_t = rotation.transpose(0, 1).contiguous()
+        block_table = torch.tensor([
+            [2, 1, 0],
+            [4, 3, 7],
+        ], dtype=torch.int32)
+        seq_lens = [7, 9]
+        max_seq_len = max(seq_lens)
+        query = torch.randn(batch, num_heads, head_dim, dtype=torch.float32)
+        token_block_ids, token_offsets = build_token_map_from_block_table(
+            block_table, seq_lens, block_size,
+        )
+
+        dense_rot = tq_dequant_prod_paged_reference_rot(
+            packed_idx,
+            packed_qjl,
+            gamma,
+            norm,
+            token_block_ids,
+            token_offsets,
+            codebook,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            torch.float32,
+        )
+        dense_k = apply_rotation(dense_rot, rotation_t).contiguous()
+        dense_scores = torch.full(
+            (batch, num_heads, max_seq_len),
+            float("-inf"),
+            dtype=torch.float32,
+        )
+        q_per_kv = num_heads // num_kv_heads
+        token_start = 0
+        for batch_idx, seq_len in enumerate(seq_lens):
+            batch_k = dense_k[token_start:token_start + seq_len]
+            for kv_head in range(num_kv_heads):
+                h_start = kv_head * q_per_kv
+                h_end = h_start + q_per_kv
+                dense_scores[batch_idx, h_start:h_end, :seq_len] = (
+                    query[batch_idx, h_start:h_end] @ batch_k[:, kv_head].T
+                ) * scale
+            token_start += seq_len
+
+        compressed_scores = tq_dequant_prod_paged_k_score_reference(
+            query,
+            packed_idx,
+            packed_qjl,
+            gamma,
+            norm,
+            block_table,
+            seq_lens,
+            codebook,
+            rotation,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            scale=scale,
+            max_seq_len=max_seq_len,
+        )
+
+        valid_mask = torch.isfinite(dense_scores)
+        assert torch.equal(
+            torch.isneginf(compressed_scores),
+            torch.isneginf(dense_scores),
+        )
+        assert torch.allclose(
+            compressed_scores[valid_mask],
+            dense_scores[valid_mask],
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+        dispatched_scores = tq_dequant_prod_paged_k_score(
+            query,
+            packed_idx,
+            packed_qjl,
+            gamma,
+            norm,
+            block_table,
+            seq_lens,
+            codebook,
+            rotation,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            scale=scale,
+            max_seq_len=max_seq_len,
+        )
+        assert torch.equal(dispatched_scores, compressed_scores)
 
     @pytest.mark.parametrize("total_bits", [2, 3, 4])
     def test_prod_paged_rot_matches_reference(self, total_bits):

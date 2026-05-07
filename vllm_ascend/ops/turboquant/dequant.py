@@ -55,12 +55,36 @@ def prod_custom_dequant_enabled() -> bool:
     )
 
 
+def k_score_custom_enabled() -> bool:
+    return (
+        custom_dequant_enabled()
+        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE", "0") == "1"
+    )
+
+
+def fused_attention_custom_enabled() -> bool:
+    return (
+        custom_dequant_enabled()
+        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION", "0") == "1"
+    )
+
+
 def debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
 
 
 def token_map_cache_size() -> int:
     return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
+
+
+def fused_attention_score_tile_len() -> int:
+    try:
+        tile_len = int(
+            os.getenv("VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN", "64")
+        )
+    except ValueError:
+        tile_len = 64
+    return min(256, max(1, tile_len))
 
 
 _TQ_CUSTOM_OUT_DTYPE_CODES = {
@@ -307,6 +331,477 @@ def tq_dequant_prod_paged_reference_rot(
     ) * gathered_norm.to(target_dtype)
 
     return dense_rot.contiguous()
+
+
+# ---------------------------------------------------------------------------
+# Reference implementation (compressed-domain K score)
+# ---------------------------------------------------------------------------
+
+def _seq_lens_to_list(seq_lens: list[int] | torch.Tensor) -> list[int]:
+    if isinstance(seq_lens, list):
+        return [int(seq_len) for seq_len in seq_lens]
+    return [int(seq_len) for seq_len in seq_lens.detach().cpu().tolist()]
+
+
+def tq_dequant_prod_paged_k_score_reference(
+    query: torch.Tensor,
+    packed_idx: torch.Tensor,
+    packed_qjl: torch.Tensor,
+    gamma: torch.Tensor,
+    norm: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    codebook: torch.Tensor,
+    rotation: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+    head_dim: int,
+    *,
+    scale: float = 1.0,
+    max_seq_len: int | None = None,
+    score_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reference compressed K-score for prod-compressed paged K cache.
+
+    Computes ``query @ K.T`` directly from TurboQuant compressed K without
+    materializing dense K. The output layout is ``[batch, num_heads,
+    max_seq_len]`` and positions beyond each request's sequence length are
+    filled with ``-inf`` so the tensor can be fed to a softmax-like stage.
+    """
+    batch = int(query.shape[0])
+    num_heads = int(query.shape[1])
+    num_kv_heads = int(packed_idx.shape[2])
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("num_heads must be divisible by num_kv_heads")
+    if int(query.shape[-1]) != head_dim:
+        raise ValueError("query last dimension must match head_dim")
+    if int(qjl_proj.shape[0]) != head_dim or int(qjl_proj.shape[1]) != head_dim:
+        raise ValueError("qjl_proj must be [head_dim, head_dim]")
+    if int(rotation.shape[0]) != head_dim or int(rotation.shape[1]) != head_dim:
+        raise ValueError("rotation must be [head_dim, head_dim]")
+
+    seq_lens_list = _seq_lens_to_list(seq_lens)
+    if len(seq_lens_list) != batch:
+        raise ValueError("seq_lens length must match query batch")
+    if max_seq_len is None:
+        max_seq_len = max(seq_lens_list, default=0)
+    max_seq_len = int(max_seq_len)
+
+    scores = torch.full(
+        (batch, num_heads, max_seq_len),
+        float("-inf"),
+        dtype=score_dtype,
+        device=query.device,
+    )
+    if batch == 0 or max_seq_len == 0:
+        return scores
+
+    stage1_bits = get_stage1_bits(total_bits, "prod")
+    q_per_kv = num_heads // num_kv_heads
+    correction = math.sqrt(math.pi / 2.0) / head_dim
+
+    q_rot = apply_rotation(
+        query.to(score_dtype),
+        rotation.to(device=query.device, dtype=score_dtype),
+    )
+    q_qjl = apply_rotation(
+        q_rot,
+        qjl_proj.transpose(0, 1).contiguous().to(
+            device=query.device, dtype=score_dtype,
+        ),
+    )
+    codebook = codebook.to(device=query.device, dtype=score_dtype)
+
+    for batch_idx, seq_len in enumerate(seq_lens_list):
+        if seq_len <= 0:
+            continue
+        if seq_len > max_seq_len:
+            raise ValueError("seq_len cannot exceed max_seq_len")
+
+        positions = torch.arange(seq_len, dtype=torch.long, device=query.device)
+        block_indices = positions // int(packed_idx.shape[1])
+        token_offsets = positions % int(packed_idx.shape[1])
+        block_ids = block_table[batch_idx, block_indices].long()
+
+        gathered_idx = packed_idx[block_ids, token_offsets]
+        gathered_qjl = packed_qjl[block_ids, token_offsets]
+        gathered_gamma = gamma[block_ids, token_offsets].squeeze(-1).to(score_dtype)
+        gathered_norm = norm[block_ids, token_offsets].squeeze(-1).to(score_dtype)
+
+        idx = unpack_bits(gathered_idx, bits=stage1_bits, dim=head_dim)
+        mse_k = codebook[idx.long()]
+        qjl_sign = unpack_bits(gathered_qjl, bits=1, dim=head_dim).to(score_dtype)
+        qjl_sign = qjl_sign * 2.0 - 1.0
+
+        for kv_head in range(num_kv_heads):
+            h_start = kv_head * q_per_kv
+            h_end = h_start + q_per_kv
+            mse_score = q_rot[batch_idx, h_start:h_end] @ mse_k[:, kv_head].T
+            qjl_score = q_qjl[batch_idx, h_start:h_end] @ qjl_sign[:, kv_head].T
+            token_score = (
+                mse_score
+                + correction * gathered_gamma[:, kv_head].unsqueeze(0) * qjl_score
+            )
+            token_score = (
+                token_score
+                * gathered_norm[:, kv_head].unsqueeze(0)
+                * float(scale)
+            )
+            scores[batch_idx, h_start:h_end, :seq_len] = token_score
+
+    return scores.contiguous()
+
+
+def tq_dequant_prod_paged_k_score(
+    query: torch.Tensor,
+    packed_idx: torch.Tensor,
+    packed_qjl: torch.Tensor,
+    gamma: torch.Tensor,
+    norm: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    codebook: torch.Tensor,
+    rotation: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+    head_dim: int,
+    *,
+    scale: float = 1.0,
+    max_seq_len: int | None = None,
+    score_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Dispatch compressed K-score for prod-compressed paged K cache."""
+    seq_lens_list = _seq_lens_to_list(seq_lens)
+    if max_seq_len is None:
+        max_seq_len = max(seq_lens_list, default=0)
+    max_seq_len = int(max_seq_len)
+
+    def _reference() -> torch.Tensor:
+        return tq_dequant_prod_paged_k_score_reference(
+            query,
+            packed_idx,
+            packed_qjl,
+            gamma,
+            norm,
+            block_table,
+            seq_lens,
+            codebook,
+            rotation,
+            qjl_proj,
+            total_bits,
+            head_dim,
+            scale=scale,
+            max_seq_len=max_seq_len,
+            score_dtype=score_dtype,
+        )
+
+    if (
+        score_dtype != torch.float32
+        or head_dim < 16
+        or not k_score_custom_enabled()
+        or not _custom_op_available(
+            "tq_prod_paged_k_score",
+            query,
+            packed_idx,
+            packed_qjl,
+            gamma,
+            norm,
+            block_table,
+            codebook,
+        )
+    ):
+        return _reference()
+
+    seq_lens_t = (
+        torch.tensor(seq_lens_list, dtype=torch.int32, device=query.device)
+        if isinstance(seq_lens, list)
+        else seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
+    )
+    q_rot = apply_rotation(
+        query.to(torch.float32),
+        rotation.to(device=query.device, dtype=torch.float32),
+    ).contiguous()
+    q_qjl = apply_rotation(
+        q_rot,
+        qjl_proj.transpose(0, 1).contiguous().to(
+            device=query.device, dtype=torch.float32,
+        ),
+    ).contiguous()
+
+    out = torch.ops._C_ascend.tq_prod_paged_k_score(
+        q_rot,
+        q_qjl,
+        packed_idx.contiguous(),
+        packed_qjl.contiguous(),
+        gamma.contiguous(),
+        norm.contiguous(),
+        block_table.contiguous(),
+        seq_lens_t,
+        codebook.contiguous(),
+        int(total_bits),
+        int(head_dim),
+        float(scale),
+        int(max_seq_len),
+    )
+
+    if debug_compare_enabled():
+        ref = _reference()
+        torch.npu.synchronize()
+        valid = torch.isfinite(ref)
+        max_diff = (out[valid] - ref[valid]).abs().max().item() if valid.any() else 0.0
+        if max_diff > 1e-3:
+            raise RuntimeError(
+                f"TurboQuant compressed K-score mismatch: max_diff={max_diff}"
+            )
+
+    return out.contiguous()
+
+
+# ---------------------------------------------------------------------------
+# Reference/dispatch implementation (prod-K + MSE-V fused decode attention)
+# ---------------------------------------------------------------------------
+
+def tq_prod_mse_paged_attention_reference(
+    query: torch.Tensor,
+    k_packed_idx: torch.Tensor,
+    k_packed_qjl: torch.Tensor,
+    k_gamma: torch.Tensor,
+    k_norm: torch.Tensor,
+    v_packed_idx: torch.Tensor,
+    v_norm: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    k_rotation: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    k_total_bits: int,
+    v_bits: int,
+    head_dim: int,
+    *,
+    scale: float = 1.0,
+    max_seq_len: int | None = None,
+    score_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reference fused decode attention for prod-compressed K and MSE V.
+
+    The kernel prototype fuses compressed-domain K-score, softmax, and
+    V weighted sum. V is accumulated in rotated space, then this reference
+    applies the normal V inverse rotation so callers get dense attention
+    output in the same layout as FIA: ``[batch, num_heads, head_dim]``.
+    """
+    batch = int(query.shape[0])
+    num_heads = int(query.shape[1])
+    num_kv_heads = int(k_packed_idx.shape[2])
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("num_heads must be divisible by num_kv_heads")
+    seq_lens_list = _seq_lens_to_list(seq_lens)
+    if max_seq_len is None:
+        max_seq_len = max(seq_lens_list, default=0)
+    max_seq_len = int(max_seq_len)
+
+    scores = tq_dequant_prod_paged_k_score_reference(
+        query,
+        k_packed_idx,
+        k_packed_qjl,
+        k_gamma,
+        k_norm,
+        block_table,
+        seq_lens,
+        k_codebook,
+        k_rotation,
+        k_qjl_proj,
+        k_total_bits,
+        head_dim,
+        scale=scale,
+        max_seq_len=max_seq_len,
+        score_dtype=score_dtype,
+    )
+    probs = torch.softmax(scores, dim=-1)
+
+    token_block_ids, token_offsets = build_token_map_from_block_table(
+        block_table,
+        seq_lens,
+        int(v_packed_idx.shape[1]),
+    )
+    dense_v_rot = tq_dequant_mse_paged_reference_rot(
+        v_packed_idx,
+        v_norm,
+        token_block_ids,
+        token_offsets,
+        v_codebook,
+        v_bits,
+        head_dim,
+        score_dtype,
+    )
+
+    q_per_kv = num_heads // num_kv_heads
+    out_rot = torch.zeros(
+        (batch, num_heads, head_dim),
+        dtype=score_dtype,
+        device=query.device,
+    )
+    token_start = 0
+    for batch_idx, seq_len in enumerate(seq_lens_list):
+        if seq_len <= 0:
+            continue
+        batch_v = dense_v_rot[token_start:token_start + seq_len].to(score_dtype)
+        for kv_head in range(num_kv_heads):
+            h_start = kv_head * q_per_kv
+            h_end = h_start + q_per_kv
+            out_rot[batch_idx, h_start:h_end] = (
+                probs[batch_idx, h_start:h_end, :seq_len] @ batch_v[:, kv_head]
+            )
+        token_start += seq_len
+
+    return apply_rotation(
+        out_rot,
+        v_rotation_t.to(device=query.device, dtype=score_dtype),
+    ).contiguous()
+
+
+def tq_prod_mse_paged_attention(
+    query: torch.Tensor,
+    k_packed_idx: torch.Tensor,
+    k_packed_qjl: torch.Tensor,
+    k_gamma: torch.Tensor,
+    k_norm: torch.Tensor,
+    v_packed_idx: torch.Tensor,
+    v_norm: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int] | torch.Tensor,
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    k_rotation: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    k_total_bits: int,
+    v_bits: int,
+    head_dim: int,
+    *,
+    scale: float = 1.0,
+    max_seq_len: int | None = None,
+    score_tile_len: int | None = None,
+    score_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Dispatch fused prod-K/MSE-V decode attention prototype."""
+    seq_lens_list = _seq_lens_to_list(seq_lens)
+    if max_seq_len is None:
+        max_seq_len = max(seq_lens_list, default=0)
+    max_seq_len = int(max_seq_len)
+    num_heads = int(query.shape[1])
+    num_kv_heads = int(k_packed_idx.shape[2])
+    q_per_kv = num_heads // num_kv_heads if num_kv_heads else 0
+    k_stage1_bits = get_stage1_bits(k_total_bits, "prod")
+    score_tile_len = (
+        fused_attention_score_tile_len()
+        if score_tile_len is None
+        else int(score_tile_len)
+    )
+    if score_tile_len <= 0 or score_tile_len > 256:
+        raise ValueError("score_tile_len must be in [1, 256]")
+
+    def _reference() -> torch.Tensor:
+        return tq_prod_mse_paged_attention_reference(
+            query,
+            k_packed_idx,
+            k_packed_qjl,
+            k_gamma,
+            k_norm,
+            v_packed_idx,
+            v_norm,
+            block_table,
+            seq_lens,
+            k_codebook,
+            v_codebook,
+            k_rotation,
+            k_qjl_proj,
+            v_rotation_t,
+            k_total_bits,
+            v_bits,
+            head_dim,
+            scale=scale,
+            max_seq_len=max_seq_len,
+            score_dtype=score_dtype,
+        )
+
+    if (
+        score_dtype != torch.float32
+        or head_dim < 16
+        or (head_dim & 3) != 0
+        or q_per_kv != 4
+        or k_stage1_bits != 2
+        or v_bits > 3
+        or max_seq_len > 1024
+        or not fused_attention_custom_enabled()
+        or not _custom_op_available(
+            "tq_prod_mse_paged_attention",
+            query,
+            k_packed_idx,
+            k_packed_qjl,
+            k_gamma,
+            k_norm,
+            v_packed_idx,
+            v_norm,
+            block_table,
+            k_codebook,
+            v_codebook,
+        )
+    ):
+        return _reference()
+
+    seq_lens_t = (
+        torch.tensor(seq_lens_list, dtype=torch.int32, device=query.device)
+        if isinstance(seq_lens, list)
+        else seq_lens.to(device=query.device, dtype=torch.int32).contiguous()
+    )
+    q_rot = apply_rotation(
+        query.to(torch.float32),
+        k_rotation.to(device=query.device, dtype=torch.float32),
+    ).contiguous()
+    q_qjl = apply_rotation(
+        q_rot,
+        k_qjl_proj.transpose(0, 1).contiguous().to(
+            device=query.device, dtype=torch.float32,
+        ),
+    ).contiguous()
+
+    out_rot = torch.ops._C_ascend.tq_prod_mse_paged_attention(
+        q_rot,
+        q_qjl,
+        k_packed_idx.contiguous(),
+        k_packed_qjl.contiguous(),
+        k_gamma.contiguous(),
+        k_norm.contiguous(),
+        v_packed_idx.contiguous(),
+        v_norm.contiguous(),
+        block_table.contiguous(),
+        seq_lens_t,
+        k_codebook.contiguous(),
+        v_codebook.contiguous(),
+        int(k_total_bits),
+        int(v_bits),
+        int(head_dim),
+        float(scale),
+        int(max_seq_len),
+        int(score_tile_len),
+    )
+    out = apply_rotation(
+        out_rot,
+        v_rotation_t.to(device=query.device, dtype=torch.float32),
+    ).contiguous()
+
+    if debug_compare_enabled():
+        ref = _reference()
+        torch.npu.synchronize()
+        max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
+        if max_diff > 1e-3:
+            raise RuntimeError(
+                f"TurboQuant fused attention mismatch: max_diff={max_diff}"
+            )
+
+    return out
 
 
 # ---------------------------------------------------------------------------
