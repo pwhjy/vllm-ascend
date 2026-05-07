@@ -312,6 +312,17 @@ public:
         const LocalTensor<float>& scoreLocal
     ) {
         uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
+        ComputeTokenScoresByCacheIndex(
+            cacheIndex, tileOffset, qRotLocal, qQjlLocal, scoreLocal);
+    }
+
+    __aicore__ inline void ComputeTokenScoresByCacheIndex(
+        uint64_t cacheIndex,
+        uint32_t tileOffset,
+        const LocalTensor<float>& qRotLocal,
+        const LocalTensor<float>& qQjlLocal,
+        const LocalTensor<float>& scoreLocal
+    ) {
         uint64_t packedBase = cacheIndex * kPackedCols_;
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
@@ -519,71 +530,101 @@ public:
         LocalTensor<float> vLocal = vBuf_.Get<float>();
         LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
 
-        uint32_t q1Base = headDim_;
-        uint32_t q2Base = headDim_ << 1;
-        uint32_t q3Base = 3U * headDim_;
         for (uint32_t i = 0; i < tileLen; ++i) {
             uint32_t pos = tileStart + i;
             uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
-            uint64_t vPackedBase = cacheIndex * vPackedCols_;
-            float vNorm = vNormGm_.GetValue(cacheIndex);
-            float w0 = scoreLocal.GetValue(i);
-            float w1 = scoreLocal.GetValue(scoreTileLen_ + i);
-            float w2 = scoreLocal.GetValue((scoreTileLen_ << 1) + i);
-            float w3 = scoreLocal.GetValue(3U * scoreTileLen_ + i);
-            LoadVLocal(vPackedBase, vNorm, vLocal);
-            SToVSync();
-            if ((headDim_ & 7U) == 0U) {
-                Duplicate(tmpLocal, w0, headDim_);
-                Duplicate(tmpLocal[q1Base], w1, headDim_);
-                Duplicate(tmpLocal[q2Base], w2, headDim_);
-                Duplicate(tmpLocal[q3Base], w3, headDim_);
-                PipeBarrier<PIPE_V>();
-
-                uint8_t repeatStride = static_cast<uint8_t>(headDim_ >> 3);
-                BinaryRepeatParams repeatParams;
-                repeatParams.dstBlkStride = 1;
-                repeatParams.src0BlkStride = 1;
-                repeatParams.src1BlkStride = 1;
-                repeatParams.dstRepStride = repeatStride;
-                repeatParams.src0RepStride = repeatStride;
-                repeatParams.src1RepStride = 0;
-                uint32_t offset = 0U;
-                while (offset < headDim_) {
-                    uint64_t mask = headDim_ - offset;
-                    if (mask > 64U) {
-                        mask = 64U;
-                    }
-                    MulAddDst(
-                        accLocal[offset],
-                        tmpLocal[offset],
-                        vLocal[offset],
-                        mask,
-                        4U,
-                        repeatParams);
-                    offset += 64U;
-                }
-                PipeBarrier<PIPE_V>();
-            } else {
-                Duplicate(tmpLocal, w0, headDim_);
-                PipeBarrier<PIPE_V>();
-                MulAddDst(accLocal, vLocal, tmpLocal, headDim_);
-                PipeBarrier<PIPE_V>();
-                Duplicate(tmpLocal, w1, headDim_);
-                PipeBarrier<PIPE_V>();
-                MulAddDst(accLocal[q1Base], vLocal, tmpLocal, headDim_);
-                PipeBarrier<PIPE_V>();
-                Duplicate(tmpLocal, w2, headDim_);
-                PipeBarrier<PIPE_V>();
-                MulAddDst(accLocal[q2Base], vLocal, tmpLocal, headDim_);
-                PipeBarrier<PIPE_V>();
-                Duplicate(tmpLocal, w3, headDim_);
-                PipeBarrier<PIPE_V>();
-                MulAddDst(accLocal[q3Base], vLocal, tmpLocal, headDim_);
-                PipeBarrier<PIPE_V>();
-            }
-            VToSSync();
+            AccumulateVToken(
+                cacheIndex, i, scoreLocal, accLocal, vLocal, tmpLocal);
         }
+    }
+
+    __aicore__ inline void AccumulateTileVByCacheBase(
+        uint64_t cacheBase,
+        uint32_t tileLen,
+        const LocalTensor<float>& scoreLocal,
+        const LocalTensor<float>& accLocal
+    ) {
+        LocalTensor<float> vLocal = vBuf_.Get<float>();
+        LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
+
+        for (uint32_t i = 0; i < tileLen; ++i) {
+            uint64_t cacheIndex =
+                cacheBase + static_cast<uint64_t>(i) * numKvHeads_;
+            AccumulateVToken(
+                cacheIndex, i, scoreLocal, accLocal, vLocal, tmpLocal);
+        }
+    }
+
+    __aicore__ inline void AccumulateVToken(
+        uint64_t cacheIndex,
+        uint32_t tileOffset,
+        const LocalTensor<float>& scoreLocal,
+        const LocalTensor<float>& accLocal,
+        const LocalTensor<float>& vLocal,
+        const LocalTensor<float>& tmpLocal
+    ) {
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+
+        uint64_t vPackedBase = cacheIndex * vPackedCols_;
+        float vNorm = vNormGm_.GetValue(cacheIndex);
+        float w0 = scoreLocal.GetValue(tileOffset);
+        float w1 = scoreLocal.GetValue(scoreTileLen_ + tileOffset);
+        float w2 = scoreLocal.GetValue((scoreTileLen_ << 1) + tileOffset);
+        float w3 = scoreLocal.GetValue(3U * scoreTileLen_ + tileOffset);
+        LoadVLocal(vPackedBase, vNorm, vLocal);
+        SToVSync();
+        if ((headDim_ & 7U) == 0U) {
+            Duplicate(tmpLocal, w0, headDim_);
+            Duplicate(tmpLocal[q1Base], w1, headDim_);
+            Duplicate(tmpLocal[q2Base], w2, headDim_);
+            Duplicate(tmpLocal[q3Base], w3, headDim_);
+            PipeBarrier<PIPE_V>();
+
+            uint8_t repeatStride = static_cast<uint8_t>(headDim_ >> 3);
+            BinaryRepeatParams repeatParams;
+            repeatParams.dstBlkStride = 1;
+            repeatParams.src0BlkStride = 1;
+            repeatParams.src1BlkStride = 1;
+            repeatParams.dstRepStride = repeatStride;
+            repeatParams.src0RepStride = repeatStride;
+            repeatParams.src1RepStride = 0;
+            uint32_t offset = 0U;
+            while (offset < headDim_) {
+                uint64_t mask = headDim_ - offset;
+                if (mask > 64U) {
+                    mask = 64U;
+                }
+                MulAddDst(
+                    accLocal[offset],
+                    tmpLocal[offset],
+                    vLocal[offset],
+                    mask,
+                    4U,
+                    repeatParams);
+                offset += 64U;
+            }
+            PipeBarrier<PIPE_V>();
+        } else {
+            Duplicate(tmpLocal, w0, headDim_);
+            PipeBarrier<PIPE_V>();
+            MulAddDst(accLocal, vLocal, tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Duplicate(tmpLocal, w1, headDim_);
+            PipeBarrier<PIPE_V>();
+            MulAddDst(accLocal[q1Base], vLocal, tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Duplicate(tmpLocal, w2, headDim_);
+            PipeBarrier<PIPE_V>();
+            MulAddDst(accLocal[q2Base], vLocal, tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+            Duplicate(tmpLocal, w3, headDim_);
+            PipeBarrier<PIPE_V>();
+            MulAddDst(accLocal[q3Base], vLocal, tmpLocal, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
+        VToSSync();
     }
 
     __aicore__ inline void StoreNormalizedAccumulator(
@@ -656,15 +697,43 @@ public:
             if (tileLen > scoreTileLen_) {
                 tileLen = scoreTileLen_;
             }
-            for (uint32_t i = 0; i < tileLen; ++i) {
-                ComputeTokenScores(
-                    b,
-                    kvHead,
-                    tileStart + i,
-                    i,
-                    qRotLocal,
-                    qQjlLocal,
-                    scoreLocal);
+            bool tileInOneBlock = false;
+            uint64_t tileCacheBase = 0U;
+            if (blockSize_ > 0U) {
+                uint32_t blockOffset = tileStart / blockSize_;
+                uint32_t tokenOffset = tileStart - blockOffset * blockSize_;
+                if (tokenOffset + tileLen <= blockSize_) {
+                    int32_t blockId = blockTableGm_.GetValue(
+                        static_cast<uint64_t>(b) * maxBlocksPerSeq_
+                        + blockOffset);
+                    tileCacheBase = (
+                        (static_cast<uint64_t>(blockId) * blockSize_
+                         + tokenOffset) * numKvHeads_ + kvHead);
+                    tileInOneBlock = true;
+                }
+            }
+            if (tileInOneBlock) {
+                for (uint32_t i = 0; i < tileLen; ++i) {
+                    uint64_t cacheIndex =
+                        tileCacheBase + static_cast<uint64_t>(i) * numKvHeads_;
+                    ComputeTokenScoresByCacheIndex(
+                        cacheIndex,
+                        i,
+                        qRotLocal,
+                        qQjlLocal,
+                        scoreLocal);
+                }
+            } else {
+                for (uint32_t i = 0; i < tileLen; ++i) {
+                    ComputeTokenScores(
+                        b,
+                        kvHead,
+                        tileStart + i,
+                        i,
+                        qRotLocal,
+                        qQjlLocal,
+                        scoreLocal);
+                }
             }
 
             uint32_t row1 = scoreTileLen_;
@@ -717,8 +786,13 @@ public:
                 updateMax1,
                 updateMax2,
                 updateMax3);
-            AccumulateTileV(
-                b, kvHead, tileStart, tileLen, scoreLocal, accLocal);
+            if (tileInOneBlock) {
+                AccumulateTileVByCacheBase(
+                    tileCacheBase, tileLen, scoreLocal, accLocal);
+            } else {
+                AccumulateTileV(
+                    b, kvHead, tileStart, tileLen, scoreLocal, accLocal);
+            }
 
             sum0 = sum0 * alpha0 + tileSum0;
             sum1 = sum1 * alpha1 + tileSum1;
