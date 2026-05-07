@@ -98,7 +98,7 @@ public:
         pipe_.InitBuffer(accBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(vBuf_, headDim_ * sizeof(float));
         pipe_.InitBuffer(tmpBuf_, 4U * headDim_ * sizeof(float));
-        pipe_.InitBuffer(reduceBuf_, 4U * 64U * sizeof(float));
+        pipe_.InitBuffer(reduceBuf_, 64U * sizeof(float));
     }
 
     __aicore__ inline void MTE2ToSSync()
@@ -417,52 +417,6 @@ public:
         return reduceLocal.GetValue(0);
     }
 
-    __aicore__ inline void ExpAndReduceRows4(
-        const LocalTensor<float>& scoreLocal,
-        const LocalTensor<float>& reduceLocal,
-        uint32_t tileLen,
-        float max0,
-        float max1,
-        float max2,
-        float max3
-    ) {
-        uint32_t row1 = scoreTileLen_;
-        uint32_t row2 = scoreTileLen_ << 1;
-        uint32_t row3 = 3U * scoreTileLen_;
-
-        SToVSync();
-        Adds(scoreLocal, scoreLocal, -max0, tileLen);
-        PipeBarrier<PIPE_V>();
-        Exp(scoreLocal, scoreLocal, tileLen);
-        PipeBarrier<PIPE_V>();
-        ReduceSum(reduceLocal, scoreLocal, reduceLocal, tileLen);
-        PipeBarrier<PIPE_V>();
-
-        Adds(scoreLocal[row1], scoreLocal[row1], -max1, tileLen);
-        PipeBarrier<PIPE_V>();
-        Exp(scoreLocal[row1], scoreLocal[row1], tileLen);
-        PipeBarrier<PIPE_V>();
-        ReduceSum(
-            reduceLocal[64U], scoreLocal[row1], reduceLocal[64U], tileLen);
-        PipeBarrier<PIPE_V>();
-
-        Adds(scoreLocal[row2], scoreLocal[row2], -max2, tileLen);
-        PipeBarrier<PIPE_V>();
-        Exp(scoreLocal[row2], scoreLocal[row2], tileLen);
-        PipeBarrier<PIPE_V>();
-        ReduceSum(
-            reduceLocal[128U], scoreLocal[row2], reduceLocal[128U], tileLen);
-        PipeBarrier<PIPE_V>();
-
-        Adds(scoreLocal[row3], scoreLocal[row3], -max3, tileLen);
-        PipeBarrier<PIPE_V>();
-        Exp(scoreLocal[row3], scoreLocal[row3], tileLen);
-        PipeBarrier<PIPE_V>();
-        ReduceSum(
-            reduceLocal[192U], scoreLocal[row3], reduceLocal[192U], tileLen);
-        VToSSync();
-    }
-
     __aicore__ inline void ScaleAccumulatorRows(
         const LocalTensor<float>& accLocal,
         float scale0,
@@ -713,33 +667,14 @@ public:
             if (updateMax3) {
                 alpha3 = ExpScalar(max3 - newMax3, reduceLocal);
             }
-            float tileSum0 = 0.0F;
-            float tileSum1 = 0.0F;
-            float tileSum2 = 0.0F;
-            float tileSum3 = 0.0F;
-            if (scoreTileLen_ <= 64U) {
-                ExpAndReduceRows4(
-                    scoreLocal,
-                    reduceLocal,
-                    tileLen,
-                    newMax0,
-                    newMax1,
-                    newMax2,
-                    newMax3);
-                tileSum0 = reduceLocal.GetValue(0);
-                tileSum1 = reduceLocal.GetValue(64U);
-                tileSum2 = reduceLocal.GetValue(128U);
-                tileSum3 = reduceLocal.GetValue(192U);
-            } else {
-                tileSum0 = ExpAndReduceRow(
-                    scoreLocal, reduceLocal, 0U, tileLen, newMax0);
-                tileSum1 = ExpAndReduceRow(
-                    scoreLocal, reduceLocal, row1, tileLen, newMax1);
-                tileSum2 = ExpAndReduceRow(
-                    scoreLocal, reduceLocal, row2, tileLen, newMax2);
-                tileSum3 = ExpAndReduceRow(
-                    scoreLocal, reduceLocal, row3, tileLen, newMax3);
-            }
+            float tileSum0 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, 0U, tileLen, newMax0);
+            float tileSum1 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row1, tileLen, newMax1);
+            float tileSum2 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row2, tileLen, newMax2);
+            float tileSum3 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row3, tileLen, newMax3);
 
             ScaleAccumulatorRowsIfNeeded(
                 accLocal,
