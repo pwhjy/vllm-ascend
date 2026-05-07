@@ -201,6 +201,25 @@ public:
         }
     }
 
+    __aicore__ inline float LookupScaledVCodebook2(
+        uint32_t idx,
+        float cb0,
+        float cb1,
+        float cb2,
+        float cb3
+    ) {
+        switch (idx) {
+            case 0U:
+                return cb0;
+            case 1U:
+                return cb1;
+            case 2U:
+                return cb2;
+            default:
+                return cb3;
+        }
+    }
+
     __aicore__ inline uint32_t ExtractVIndex(uint64_t packedBase, uint32_t d)
     {
         uint32_t bitPos = d * vBits_;
@@ -223,19 +242,31 @@ public:
         const LocalTensor<float>& vLocal
     ) {
         if (vBits_ == 2U && (headDim_ & 3U) == 0U) {
+            float cb0 = vCb0_ * vNorm;
+            float cb1 = vCb1_ * vNorm;
+            float cb2 = vCb2_ * vNorm;
+            float cb3 = vCb3_ * vNorm;
             uint32_t groups = headDim_ >> 2;
             for (uint32_t g = 0; g < groups; ++g) {
                 uint32_t idxBits = static_cast<uint32_t>(
                     vPackedIdxGm_.GetValue(vPackedBase + g));
                 uint32_t d = g << 2;
                 vLocal.SetValue(
-                    d, LookupVCodebook2(idxBits & 0x3U) * vNorm);
+                    d,
+                    LookupScaledVCodebook2(
+                        idxBits & 0x3U, cb0, cb1, cb2, cb3));
                 vLocal.SetValue(
-                    d + 1U, LookupVCodebook2((idxBits >> 2) & 0x3U) * vNorm);
+                    d + 1U,
+                    LookupScaledVCodebook2(
+                        (idxBits >> 2) & 0x3U, cb0, cb1, cb2, cb3));
                 vLocal.SetValue(
-                    d + 2U, LookupVCodebook2((idxBits >> 4) & 0x3U) * vNorm);
+                    d + 2U,
+                    LookupScaledVCodebook2(
+                        (idxBits >> 4) & 0x3U, cb0, cb1, cb2, cb3));
                 vLocal.SetValue(
-                    d + 3U, LookupVCodebook2((idxBits >> 6) & 0x3U) * vNorm);
+                    d + 3U,
+                    LookupScaledVCodebook2(
+                        (idxBits >> 6) & 0x3U, cb0, cb1, cb2, cb3));
             }
             return;
         }
