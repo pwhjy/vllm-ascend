@@ -36,6 +36,10 @@ def _tq_profile_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
 
 
+def _tq_profile_sync_enabled() -> bool:
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_SYNC", "1") == "1"
+
+
 def _tq_profile_dir() -> str:
     return os.getenv("VLLM_ASCEND_TQ_PROFILE_DIR", "/tmp/turboquant_profile")
 
@@ -45,7 +49,7 @@ def _is_npu_tensor(x) -> bool:
 
 
 def _maybe_sync_for_profile(*objs):
-    if not _tq_profile_enabled():
+    if not _tq_profile_enabled() or not _tq_profile_sync_enabled():
         return
 
     def _walk(obj):

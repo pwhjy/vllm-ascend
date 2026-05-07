@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -49,6 +50,10 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT",
     "VLLM_ASCEND_TQ_CUSTOM_STRICT",
+    "VLLM_ASCEND_TQ_PROFILE",
+    "VLLM_ASCEND_TQ_PROFILE_DIR",
+    "VLLM_ASCEND_TQ_PROFILE_FLUSH_EVERY",
+    "VLLM_ASCEND_TQ_PROFILE_SYNC",
 )
 
 DEBUG_COMPARE_ENV_KEYS = (
@@ -516,6 +521,87 @@ def _parse_child_log(log_text: str) -> dict[str, Any]:
     return stats
 
 
+def _aggregate_profile_stat(
+    target: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    target["calls"] = int(target.get("calls", 0)) + int(source.get("calls", 0))
+    target["total_ms"] = float(target.get("total_ms", 0.0)) + float(
+        source.get("total_ms", 0.0)
+    )
+    source_min = source.get("min_ms")
+    if source_min is not None:
+        target["min_ms"] = (
+            float(source_min)
+            if target.get("min_ms") is None
+            else min(float(target["min_ms"]), float(source_min))
+        )
+    target["max_ms"] = max(
+        float(target.get("max_ms", 0.0)),
+        float(source.get("max_ms", 0.0)),
+    )
+    for key in ("vectors", "elements", "bytes_out"):
+        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+
+
+def _collect_turboquant_profile(profile_dir: Path) -> dict[str, Any]:
+    files = sorted(profile_dir.glob("turboquant_profile_*.json"))
+    stats: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for path in files:
+        try:
+            payload = _read_json(path)
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+            continue
+        for name, stat in payload.get("stats", {}).items():
+            aggregate = stats.setdefault(
+                name,
+                {
+                    "calls": 0,
+                    "total_ms": 0.0,
+                    "min_ms": None,
+                    "max_ms": 0.0,
+                    "vectors": 0,
+                    "elements": 0,
+                    "bytes_out": 0,
+                },
+            )
+            _aggregate_profile_stat(aggregate, stat)
+
+    for stat in stats.values():
+        calls = int(stat.get("calls", 0))
+        stat["avg_ms"] = (
+            float(stat.get("total_ms", 0.0)) / calls if calls else None
+        )
+
+    key_stats = {
+        key: stats[key]
+        for key in (
+            "turboquant_decode.fused_attention",
+            "turboquant_decode.run_dense_fia",
+            "turboquant_decode.total",
+            "turboquant_decode.custom_mse.total",
+            "turboquant_decode.hybrid_prod.k",
+            "turboquant_decode.custom_mse.v",
+            "turboquant_chunked_prefill.run_dense_fia",
+            "turboquant_chunked_prefill.total",
+            "turboquant_chunked_prefill.custom_mse.total",
+            "turboquant_prefill_cache_hit.run_dense_fia",
+            "turboquant_prefill_cache_hit.total",
+        )
+        if key in stats
+    }
+    return {
+        "profile_dir": str(profile_dir),
+        "files": [str(path) for path in files],
+        "num_files": len(files),
+        "stats": stats,
+        "key_stats": key_stats,
+        "errors": errors,
+    }
+
+
 def _summarize_worker_stats(worker_json: dict[str, Any]) -> dict[str, Any]:
     return {
         "variant": worker_json.get("variant"),
@@ -551,6 +637,19 @@ def _print_run_stats_summary(run_stats: dict[str, Any]) -> None:
             f"kv_tokens={kv_tokens}"
             + (f" kv_gib={kv_gib:.2f}" if kv_gib is not None else "")
         )
+        profile = child_processes.get(variant, {}).get("turboquant_profile", {})
+        key_stats = profile.get("key_stats", {})
+        if key_stats:
+            fused_calls = key_stats.get(
+                "turboquant_decode.fused_attention", {}
+            ).get("calls", 0)
+            dense_calls = key_stats.get(
+                "turboquant_decode.run_dense_fia", {}
+            ).get("calls", 0)
+            print(
+                f"    tq_profile: fused_attention_calls={fused_calls} "
+                f"dense_fia_calls={dense_calls} files={profile.get('num_files', 0)}"
+            )
 
 
 def _worker_command(
@@ -630,6 +729,10 @@ def _worker_command(
         cmd.append("--debug-compare-k-score")
     if args.debug_compare_prod_dequant:
         cmd.append("--debug-compare-prod-dequant")
+    if args.profile_turboquant:
+        cmd.append("--profile-turboquant")
+    if args.profile_turboquant_sync:
+        cmd.append("--profile-turboquant-sync")
     for prompt in args.prompt or []:
         cmd.extend(["--prompt", prompt])
     if args.prompts_file:
@@ -652,12 +755,25 @@ def _run_child(
     timeout = None if args.timeout_sec <= 0 else args.timeout_sec
     start = time.perf_counter()
     log_lines: list[str] = []
+    child_env = env.copy()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_dir: Path | None = None
+    if args.profile_turboquant:
+        profile_dir = log_path.parent / "turboquant_profiles" / variant
+        if profile_dir.exists():
+            shutil.rmtree(profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        child_env["VLLM_ASCEND_TQ_PROFILE"] = "1"
+        child_env["VLLM_ASCEND_TQ_PROFILE_DIR"] = str(profile_dir)
+        child_env["VLLM_ASCEND_TQ_PROFILE_FLUSH_EVERY"] = "100"
+        child_env["VLLM_ASCEND_TQ_PROFILE_SYNC"] = (
+            "1" if args.profile_turboquant_sync else "0"
+        )
     with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         process = subprocess.Popen(
             cmd,
             cwd=str(_repo_root()),
-            env=env,
+            env=child_env,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -691,13 +807,16 @@ def _run_child(
         raise SystemExit(f"{variant} run failed with exit code {returncode}")
 
     log_text = "".join(log_lines)
-    return {
+    result = {
         "variant": variant,
         "returncode": returncode,
         "process_seconds": elapsed,
         "log_path": str(log_path),
         "log_stats": _parse_child_log(log_text),
     }
+    if profile_dir is not None:
+        result["turboquant_profile"] = _collect_turboquant_profile(profile_dir)
+    return result
 
 
 def _run_compare(args: argparse.Namespace) -> int:
@@ -804,6 +923,8 @@ def _run_compare(args: argparse.Namespace) -> int:
         _write_json(plain_comparison_json, plain_comparison)
         comparison["plain_comparison_json"] = str(plain_comparison_json)
     run_stats = {
+        "profile_turboquant": args.profile_turboquant,
+        "profile_turboquant_sync": args.profile_turboquant_sync,
         "workers": worker_stats,
         "child_processes": child_processes,
     }
@@ -921,6 +1042,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable TurboQuant prod dequant debug comparisons.",
     )
     parser.add_argument(
+        "--profile-turboquant",
+        action="store_true",
+        help=(
+            "Collect TurboQuant runtime profile counters for each worker and "
+            "embed them in run_stats.json."
+        ),
+    )
+    parser.add_argument(
+        "--profile-turboquant-sync",
+        action="store_true",
+        help=(
+            "Synchronize NPU profile points for more accurate per-op timing. "
+            "By default --profile-turboquant collects hit counts with async "
+            "timings to reduce measurement overhead."
+        ),
+    )
+    parser.add_argument(
         "--include-plain-baseline",
         action="store_true",
         help="Also run a non-TurboQuant/plain model baseline for context.",
@@ -956,6 +1094,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.score_tile_len <= 0 or args.score_tile_len > 256:
         raise ValueError("--score-tile-len must be in [1, 256]")
+    if args.profile_turboquant_sync and not args.profile_turboquant:
+        args.profile_turboquant = True
     if args._worker_variant:
         return _run_worker(args)
     return _run_compare(args)
