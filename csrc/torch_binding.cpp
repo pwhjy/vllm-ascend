@@ -1035,7 +1035,8 @@ at::Tensor tq_prod_mse_paged_attention(
     int64_t v_bits,
     int64_t head_dim,
     double scale,
-    int64_t max_seq_len)
+    int64_t max_seq_len,
+    int64_t score_tile_len)
 {
     TORCH_CHECK(q_rot.scalar_type() == at::kFloat, "q_rot must be fp32");
     TORCH_CHECK(q_qjl.scalar_type() == at::kFloat, "q_qjl must be fp32");
@@ -1086,6 +1087,8 @@ at::Tensor tq_prod_mse_paged_attention(
                 "prod k_total_bits must be in [2, 5]");
     TORCH_CHECK(v_bits >= 1 && v_bits <= 3, "v_bits must be in [1, 3]");
     TORCH_CHECK(max_seq_len >= 0, "max_seq_len must be non-negative");
+    TORCH_CHECK(score_tile_len >= 0 && score_tile_len <= 256,
+                "score_tile_len must be in [0, 256]");
 
     at::Tensor out = at::empty(
         {q_rot.size(0), q_rot.size(1), head_dim},
@@ -1095,7 +1098,8 @@ at::Tensor tq_prod_mse_paged_attention(
         q_rot, q_qjl, k_packed_idx, k_packed_qjl, k_gamma, k_norm,
         v_packed_idx, v_norm, block_table, seq_lens,
         k_codebook, v_codebook,
-        k_total_bits, v_bits, head_dim, scale, max_seq_len, out);
+        k_total_bits, v_bits, head_dim, scale, max_seq_len,
+        score_tile_len, out);
 
     return out;
 }
@@ -1453,7 +1457,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            Tensor block_table, Tensor seq_lens, "
         "                            Tensor k_codebook, Tensor v_codebook, "
         "                            int k_total_bits, int v_bits, int head_dim, "
-        "                            float scale, int max_seq_len) -> Tensor"
+        "                            float scale, int max_seq_len, "
+        "                            int score_tile_len) -> Tensor"
     );
     ops.impl("tq_prod_mse_paged_attention", torch::kPrivateUse1,
              &vllm_ascend::tq_prod_mse_paged_attention);

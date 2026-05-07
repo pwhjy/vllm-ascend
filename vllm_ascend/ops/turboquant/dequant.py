@@ -77,6 +77,16 @@ def token_map_cache_size() -> int:
     return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
 
 
+def fused_attention_score_tile_len() -> int:
+    try:
+        tile_len = int(
+            os.getenv("VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN", "64")
+        )
+    except ValueError:
+        tile_len = 64
+    return min(256, max(1, tile_len))
+
+
 _TQ_CUSTOM_OUT_DTYPE_CODES = {
     torch.float32: 0,
     torch.float16: 1,
@@ -672,6 +682,7 @@ def tq_prod_mse_paged_attention(
     *,
     scale: float = 1.0,
     max_seq_len: int | None = None,
+    score_tile_len: int | None = None,
     score_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Dispatch fused prod-K/MSE-V decode attention prototype."""
@@ -683,6 +694,13 @@ def tq_prod_mse_paged_attention(
     num_kv_heads = int(k_packed_idx.shape[2])
     q_per_kv = num_heads // num_kv_heads if num_kv_heads else 0
     k_stage1_bits = get_stage1_bits(k_total_bits, "prod")
+    score_tile_len = (
+        fused_attention_score_tile_len()
+        if score_tile_len is None
+        else int(score_tile_len)
+    )
+    if score_tile_len <= 0 or score_tile_len > 256:
+        raise ValueError("score_tile_len must be in [1, 256]")
 
     def _reference() -> torch.Tensor:
         return tq_prod_mse_paged_attention_reference(
@@ -767,6 +785,7 @@ def tq_prod_mse_paged_attention(
         int(head_dim),
         float(scale),
         int(max_seq_len),
+        int(score_tile_len),
     )
     out = apply_rotation(
         out_rot,

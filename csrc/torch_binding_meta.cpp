@@ -726,7 +726,8 @@ at::Tensor tq_prod_mse_paged_attention_meta(
     int64_t v_bits,
     int64_t head_dim,
     double scale,
-    int64_t max_seq_len)
+    int64_t max_seq_len,
+    int64_t score_tile_len)
 {
     (void)q_qjl;
     (void)k_packed_idx;
@@ -743,6 +744,7 @@ at::Tensor tq_prod_mse_paged_attention_meta(
     (void)v_bits;
     (void)scale;
     (void)max_seq_len;
+    (void)score_tile_len;
 
     return at::empty(
         {q_rot.size(0), q_rot.size(1), head_dim},

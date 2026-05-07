@@ -283,6 +283,7 @@ def _run_case(args) -> None:
             args.head_dim,
             scale=scale,
             max_seq_len=args.seq_len,
+            score_tile_len=args.score_tile_len,
         )
 
     def fused_reference_fn():
@@ -325,7 +326,8 @@ def _run_case(args) -> None:
         f"batch={args.batch_size} seq_len={args.seq_len} "
         f"tokens={args.batch_size * args.seq_len} "
         f"heads={args.num_heads}/{args.num_kv_heads} "
-        f"head_dim={args.head_dim} query_dtype={args.query_dtype}"
+        f"head_dim={args.head_dim} query_dtype={args.query_dtype} "
+        f"score_tile_len={args.score_tile_len}"
     )
     print(
         f"dense_attention={dense_ms:.3f} ms "
@@ -355,6 +357,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--score-tile-len", type=int, default=64)
     parser.add_argument(
         "--include-custom-op",
         action="store_true",
@@ -364,6 +367,8 @@ def main() -> None:
 
     if args.num_heads % args.num_kv_heads != 0:
         raise ValueError("num_heads must be divisible by num_kv_heads")
+    if args.score_tile_len <= 0 or args.score_tile_len > 256:
+        raise ValueError("score_tile_len must be in [1, 256]")
     if not torch.npu.is_available():
         raise RuntimeError("NPU is not available")
 
@@ -371,6 +376,9 @@ def main() -> None:
     os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE"] = "1"
     os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION"] = (
         "1" if args.include_custom_op else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN"] = str(
+        args.score_tile_len
     )
     os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = "0"
     os.environ["VLLM_ASCEND_TQ_CUSTOM_STRICT"] = "1"

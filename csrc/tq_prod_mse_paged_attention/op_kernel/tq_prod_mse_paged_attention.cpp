@@ -24,6 +24,7 @@ struct TqProdMsePagedAttentionTilingData {
     uint32_t vPackedCols;
     uint32_t kStage1Bits;
     uint32_t vBits;
+    uint32_t scoreTileLen;
     uint32_t numCore;
     float scale;
     float correction;
@@ -76,12 +77,21 @@ public:
         vPackedCols_ = tiling->vPackedCols;
         kStage1Bits_ = tiling->kStage1Bits;
         vBits_ = tiling->vBits;
+        scoreTileLen_ = tiling->scoreTileLen;
         numCore_ = tiling->numCore;
         scale_ = tiling->scale;
         correction_ = tiling->correction;
 
         uint32_t safeSeqLen = maxSeqLen_ == 0U ? 1U : maxSeqLen_;
-        scoreTileLen_ = safeSeqLen < 64U ? safeSeqLen : 64U;
+        if (scoreTileLen_ == 0U) {
+            scoreTileLen_ = 64U;
+        }
+        if (scoreTileLen_ > 256U) {
+            scoreTileLen_ = 256U;
+        }
+        if (scoreTileLen_ > safeSeqLen) {
+            scoreTileLen_ = safeSeqLen;
+        }
         pipe_.InitBuffer(qRotBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(qQjlBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(scoreBuf_, 4U * scoreTileLen_ * sizeof(float));

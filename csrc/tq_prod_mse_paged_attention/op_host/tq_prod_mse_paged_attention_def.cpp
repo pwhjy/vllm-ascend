@@ -81,6 +81,7 @@ public:
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("maxSeqLen").AttrType(REQUIRED).Int(0);
+        this->Attr("scoreTileLen").AttrType(REQUIRED).Int(64);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

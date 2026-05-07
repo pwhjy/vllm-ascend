@@ -23,6 +23,7 @@ BEGIN_TILING_DATA_DEF(TqProdMsePagedAttentionTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, vPackedCols);
     TILING_DATA_FIELD_DEF(uint32_t, kStage1Bits);
     TILING_DATA_FIELD_DEF(uint32_t, vBits);
+    TILING_DATA_FIELD_DEF(uint32_t, scoreTileLen);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
     TILING_DATA_FIELD_DEF(float, scale);
     TILING_DATA_FIELD_DEF(float, correction);

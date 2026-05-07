@@ -35,6 +35,7 @@ static ge::graphStatus TqProdMsePagedAttentionTilingFunc(
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(2);
     const float* scalePtr = attr->GetAttrPointer<float>(3);
     const int64_t* maxSeqLenPtr = attr->GetAttrPointer<int64_t>(4);
+    const int64_t* scoreTileLenPtr = attr->GetAttrPointer<int64_t>(5);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -45,6 +46,20 @@ static ge::graphStatus TqProdMsePagedAttentionTilingFunc(
     float scale = scalePtr != nullptr ? *scalePtr : 1.0F;
     uint32_t maxSeqLen = static_cast<uint32_t>(
         maxSeqLenPtr != nullptr ? *maxSeqLenPtr : 0);
+    int64_t scoreTileLenAttr =
+        scoreTileLenPtr != nullptr ? *scoreTileLenPtr : 64;
+    uint32_t scoreTileLen = scoreTileLenAttr > 0
+        ? static_cast<uint32_t>(scoreTileLenAttr)
+        : 64U;
+    if (scoreTileLen > 256U) {
+        scoreTileLen = 256U;
+    }
+    if (maxSeqLen > 0U && scoreTileLen > maxSeqLen) {
+        scoreTileLen = maxSeqLen;
+    }
+    if (scoreTileLen == 0U) {
+        scoreTileLen = 1U;
+    }
 
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
@@ -79,6 +94,7 @@ static ge::graphStatus TqProdMsePagedAttentionTilingFunc(
     tiling.set_vPackedCols(vPackedCols);
     tiling.set_kStage1Bits(kStage1Bits);
     tiling.set_vBits(vBits);
+    tiling.set_scoreTileLen(scoreTileLen);
     tiling.set_numCore(coreNum);
     tiling.set_scale(scale);
     tiling.set_correction(correction);
