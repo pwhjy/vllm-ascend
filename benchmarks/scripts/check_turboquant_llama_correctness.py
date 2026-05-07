@@ -90,15 +90,34 @@ def _parse_extra_env(values: list[str] | None) -> dict[str, str]:
     return env
 
 
-def _set_turboquant_env(variant: str, score_tile_len: int) -> None:
-    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT"] = "1"
+def _set_turboquant_env(
+    variant: str,
+    score_tile_len: int,
+    baseline_mode: str,
+) -> None:
+    if variant == "plain":
+        for key in TURBOQUANT_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        return
+
+    use_reference_baseline = (
+        variant == "baseline" and baseline_mode == "reference"
+    )
+    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT"] = (
+        "0" if use_reference_baseline else "1"
+    )
     os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT"] = "0"
-    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE"] = "1"
+    os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE"] = (
+        "0" if use_reference_baseline else "1"
+    )
     os.environ["VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION"] = (
         "1" if variant == "fused" else "0"
     )
     os.environ["VLLM_ASCEND_TQ_ATTENTION_SCORE_TILE_LEN"] = str(score_tile_len)
-    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = "0"
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE"] = os.getenv(
+        "VLLM_ASCEND_TQ_DEBUG_COMPARE", "0"
+    )
     os.environ["VLLM_ASCEND_TQ_CUSTOM_STRICT"] = "1"
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
@@ -132,7 +151,11 @@ def _run_worker(args: argparse.Namespace) -> int:
     assert args._worker_variant is not None
     assert args._output_json is not None
 
-    _set_turboquant_env(args._worker_variant, args.score_tile_len)
+    _set_turboquant_env(
+        args._worker_variant,
+        args.score_tile_len,
+        args.baseline_mode,
+    )
     if args.modelscope:
         os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
@@ -205,51 +228,59 @@ def _first_diff(left: list[int], right: list[int]) -> int | None:
     return None
 
 
-def _compare_outputs(baseline: dict[str, Any], fused: dict[str, Any]) -> dict[str, Any]:
+def _compare_outputs(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    left_label: str = "baseline",
+    right_label: str = "fused",
+) -> dict[str, Any]:
     mismatches: list[dict[str, Any]] = []
-    baseline_outputs = baseline["outputs"]
-    fused_outputs = fused["outputs"]
-    if len(baseline_outputs) != len(fused_outputs):
+    left_outputs = left["outputs"]
+    right_outputs = right["outputs"]
+    if len(left_outputs) != len(right_outputs):
         mismatches.append(
             {
                 "kind": "output_count",
-                "baseline_count": len(baseline_outputs),
-                "fused_count": len(fused_outputs),
+                f"{left_label}_count": len(left_outputs),
+                f"{right_label}_count": len(right_outputs),
             }
         )
 
-    for base_row, fused_row in zip(baseline_outputs, fused_outputs):
-        base_ids = list(base_row["generated_token_ids"])
-        fused_ids = list(fused_row["generated_token_ids"])
-        token_diff = _first_diff(base_ids, fused_ids)
-        prompt_match = base_row["prompt_token_ids"] == fused_row["prompt_token_ids"]
-        text_match = base_row["generated_text"] == fused_row["generated_text"]
+    for left_row, right_row in zip(left_outputs, right_outputs):
+        left_ids = list(left_row["generated_token_ids"])
+        right_ids = list(right_row["generated_token_ids"])
+        token_diff = _first_diff(left_ids, right_ids)
+        prompt_match = (
+            left_row["prompt_token_ids"] == right_row["prompt_token_ids"]
+        )
+        text_match = left_row["generated_text"] == right_row["generated_text"]
         if token_diff is None and prompt_match and text_match:
             continue
         mismatch: dict[str, Any] = {
-            "index": base_row["index"],
-            "prompt": base_row["prompt"],
+            "index": left_row["index"],
+            "prompt": left_row["prompt"],
             "prompt_token_ids_match": prompt_match,
             "generated_text_match": text_match,
             "generated_token_ids_match": token_diff is None,
-            "baseline_token_count": len(base_ids),
-            "fused_token_count": len(fused_ids),
+            f"{left_label}_token_count": len(left_ids),
+            f"{right_label}_token_count": len(right_ids),
             "first_token_diff": token_diff,
-            "baseline_text": base_row["generated_text"],
-            "fused_text": fused_row["generated_text"],
+            f"{left_label}_text": left_row["generated_text"],
+            f"{right_label}_text": right_row["generated_text"],
         }
         if token_diff is not None:
-            mismatch["baseline_token_at_diff"] = (
-                base_ids[token_diff] if token_diff < len(base_ids) else None
+            mismatch[f"{left_label}_token_at_diff"] = (
+                left_ids[token_diff] if token_diff < len(left_ids) else None
             )
-            mismatch["fused_token_at_diff"] = (
-                fused_ids[token_diff] if token_diff < len(fused_ids) else None
+            mismatch[f"{right_label}_token_at_diff"] = (
+                right_ids[token_diff] if token_diff < len(right_ids) else None
             )
         mismatches.append(mismatch)
 
     return {
         "passed": not mismatches,
-        "num_prompts": min(len(baseline_outputs), len(fused_outputs)),
+        "num_prompts": min(len(left_outputs), len(right_outputs)),
         "mismatches": mismatches,
     }
 
@@ -259,6 +290,14 @@ def _worker_command(
     variant: str,
     output_json: Path,
 ) -> list[str]:
+    model = args.model
+    tokenizer = args.tokenizer
+    quantization = args.quantization
+    if variant == "plain":
+        model = args.plain_model or args.model
+        tokenizer = args.plain_tokenizer or args.tokenizer
+        quantization = args.plain_quantization
+
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -267,11 +306,11 @@ def _worker_command(
         "--_output-json",
         str(output_json),
         "--model",
-        args.model,
+        model,
         "--dtype",
         args.dtype,
         "--quantization",
-        args.quantization,
+        quantization,
         "--max-model-len",
         str(args.max_model_len),
         "--tensor-parallel-size",
@@ -290,9 +329,11 @@ def _worker_command(
         str(args.seed),
         "--score-tile-len",
         str(args.score_tile_len),
+        "--baseline-mode",
+        args.baseline_mode,
     ]
-    if args.tokenizer:
-        cmd.extend(["--tokenizer", args.tokenizer])
+    if tokenizer:
+        cmd.extend(["--tokenizer", tokenizer])
     if args.swap_space is not None:
         cmd.extend(["--swap-space", str(args.swap_space)])
     if args.block_size is not None:
@@ -350,13 +391,28 @@ def _run_compare(args: argparse.Namespace) -> int:
         else _repo_root() / "benchmarks" / "results" / f"turboquant_llama_correctness_{timestamp}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    plain_json = output_dir / "plain.json"
     baseline_json = output_dir / "baseline.json"
     fused_json = output_dir / "fused.json"
     comparison_json = output_dir / "comparison.json"
+    plain_comparison_json = output_dir / "plain_comparison.json"
 
     env = os.environ.copy()
     env.update(_parse_extra_env(args.env))
 
+    if args.include_plain_baseline:
+        plain_model = Path(args.plain_model or args.model)
+        if (
+            plain_model.is_dir()
+            and (plain_model / "quant_model_description.json").exists()
+        ):
+            print(
+                "WARNING: --plain-model points to a directory with "
+                "quant_model_description.json; vllm-ascend may auto-detect "
+                "Ascend quantization. Use a model directory without that file "
+                "for a true non-TurboQuant baseline."
+            )
+        _run_child(args, "plain", plain_json, env)
     _run_child(args, "baseline", baseline_json, env)
     _run_child(args, "fused", fused_json, env)
 
@@ -367,8 +423,31 @@ def _run_compare(args: argparse.Namespace) -> int:
         {
             "baseline_json": str(baseline_json),
             "fused_json": str(fused_json),
+            "baseline_mode": args.baseline_mode,
         }
     )
+    if args.include_plain_baseline:
+        plain = _read_json(plain_json)
+        plain_comparison = _compare_outputs(
+            plain,
+            baseline,
+            left_label="plain",
+            right_label="turboquant_baseline",
+        )
+        plain_comparison.update(
+            {
+                "plain_json": str(plain_json),
+                "turboquant_baseline_json": str(baseline_json),
+                "note": (
+                    "This compares normal KV-cache generation with the "
+                    "TurboQuant reference baseline. Exact token equality is "
+                    "not required for PR5 fused-attention correctness because "
+                    "TurboQuant itself is lossy."
+                ),
+            }
+        )
+        _write_json(plain_comparison_json, plain_comparison)
+        comparison["plain_comparison_json"] = str(plain_comparison_json)
     _write_json(comparison_json, comparison)
 
     if comparison["passed"]:
@@ -384,6 +463,8 @@ def _run_compare(args: argparse.Namespace) -> int:
         for mismatch in comparison["mismatches"][:3]:
             print(json.dumps(mismatch, ensure_ascii=False, indent=2))
     print(f"Results: {output_dir}")
+    if args.include_plain_baseline:
+        print(f"Plain comparison: {plain_comparison_json}")
     return 0 if comparison["passed"] else 1
 
 
@@ -437,6 +518,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--score-tile-len", type=int, default=64)
+    parser.add_argument(
+        "--baseline-mode",
+        choices=("reference", "custom"),
+        default="reference",
+        help=(
+            "'reference' disables TurboQuant custom dequant for the baseline; "
+            "'custom' keeps the faster custom MSE dequant baseline."
+        ),
+    )
+    parser.add_argument(
+        "--include-plain-baseline",
+        action="store_true",
+        help="Also run a non-TurboQuant/plain model baseline for context.",
+    )
+    parser.add_argument(
+        "--plain-model",
+        help="Model path for --include-plain-baseline. Defaults to --model.",
+    )
+    parser.add_argument(
+        "--plain-tokenizer",
+        help="Tokenizer path for --include-plain-baseline. Defaults to --tokenizer.",
+    )
+    parser.add_argument(
+        "--plain-quantization",
+        default="none",
+        help="Quantization argument for the plain baseline; default omits it.",
+    )
     parser.add_argument("--output-dir")
     parser.add_argument(
         "--env",
@@ -446,7 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-sec", type=int, default=0)
     parser.add_argument("--no-tqdm", action="store_true", default=True)
 
-    parser.add_argument("--_worker-variant", choices=("baseline", "fused"), help=argparse.SUPPRESS)
+    parser.add_argument("--_worker-variant", choices=("plain", "baseline", "fused"), help=argparse.SUPPRESS)
     parser.add_argument("--_output-json", help=argparse.SUPPRESS)
     return parser
 
