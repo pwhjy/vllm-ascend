@@ -234,6 +234,14 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.manual_seed(seed)
+        if hasattr(torch.npu, "manual_seed_all"):
+            torch.npu.manual_seed_all(seed)
+        elif hasattr(torch.npu, "manual_seed"):
+            torch.npu.manual_seed(seed)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 

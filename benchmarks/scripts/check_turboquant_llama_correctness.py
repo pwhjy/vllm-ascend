@@ -113,6 +113,7 @@ def _build_llm_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "trust_remote_code": args.trust_remote_code,
         "enforce_eager": args.enforce_eager,
         "enable_chunked_prefill": not args.disable_chunked_prefill,
+        "seed": args.seed,
     }
     if args.tokenizer:
         kwargs["tokenizer"] = args.tokenizer
