@@ -336,6 +336,109 @@ def _run_case(args) -> None:
         f"speedup={dense_ms / fused_ms:.2f}x "
         f"max_diff={max_diff:.3g} ref_diff={ref_diff:.3g}"
     )
+    if args.profile_components:
+        _profile_fused_components(
+            args,
+            query,
+            k_idx,
+            k_qjl,
+            k_gamma,
+            k_norm,
+            v_idx,
+            v_norm,
+            block_table,
+            seq_lens,
+            k_codebook,
+            v_codebook,
+            k_rotation,
+            k_qjl_proj,
+            v_rotation_t,
+            scale,
+        )
+
+
+def _profile_fused_components(
+    args,
+    query: torch.Tensor,
+    k_idx: torch.Tensor,
+    k_qjl: torch.Tensor,
+    k_gamma: torch.Tensor,
+    k_norm: torch.Tensor,
+    v_idx: torch.Tensor,
+    v_norm: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int],
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    k_rotation: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    scale: float,
+) -> None:
+    if not (
+        hasattr(torch.ops, "_C_ascend")
+        and hasattr(torch.ops._C_ascend, "tq_prod_mse_paged_attention")
+    ):
+        print("component_profile: skipped (custom op unavailable)")
+        return
+
+    query_f32 = query.to(torch.float32)
+    k_rotation_f32 = k_rotation.to(device=query.device, dtype=torch.float32)
+    k_qjl_proj_t = k_qjl_proj.transpose(0, 1).contiguous().to(
+        device=query.device, dtype=torch.float32,
+    )
+    v_rotation_t_f32 = v_rotation_t.to(device=query.device, dtype=torch.float32)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=query.device)
+    q_rot = apply_rotation(query_f32, k_rotation_f32).contiguous()
+    q_qjl = apply_rotation(q_rot, k_qjl_proj_t).contiguous()
+
+    def op_fn():
+        return torch.ops._C_ascend.tq_prod_mse_paged_attention(
+            q_rot,
+            q_qjl,
+            k_idx.contiguous(),
+            k_qjl.contiguous(),
+            k_gamma.contiguous(),
+            k_norm.contiguous(),
+            v_idx.contiguous(),
+            v_norm.contiguous(),
+            block_table.contiguous(),
+            seq_lens_t,
+            k_codebook.contiguous(),
+            v_codebook.contiguous(),
+            int(args.k_bits),
+            int(args.v_bits),
+            int(args.head_dim),
+            float(scale),
+            int(args.seq_len),
+            int(args.score_tile_len),
+        )
+
+    out_rot = op_fn()
+    _sync()
+    q_rot_ms = _bench(
+        lambda: apply_rotation(query_f32, k_rotation_f32).contiguous(),
+        warmup=args.warmup,
+        iters=args.iters,
+    )
+    q_qjl_ms = _bench(
+        lambda: apply_rotation(q_rot, k_qjl_proj_t).contiguous(),
+        warmup=args.warmup,
+        iters=args.iters,
+    )
+    op_ms = _bench(op_fn, warmup=args.warmup, iters=args.iters)
+    v_rot_ms = _bench(
+        lambda: apply_rotation(out_rot, v_rotation_t_f32).contiguous(),
+        warmup=args.warmup,
+        iters=args.iters,
+    )
+    print(
+        f"component_profile: q_rotate={q_rot_ms:.3f} ms "
+        f"q_qjl_rotate={q_qjl_ms:.3f} ms "
+        f"custom_op={op_ms:.3f} ms "
+        f"v_rotate={v_rot_ms:.3f} ms "
+        f"sum={q_rot_ms + q_qjl_ms + op_ms + v_rot_ms:.3f} ms"
+    )
 
 
 def main() -> None:
@@ -358,6 +461,7 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--score-tile-len", type=int, default=64)
+    parser.add_argument("--profile-components", action="store_true")
     parser.add_argument(
         "--include-custom-op",
         action="store_true",

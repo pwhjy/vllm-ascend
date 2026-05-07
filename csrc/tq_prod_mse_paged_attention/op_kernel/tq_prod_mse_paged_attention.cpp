@@ -251,15 +251,8 @@ public:
         uint32_t kvHead,
         uint32_t pos
     ) {
-        uint32_t blockOffset = 0U;
-        uint32_t tokenOffset = 0U;
-        if (blockSize_ == 128U) {
-            blockOffset = pos >> 7;
-            tokenOffset = pos & 127U;
-        } else {
-            blockOffset = pos / blockSize_;
-            tokenOffset = pos - blockOffset * blockSize_;
-        }
+        uint32_t blockOffset = pos / blockSize_;
+        uint32_t tokenOffset = pos - blockOffset * blockSize_;
         int32_t blockId = blockTableGm_.GetValue(
             static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
         return ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
@@ -306,14 +299,11 @@ public:
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
         uint32_t groups = headDim_ >> 2;
-        uint32_t qjlBits = 0U;
         for (uint32_t g = 0; g < groups; ++g) {
             uint32_t idxBits = static_cast<uint32_t>(
                 kPackedIdxGm_.GetValue(packedBase + g));
-            if ((g & 1U) == 0U) {
-                qjlBits = static_cast<uint32_t>(
-                    kPackedQjlGm_.GetValue(qjlBase + (g >> 1)));
-            }
+            uint32_t qjlBits = static_cast<uint32_t>(
+                kPackedQjlGm_.GetValue(qjlBase + (g >> 1)));
             uint32_t qjlShift = (g & 1U) << 2;
 
             float cb0 = LookupKCodebook2(idxBits & 0x3U);
