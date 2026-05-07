@@ -81,9 +81,10 @@ public:
         correction_ = tiling->correction;
 
         uint32_t safeSeqLen = maxSeqLen_ == 0U ? 1U : maxSeqLen_;
+        scoreTileLen_ = safeSeqLen < 64U ? safeSeqLen : 64U;
         pipe_.InitBuffer(qRotBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(qQjlBuf_, 4U * headDim_ * sizeof(float));
-        pipe_.InitBuffer(scoreBuf_, 4U * safeSeqLen * sizeof(float));
+        pipe_.InitBuffer(scoreBuf_, 4U * scoreTileLen_ * sizeof(float));
         pipe_.InitBuffer(accBuf_, 4U * headDim_ * sizeof(float));
         pipe_.InitBuffer(vBuf_, headDim_ * sizeof(float));
         pipe_.InitBuffer(tmpBuf_, 4U * headDim_ * sizeof(float));
@@ -221,6 +222,7 @@ public:
         uint32_t b,
         uint32_t kvHead,
         uint32_t pos,
+        uint32_t tileOffset,
         const LocalTensor<float>& qRotLocal,
         const LocalTensor<float>& qQjlLocal,
         const LocalTensor<float>& scoreLocal
@@ -307,71 +309,106 @@ public:
         float qjlScale = correction_ * gamma;
         float outScale = norm * scale_;
         scoreLocal.SetValue(
-            pos, (mseAcc0 + qjlScale * qjlAcc0) * outScale);
+            tileOffset, (mseAcc0 + qjlScale * qjlAcc0) * outScale);
         scoreLocal.SetValue(
-            maxSeqLen_ + pos, (mseAcc1 + qjlScale * qjlAcc1) * outScale);
+            scoreTileLen_ + tileOffset,
+            (mseAcc1 + qjlScale * qjlAcc1) * outScale);
         scoreLocal.SetValue(
-            (maxSeqLen_ << 1) + pos,
+            (scoreTileLen_ << 1) + tileOffset,
             (mseAcc2 + qjlScale * qjlAcc2) * outScale);
         scoreLocal.SetValue(
-            3U * maxSeqLen_ + pos,
+            3U * scoreTileLen_ + tileOffset,
             (mseAcc3 + qjlScale * qjlAcc3) * outScale);
     }
 
-    __aicore__ inline void SoftmaxRow(
+    __aicore__ inline float RowMax(
         const LocalTensor<float>& scoreLocal,
-        const LocalTensor<float>& reduceLocal,
         uint32_t rowOffset,
-        uint32_t seqLen
+        uint32_t tileLen
     ) {
         float maxScore = -3.4028234663852886e38F;
-        for (uint32_t i = 0; i < seqLen; ++i) {
+        for (uint32_t i = 0; i < tileLen; ++i) {
             float value = scoreLocal.GetValue(rowOffset + i);
             if (value > maxScore) {
                 maxScore = value;
             }
         }
-        for (uint32_t i = 0; i < seqLen; ++i) {
-            scoreLocal.SetValue(rowOffset + i,
-                scoreLocal.GetValue(rowOffset + i) - maxScore);
-        }
+        return maxScore;
+    }
 
+    __aicore__ inline float ExpScalar(
+        float value,
+        const LocalTensor<float>& reduceLocal
+    ) {
+        reduceLocal.SetValue(0, value);
         SToVSync();
-        Exp(scoreLocal[rowOffset], scoreLocal[rowOffset], seqLen);
-        PipeBarrier<PIPE_V>();
-        ReduceSum(reduceLocal, scoreLocal[rowOffset], reduceLocal, seqLen);
+        Exp(reduceLocal, reduceLocal, 1U);
         VToSSync();
-        float sumValue = reduceLocal.GetValue(0);
-        float invSum = 1.0F / sumValue;
+        return reduceLocal.GetValue(0);
+    }
+
+    __aicore__ inline float ExpAndReduceRow(
+        const LocalTensor<float>& scoreLocal,
+        const LocalTensor<float>& reduceLocal,
+        uint32_t rowOffset,
+        uint32_t tileLen,
+        float maxScore
+    ) {
         SToVSync();
-        Muls(scoreLocal[rowOffset], scoreLocal[rowOffset], invSum, seqLen);
+        Adds(scoreLocal[rowOffset], scoreLocal[rowOffset], -maxScore, tileLen);
+        PipeBarrier<PIPE_V>();
+        Exp(scoreLocal[rowOffset], scoreLocal[rowOffset], tileLen);
+        PipeBarrier<PIPE_V>();
+        ReduceSum(reduceLocal, scoreLocal[rowOffset], reduceLocal, tileLen);
+        VToSSync();
+        return reduceLocal.GetValue(0);
+    }
+
+    __aicore__ inline void ScaleAccumulatorRows(
+        const LocalTensor<float>& accLocal,
+        float scale0,
+        float scale1,
+        float scale2,
+        float scale3
+    ) {
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        SToVSync();
+        Muls(accLocal, accLocal, scale0, headDim_);
+        PipeBarrier<PIPE_V>();
+        Muls(accLocal[q1Base], accLocal[q1Base], scale1, headDim_);
+        PipeBarrier<PIPE_V>();
+        Muls(accLocal[q2Base], accLocal[q2Base], scale2, headDim_);
+        PipeBarrier<PIPE_V>();
+        Muls(accLocal[q3Base], accLocal[q3Base], scale3, headDim_);
         PipeBarrier<PIPE_V>();
         VToSSync();
     }
 
-    __aicore__ inline void AccumulateVAndStore(
+    __aicore__ inline void AccumulateTileV(
         uint32_t b,
         uint32_t kvHead,
-        uint32_t seqLen,
+        uint32_t tileStart,
+        uint32_t tileLen,
         const LocalTensor<float>& scoreLocal,
         const LocalTensor<float>& accLocal
     ) {
         LocalTensor<float> vLocal = vBuf_.Get<float>();
         LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
-        Duplicate(accLocal, 0.0F, 4U * headDim_);
-        PipeBarrier<PIPE_V>();
 
         uint32_t q1Base = headDim_;
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
-        for (uint32_t pos = 0; pos < seqLen; ++pos) {
+        for (uint32_t i = 0; i < tileLen; ++i) {
+            uint32_t pos = tileStart + i;
             uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
             uint64_t vPackedBase = cacheIndex * vPackedCols_;
             float vNorm = vNormGm_.GetValue(cacheIndex);
-            float w0 = scoreLocal.GetValue(pos);
-            float w1 = scoreLocal.GetValue(maxSeqLen_ + pos);
-            float w2 = scoreLocal.GetValue((maxSeqLen_ << 1) + pos);
-            float w3 = scoreLocal.GetValue(3U * maxSeqLen_ + pos);
+            float w0 = scoreLocal.GetValue(i);
+            float w1 = scoreLocal.GetValue(scoreTileLen_ + i);
+            float w2 = scoreLocal.GetValue((scoreTileLen_ << 1) + i);
+            float w3 = scoreLocal.GetValue(3U * scoreTileLen_ + i);
             for (uint32_t d = 0; d < headDim_; ++d) {
                 float v = LookupVCodebook(ExtractVIndex(vPackedBase, d)) * vNorm;
                 vLocal.SetValue(d, v);
@@ -428,6 +465,23 @@ public:
             }
             VToSSync();
         }
+    }
+
+    __aicore__ inline void StoreNormalizedAccumulator(
+        uint32_t b,
+        uint32_t kvHead,
+        const LocalTensor<float>& accLocal,
+        float sum0,
+        float sum1,
+        float sum2,
+        float sum3
+    ) {
+        ScaleAccumulatorRows(
+            accLocal,
+            1.0F / sum0,
+            1.0F / sum1,
+            1.0F / sum2,
+            1.0F / sum3);
 
         uint32_t qHeadBase = kvHead * qPerKv_;
         uint64_t outBase =
@@ -464,16 +518,77 @@ public:
         DataCopy(qQjlLocal, qQjlGm_[queryBase], queryElems);
         MTE2ToSSync();
 
-        for (uint32_t pos = 0; pos < seqLen; ++pos) {
-            ComputeTokenScores(
-                b, kvHead, pos, qRotLocal, qQjlLocal, scoreLocal);
+        Duplicate(accLocal, 0.0F, 4U * headDim_);
+        PipeBarrier<PIPE_V>();
+
+        float max0 = -3.4028234663852886e38F;
+        float max1 = -3.4028234663852886e38F;
+        float max2 = -3.4028234663852886e38F;
+        float max3 = -3.4028234663852886e38F;
+        float sum0 = 0.0F;
+        float sum1 = 0.0F;
+        float sum2 = 0.0F;
+        float sum3 = 0.0F;
+        bool initialized = false;
+
+        for (uint32_t tileStart = 0; tileStart < seqLen;
+             tileStart += scoreTileLen_) {
+            uint32_t tileLen = seqLen - tileStart;
+            if (tileLen > scoreTileLen_) {
+                tileLen = scoreTileLen_;
+            }
+            for (uint32_t i = 0; i < tileLen; ++i) {
+                ComputeTokenScores(
+                    b,
+                    kvHead,
+                    tileStart + i,
+                    i,
+                    qRotLocal,
+                    qQjlLocal,
+                    scoreLocal);
+            }
+
+            uint32_t row1 = scoreTileLen_;
+            uint32_t row2 = scoreTileLen_ << 1;
+            uint32_t row3 = 3U * scoreTileLen_;
+            float tileMax0 = RowMax(scoreLocal, 0U, tileLen);
+            float tileMax1 = RowMax(scoreLocal, row1, tileLen);
+            float tileMax2 = RowMax(scoreLocal, row2, tileLen);
+            float tileMax3 = RowMax(scoreLocal, row3, tileLen);
+            float newMax0 = max0 > tileMax0 ? max0 : tileMax0;
+            float newMax1 = max1 > tileMax1 ? max1 : tileMax1;
+            float newMax2 = max2 > tileMax2 ? max2 : tileMax2;
+            float newMax3 = max3 > tileMax3 ? max3 : tileMax3;
+            float alpha0 = initialized ? ExpScalar(max0 - newMax0, reduceLocal) : 0.0F;
+            float alpha1 = initialized ? ExpScalar(max1 - newMax1, reduceLocal) : 0.0F;
+            float alpha2 = initialized ? ExpScalar(max2 - newMax2, reduceLocal) : 0.0F;
+            float alpha3 = initialized ? ExpScalar(max3 - newMax3, reduceLocal) : 0.0F;
+            float tileSum0 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, 0U, tileLen, newMax0);
+            float tileSum1 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row1, tileLen, newMax1);
+            float tileSum2 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row2, tileLen, newMax2);
+            float tileSum3 = ExpAndReduceRow(
+                scoreLocal, reduceLocal, row3, tileLen, newMax3);
+
+            ScaleAccumulatorRows(accLocal, alpha0, alpha1, alpha2, alpha3);
+            AccumulateTileV(
+                b, kvHead, tileStart, tileLen, scoreLocal, accLocal);
+
+            sum0 = sum0 * alpha0 + tileSum0;
+            sum1 = sum1 * alpha1 + tileSum1;
+            sum2 = sum2 * alpha2 + tileSum2;
+            sum3 = sum3 * alpha3 + tileSum3;
+            max0 = newMax0;
+            max1 = newMax1;
+            max2 = newMax2;
+            max3 = newMax3;
+            initialized = true;
         }
 
-        SoftmaxRow(scoreLocal, reduceLocal, 0U, seqLen);
-        SoftmaxRow(scoreLocal, reduceLocal, maxSeqLen_, seqLen);
-        SoftmaxRow(scoreLocal, reduceLocal, maxSeqLen_ << 1, seqLen);
-        SoftmaxRow(scoreLocal, reduceLocal, 3U * maxSeqLen_, seqLen);
-        AccumulateVAndStore(b, kvHead, seqLen, scoreLocal, accLocal);
+        StoreNormalizedAccumulator(
+            b, kvHead, accLocal, sum0, sum1, sum2, sum3);
     }
 
     __aicore__ inline void Process()
@@ -538,6 +653,7 @@ private:
     uint32_t vPackedCols_{0};
     uint32_t kStage1Bits_{0};
     uint32_t vBits_{0};
+    uint32_t scoreTileLen_{1};
     uint32_t numCore_{0};
     float scale_{1.0F};
     float correction_{0.0F};
