@@ -386,6 +386,44 @@ public:
         VToSSync();
     }
 
+    __aicore__ inline void ScaleAccumulatorRowsIfNeeded(
+        const LocalTensor<float>& accLocal,
+        float scale0,
+        float scale1,
+        float scale2,
+        float scale3,
+        bool scaleRow0,
+        bool scaleRow1,
+        bool scaleRow2,
+        bool scaleRow3
+    ) {
+        if (!scaleRow0 && !scaleRow1 && !scaleRow2 && !scaleRow3) {
+            return;
+        }
+
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        SToVSync();
+        if (scaleRow0) {
+            Muls(accLocal, accLocal, scale0, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
+        if (scaleRow1) {
+            Muls(accLocal[q1Base], accLocal[q1Base], scale1, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
+        if (scaleRow2) {
+            Muls(accLocal[q2Base], accLocal[q2Base], scale2, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
+        if (scaleRow3) {
+            Muls(accLocal[q3Base], accLocal[q3Base], scale3, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
+        VToSSync();
+    }
+
     __aicore__ inline void AccumulateTileV(
         uint32_t b,
         uint32_t kvHead,
@@ -559,10 +597,26 @@ public:
             float newMax1 = max1 > tileMax1 ? max1 : tileMax1;
             float newMax2 = max2 > tileMax2 ? max2 : tileMax2;
             float newMax3 = max3 > tileMax3 ? max3 : tileMax3;
-            float alpha0 = initialized ? ExpScalar(max0 - newMax0, reduceLocal) : 0.0F;
-            float alpha1 = initialized ? ExpScalar(max1 - newMax1, reduceLocal) : 0.0F;
-            float alpha2 = initialized ? ExpScalar(max2 - newMax2, reduceLocal) : 0.0F;
-            float alpha3 = initialized ? ExpScalar(max3 - newMax3, reduceLocal) : 0.0F;
+            bool updateMax0 = initialized && tileMax0 > max0;
+            bool updateMax1 = initialized && tileMax1 > max1;
+            bool updateMax2 = initialized && tileMax2 > max2;
+            bool updateMax3 = initialized && tileMax3 > max3;
+            float alpha0 = initialized ? 1.0F : 0.0F;
+            float alpha1 = initialized ? 1.0F : 0.0F;
+            float alpha2 = initialized ? 1.0F : 0.0F;
+            float alpha3 = initialized ? 1.0F : 0.0F;
+            if (updateMax0) {
+                alpha0 = ExpScalar(max0 - newMax0, reduceLocal);
+            }
+            if (updateMax1) {
+                alpha1 = ExpScalar(max1 - newMax1, reduceLocal);
+            }
+            if (updateMax2) {
+                alpha2 = ExpScalar(max2 - newMax2, reduceLocal);
+            }
+            if (updateMax3) {
+                alpha3 = ExpScalar(max3 - newMax3, reduceLocal);
+            }
             float tileSum0 = ExpAndReduceRow(
                 scoreLocal, reduceLocal, 0U, tileLen, newMax0);
             float tileSum1 = ExpAndReduceRow(
@@ -572,7 +626,16 @@ public:
             float tileSum3 = ExpAndReduceRow(
                 scoreLocal, reduceLocal, row3, tileLen, newMax3);
 
-            ScaleAccumulatorRows(accLocal, alpha0, alpha1, alpha2, alpha3);
+            ScaleAccumulatorRowsIfNeeded(
+                accLocal,
+                alpha0,
+                alpha1,
+                alpha2,
+                alpha3,
+                updateMax0,
+                updateMax1,
+                updateMax2,
+                updateMax3);
             AccumulateTileV(
                 b, kvHead, tileStart, tileLen, scoreLocal, accLocal);
 
