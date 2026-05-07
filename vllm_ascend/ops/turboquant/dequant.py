@@ -69,6 +69,10 @@ def fused_attention_custom_enabled() -> bool:
     )
 
 
+def custom_strict_enabled() -> bool:
+    return os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+
+
 def debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
 
@@ -755,16 +759,26 @@ def tq_prod_mse_paged_attention(
             score_dtype=score_dtype,
         )
 
-    if (
-        score_dtype != torch.float32
-        or head_dim < 16
-        or (head_dim & 3) != 0
-        or q_per_kv != 4
-        or k_stage1_bits != 2
-        or v_bits > 3
-        or max_seq_len > 1024
-        or not fused_attention_custom_enabled()
-        or not _custom_op_available(
+    fallback_reasons: list[str] = []
+    if score_dtype != torch.float32:
+        fallback_reasons.append(f"score_dtype={score_dtype}")
+    if head_dim < 16:
+        fallback_reasons.append(f"head_dim={head_dim} < 16")
+    if (head_dim & 3) != 0:
+        fallback_reasons.append(f"head_dim={head_dim} is not divisible by 4")
+    if q_per_kv != 4:
+        fallback_reasons.append(f"q_per_kv={q_per_kv} != 4")
+    if k_stage1_bits != 2:
+        fallback_reasons.append(f"k_stage1_bits={k_stage1_bits} != 2")
+    if v_bits > 3:
+        fallback_reasons.append(f"v_bits={v_bits} > 3")
+    if max_seq_len > 1024:
+        fallback_reasons.append(f"max_seq_len={max_seq_len} > 1024")
+
+    custom_enabled = fused_attention_custom_enabled()
+    if not custom_enabled:
+        fallback_reasons.append("VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION is not enabled")
+    elif not _custom_op_available(
             "tq_prod_mse_paged_attention",
             query,
             k_packed_idx,
@@ -776,8 +790,17 @@ def tq_prod_mse_paged_attention(
             block_table,
             k_codebook,
             v_codebook,
+        ):
+        fallback_reasons.append(
+            "torch.ops._C_ascend.tq_prod_mse_paged_attention is unavailable"
         )
-    ):
+
+    if fallback_reasons:
+        if custom_enabled and custom_strict_enabled():
+            raise RuntimeError(
+                "TurboQuant fused attention custom op fallback: "
+                + "; ".join(fallback_reasons)
+            )
         return _reference()
 
     seq_lens_t = (
