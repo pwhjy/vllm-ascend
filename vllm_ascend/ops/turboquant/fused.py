@@ -38,6 +38,7 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 from .dequant import (
     build_token_map_from_block_table,
     custom_strict_enabled,
+    tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_prod_paged_reference_rot,
 )
@@ -674,7 +675,7 @@ def _decode_history_to_dense(
             target_dtype,
         )
 
-    v_rot = tq_dequant_mse_paged_reference_rot(
+    v_rot = tq_dequant_mse_paged_rot(
         kv_cache["v_idx"],
         kv_cache["v_norm"],
         token_block_ids,
