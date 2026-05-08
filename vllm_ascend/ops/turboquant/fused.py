@@ -234,6 +234,8 @@ def _encode_prod_cache_no_profile(
     boundary: torch.Tensor,
     qjl_proj: torch.Tensor,
     total_bits: int,
+    *,
+    qjl_proj_t: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     stage1_bits = get_stage1_bits(total_bits, "prod")
     mse = _encode_mse_cache_no_profile(
@@ -246,7 +248,8 @@ def _encode_prod_cache_no_profile(
     )
     residual = mse["x_rot"] - mse["x_hat_rot"]
     gamma = residual.norm(dim=-1, keepdim=True).to(torch.float32)
-    qjl_sign = (apply_rotation(residual, qjl_proj.transpose(0, 1)) >= 0).to(torch.uint8)
+    qjl_rotation = qjl_proj_t if qjl_proj_t is not None else qjl_proj.transpose(0, 1)
+    qjl_sign = (apply_rotation(residual, qjl_rotation) >= 0).to(torch.uint8)
     return {
         "idx": mse["idx"],
         "qjl": _pack_bits_no_profile(qjl_sign, 1),
@@ -274,6 +277,7 @@ def tq_encode_kv_to_paged_cache_reference(
     v_bits: int,
     num_kv_heads: int | None = None,
     assume_valid_slots: bool = False,
+    k_qjl_proj_t: torch.Tensor | None = None,
 ) -> None:
     """Reference fused encode + bit-pack + paged sidecar cache write.
 
@@ -314,6 +318,7 @@ def tq_encode_kv_to_paged_cache_reference(
             k_boundary,
             k_qjl_proj,
             int(k_total_bits),
+            qjl_proj_t=k_qjl_proj_t,
         )
     elif k_variant == "mse":
         encoded_k = _encode_mse_cache_no_profile(
@@ -339,7 +344,7 @@ def tq_encode_kv_to_paged_cache_reference(
     def _write(cache_name: str, encoded: torch.Tensor) -> None:
         cache = kv_cache[cache_name]
         flat_cache = cache.view(-1, num_kv_heads, cache.shape[-1])
-        flat_cache[valid_slots] = encoded.to(flat_cache.dtype)
+        flat_cache.index_copy_(0, valid_slots, encoded.to(flat_cache.dtype))
 
     _write("k_idx", encoded_k["idx"])
     _write("k_norm", encoded_k["norm"])
@@ -535,6 +540,7 @@ def tq_fused_kv_update_attention_reference(
     causal: bool = True,
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
+    k_qjl_proj_t: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reference implementation for the final unified TurboQuant op.
 
@@ -566,6 +572,7 @@ def tq_fused_kv_update_attention_reference(
         v_bits=int(v_bits),
         num_kv_heads=int(key.shape[1]),
         assume_valid_slots=True,
+        k_qjl_proj_t=k_qjl_proj_t,
     )
 
     old_seq_lens_list = _to_int_list(old_seq_lens)
@@ -639,6 +646,7 @@ def tq_fused_kv_update_attention(
     causal: bool = True,
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
+    k_qjl_proj_t: torch.Tensor | None = None,
     mode: int = 0,
     score_tile_len: int = 64,
 ) -> torch.Tensor:
@@ -758,6 +766,7 @@ def tq_fused_kv_update_attention(
         causal=bool(causal),
         score_dtype=score_dtype,
         output_dtype=output_dtype,
+        k_qjl_proj_t=k_qjl_proj_t,
     )
 
 

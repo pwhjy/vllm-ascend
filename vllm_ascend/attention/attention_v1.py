@@ -1432,7 +1432,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
     """
 
     def _prepare_turboquant_runtime(self, layer: AttentionLayer, device: torch.device) -> None:
-        if getattr(layer, "tq_runtime_prepared", False):
+        if getattr(layer, "tq_runtime_prepared", False) and hasattr(layer, "_tq_k_qjl_proj_t"):
             return
         target_dtype = getattr(layer, "tq_scalar_dtype", torch.float32)
         layer._tq_k_codebook = layer.k_codebook.data.to(device=device, dtype=target_dtype)
@@ -1444,8 +1444,9 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         layer._tq_k_rot_t = layer._tq_k_rot.transpose(0, 1).contiguous()
         layer._tq_v_rot_t = layer._tq_v_rot.transpose(0, 1).contiguous()
         layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype)
+        layer._tq_k_qjl_proj_t = layer._tq_k_qjl_proj.transpose(0, 1).contiguous()
         layer._tq_k_qjl_query_matrix = (
-            layer._tq_k_rot @ layer._tq_k_qjl_proj.transpose(0, 1)
+            layer._tq_k_rot @ layer._tq_k_qjl_proj_t
         ).contiguous()
         layer._tq_qjl_codebook = torch.tensor(
             [-1.0, 1.0],
@@ -2148,6 +2149,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             layer._tq_v_rot_t,
             layer._tq_v_boundary,
             layer._tq_v_codebook,
+            k_qjl_proj_t=layer._tq_k_qjl_proj_t,
             k_variant=getattr(layer, "tq_k_variant", "prod"),
             k_total_bits=int(layer.tq_k_total_bits),
             k_stage1_bits=int(layer.tq_k_stage1_bits),
