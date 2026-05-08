@@ -716,6 +716,22 @@ def _dense_history_current_attention(
         raise ValueError("num_heads must be divisible by num_kv_heads")
 
     q_per_kv = num_heads // num_kv_heads
+    q_lens = [max(0, int(q_locs[i + 1]) - int(q_locs[i])) for i in range(batch)]
+    cur_lens = [max(0, int(k_locs[i + 1]) - int(k_locs[i])) for i in range(batch)]
+    if batch > 0 and all(q_len == 1 and cur_len == 1 for q_len, cur_len in zip(q_lens, cur_lens)):
+        return _dense_single_token_history_current_attention(
+            query,
+            key,
+            value,
+            history_key,
+            history_value,
+            old_seq_lens,
+            q_locs,
+            k_locs,
+            scale=scale,
+            score_dtype=score_dtype,
+        )
+
     out = torch.empty(
         (int(query.shape[0]), num_heads, head_dim),
         dtype=score_dtype,
@@ -764,6 +780,59 @@ def _dense_history_current_attention(
     return out.contiguous()
 
 
+def _dense_single_token_history_current_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    history_key: torch.Tensor,
+    history_value: torch.Tensor,
+    old_seq_lens: list[int],
+    q_locs: list[int],
+    k_locs: list[int],
+    *,
+    scale: float,
+    score_dtype: torch.dtype,
+) -> torch.Tensor:
+    num_heads = int(query.shape[1])
+    num_kv_heads = int(key.shape[1])
+    head_dim = int(query.shape[-1])
+    q_per_kv = num_heads // num_kv_heads
+    out = torch.empty(
+        (int(query.shape[0]), num_heads, head_dim),
+        dtype=score_dtype,
+        device=query.device,
+    )
+    hist_cursor = 0
+
+    for batch_idx in range(len(q_locs) - 1):
+        q0 = int(q_locs[batch_idx])
+        k0 = int(k_locs[batch_idx])
+        old_len = int(old_seq_lens[batch_idx]) if batch_idx < len(old_seq_lens) else 0
+
+        q = query[q0].to(score_dtype).view(num_kv_heads, q_per_kv, head_dim)
+        cur_k = key[k0].to(score_dtype)
+        cur_v = value[k0].to(score_dtype)
+        hist_k = history_key[hist_cursor:hist_cursor + old_len].to(score_dtype)
+        hist_v = history_value[hist_cursor:hist_cursor + old_len].to(score_dtype)
+        hist_cursor += old_len
+
+        cur_scores = torch.einsum("kqd,kd->kq", q, cur_k).unsqueeze(-1)
+        if old_len > 0:
+            hist_scores = torch.einsum("kqd,skd->kqs", q, hist_k)
+            scores = torch.cat((hist_scores, cur_scores), dim=-1)
+        else:
+            scores = cur_scores
+        probs = torch.softmax(scores * float(scale), dim=-1)
+
+        cur_out = probs[..., -1].unsqueeze(-1) * cur_v.unsqueeze(1)
+        if old_len > 0:
+            hist_out = torch.einsum("kqs,skd->kqd", probs[..., :old_len], hist_v)
+            cur_out = cur_out + hist_out
+        out[q0] = cur_out.reshape(num_heads, head_dim)
+
+    return out.contiguous()
+
+
 def tq_fused_kv_update_attention_reference(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -794,6 +863,7 @@ def tq_fused_kv_update_attention_reference(
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
     k_qjl_proj_t: torch.Tensor | None = None,
+    k_rotation_t: torch.Tensor | None = None,
     kv_mse_rotation: torch.Tensor | None = None,
     kv_mse_shared_boundary: bool = False,
 ) -> torch.Tensor:
@@ -839,7 +909,7 @@ def tq_fused_kv_update_attention_reference(
         old_seq_lens_list,
         k_codebook,
         v_codebook,
-        k_rotation.transpose(0, 1).contiguous(),
+        k_rotation_t if k_rotation_t is not None else k_rotation.transpose(0, 1).contiguous(),
         k_qjl_proj,
         v_rotation_t,
         k_variant=k_variant,
@@ -904,6 +974,7 @@ def tq_fused_kv_update_attention(
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
     k_qjl_proj_t: torch.Tensor | None = None,
+    k_rotation_t: torch.Tensor | None = None,
     kv_mse_rotation: torch.Tensor | None = None,
     kv_mse_shared_boundary: bool = False,
     mode: int = 0,
@@ -1026,6 +1097,7 @@ def tq_fused_kv_update_attention(
         score_dtype=score_dtype,
         output_dtype=output_dtype,
         k_qjl_proj_t=k_qjl_proj_t,
+        k_rotation_t=k_rotation_t,
         kv_mse_rotation=kv_mse_rotation,
         kv_mse_shared_boundary=kv_mse_shared_boundary,
     )

@@ -2179,6 +2179,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             causal=bool(attn_metadata.causal),
             output_dtype=output.dtype,
             mode=state_to_mode.get(attn_metadata.attn_state, 1),
+            k_rotation_t=layer._tq_k_rot_t,
             kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
             kv_mse_shared_boundary=getattr(
                 layer, "_tq_kv_mse_shared_boundary", False,

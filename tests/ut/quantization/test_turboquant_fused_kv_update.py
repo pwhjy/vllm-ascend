@@ -360,3 +360,105 @@ def test_fused_kv_update_attention_uses_dense_current_chunk_and_updates_cache():
     )
     assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
     assert torch.equal(flat_k_idx[2:4], current_encoded["idx"])
+
+
+def test_fused_kv_update_attention_single_token_decode_matches_dense_reference():
+    torch.manual_seed(5)
+    head_dim = 8
+    num_heads = 4
+    num_kv_heads = 2
+    q_per_kv = num_heads // num_kv_heads
+    k_total_bits = 3
+    v_bits = 2
+    params = _make_params(head_dim, k_total_bits, v_bits)
+    cache = _make_sidecar_cache(1, 4, num_kv_heads, head_dim, k_total_bits, v_bits)
+
+    history_key = torch.randn(2, num_kv_heads, head_dim)
+    history_value = torch.randn(2, num_kv_heads, head_dim)
+    current_key = torch.randn(1, num_kv_heads, head_dim)
+    current_value = torch.randn(1, num_kv_heads, head_dim)
+    query = torch.randn(1, num_heads, head_dim)
+
+    tq_encode_kv_to_paged_cache_reference(
+        history_key,
+        history_value,
+        torch.tensor([0, 1], dtype=torch.int64),
+        cache,
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+    )
+
+    out = tq_fused_kv_update_attention_reference(
+        query,
+        current_key,
+        current_value,
+        torch.tensor([2], dtype=torch.int64),
+        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([0, 1], dtype=torch.int32),
+        cache,
+        params["k_rotation"],
+        params["k_qjl_query_matrix"],
+        params["k_boundary"],
+        params["k_codebook"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_rotation"].transpose(0, 1).contiguous(),
+        params["v_boundary"],
+        params["v_codebook"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        head_dim=head_dim,
+        scale=1.0 / (head_dim**0.5),
+    )
+
+    flat_k_idx = _flat(cache["k_idx"], num_kv_heads)
+    flat_k_qjl = _flat(cache["k_qjl"], num_kv_heads)
+    flat_k_gamma = _flat(cache["k_gamma"], num_kv_heads)
+    flat_k_norm = _flat(cache["k_norm"], num_kv_heads)
+    flat_v_idx = _flat(cache["v_idx"], num_kv_heads)
+    flat_v_norm = _flat(cache["v_norm"], num_kv_heads)
+
+    hist_k = turboquant_decode_prod(
+        flat_k_idx[:2],
+        flat_k_qjl[:2],
+        flat_k_gamma[:2],
+        flat_k_norm[:2],
+        params["k_rotation"].transpose(0, 1).contiguous(),
+        params["k_codebook"],
+        params["k_qjl_proj"],
+        k_total_bits,
+        head_dim,
+        torch.float32,
+    )
+    hist_v = turboquant_decode_mse(
+        flat_v_idx[:2],
+        flat_v_norm[:2],
+        params["v_rotation"].transpose(0, 1).contiguous(),
+        params["v_codebook"],
+        v_bits,
+        head_dim,
+        torch.float32,
+    )
+
+    all_k = torch.cat([hist_k, current_key], dim=0)
+    all_v = torch.cat([hist_v, current_value], dim=0)
+    expanded_k = all_k.repeat_interleave(q_per_kv, dim=1)
+    expanded_v = all_v.repeat_interleave(q_per_kv, dim=1)
+    scores = torch.einsum("qhd,shd->qhs", query, expanded_k) / (head_dim**0.5)
+    ref = torch.einsum("qhs,shd->qhd", torch.softmax(scores, dim=-1), expanded_v)
+
+    assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
