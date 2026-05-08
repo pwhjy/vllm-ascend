@@ -73,7 +73,7 @@ def combined_kv_mse_encode_enabled() -> bool:
 def compressed_decode_current_enabled() -> bool:
     """Use compressed-history scores plus dense-current V for decode."""
 
-    return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "1") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "0") == "1"
 
 
 def compressed_decode_current_custom_k_score_enabled() -> bool:
