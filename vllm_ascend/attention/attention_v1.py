@@ -69,6 +69,10 @@ from vllm_ascend.ops.turboquant.dequant import (
     tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_scaled_rot,
 )
+from vllm_ascend.ops.turboquant.fused import (
+    fused_kv_update_attention_enabled,
+    tq_fused_kv_update_attention,
+)
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
     _maybe_sync_for_profile,
@@ -1440,6 +1444,9 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         layer._tq_k_rot_t = layer._tq_k_rot.transpose(0, 1).contiguous()
         layer._tq_v_rot_t = layer._tq_v_rot.transpose(0, 1).contiguous()
         layer._tq_k_qjl_proj = layer.k_qjl_proj.data.to(device=device, dtype=target_dtype)
+        layer._tq_k_qjl_query_matrix = (
+            layer._tq_k_rot @ layer._tq_k_qjl_proj.transpose(0, 1)
+        ).contiguous()
         layer._tq_qjl_codebook = torch.tensor(
             [-1.0, 1.0],
             dtype=torch.float32,
@@ -2087,6 +2094,105 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         return output
 
+    def _forward_turboquant_fused_kv_update_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: dict[str, torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        _maybe_sync_for_profile(query, key, value, attn_metadata.block_tables)
+        t0 = time.perf_counter()
+        self.key_cache = kv_cache  # type: ignore[assignment]
+        self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
+
+        batch_size = len(attn_metadata.seq_lens_list)
+        query_start_loc = attn_metadata.query_start_loc[: batch_size + 1].to(
+            device=query.device, dtype=torch.int32,
+        ).contiguous()
+        key_start_loc = query_start_loc
+        current_lens = key_start_loc[1:] - key_start_loc[:-1]
+        seq_lens_t = torch.tensor(
+            attn_metadata.seq_lens_list,
+            dtype=torch.int32,
+            device=query.device,
+        )
+        old_seq_lens = torch.clamp(seq_lens_t - current_lens, min=0).contiguous()
+        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
+
+        state_to_mode = {
+            AscendAttentionState.DecodeOnly: 0,
+            AscendAttentionState.ChunkedPrefill: 1,
+            AscendAttentionState.PrefillCacheHit: 1,
+            AscendAttentionState.PrefillNoCache: 2,
+        }
+        fused_out = tq_fused_kv_update_attention(
+            query[:num_tokens],
+            key[:num_tokens],
+            value[:num_tokens],
+            attn_metadata.slot_mapping[:num_tokens],
+            attn_metadata.block_tables,
+            old_seq_lens,
+            query_start_loc,
+            key_start_loc,
+            kv_cache,
+            layer._tq_k_rot,
+            layer._tq_k_qjl_query_matrix,
+            layer._tq_k_boundary,
+            layer._tq_k_codebook,
+            layer._tq_k_qjl_proj,
+            layer._tq_v_rot,
+            layer._tq_v_rot_t,
+            layer._tq_v_boundary,
+            layer._tq_v_codebook,
+            k_variant=getattr(layer, "tq_k_variant", "prod"),
+            k_total_bits=int(layer.tq_k_total_bits),
+            k_stage1_bits=int(layer.tq_k_stage1_bits),
+            v_bits=int(layer.tq_v_stage1_bits),
+            head_dim=self.head_size,
+            scale=self.scale,
+            causal=bool(attn_metadata.causal),
+            output_dtype=output.dtype,
+            mode=state_to_mode.get(attn_metadata.attn_state, 1),
+        )
+        output[:num_tokens] = fused_out.to(dtype=output.dtype)
+        _maybe_sync_for_profile(output)
+        _record_tq_profile(
+            "turboquant_fused_kv_update_attention.forward",
+            (time.perf_counter() - t0) * 1000.0,
+            vectors=num_tokens,
+        )
+        return output
+
+    def _can_use_turboquant_fused_kv_update_attention(
+        self,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        kv_cache,
+        attn_metadata: AscendMetadata,
+    ) -> bool:
+        if not fused_kv_update_attention_enabled():
+            return False
+        if key is None or value is None or not isinstance(kv_cache, dict):
+            return False
+        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
+            return False
+        if self.attn_type == AttentionType.ENCODER_DECODER:
+            return False
+        if self.alibi_slopes is not None:
+            return False
+        if getattr(attn_metadata, "swa_mask", None) is not None:
+            return False
+        return attn_metadata.attn_state in {
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.PrefillCacheHit,
+            AscendAttentionState.PrefillNoCache,
+        }
+
     def _forward_turboquant_chunked_prefill(
         self,
         query: torch.Tensor,
@@ -2210,6 +2316,23 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             return output.fill_(0)
 
         float_key, float_value = key, value
+        if self._can_use_turboquant_fused_kv_update_attention(
+            key, value, kv_cache, attn_metadata,
+        ):
+            try:
+                return self._forward_turboquant_fused_kv_update_attention(
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    layer,
+                )
+            except Exception:
+                if os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1":
+                    raise
+
         if key is not None and value is not None:
             encoded_k, encoded_v = self._quantize_kv_to_turboquant(key, value, layer, attn_metadata.num_actual_tokens)
             self._reshape_and_cache_turboquant(query, encoded_k, encoded_v, kv_cache, attn_metadata)
