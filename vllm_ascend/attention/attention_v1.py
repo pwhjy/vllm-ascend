@@ -71,6 +71,7 @@ from vllm_ascend.ops.turboquant.dequant import (
 )
 from vllm_ascend.ops.turboquant.fused import (
     fused_kv_update_attention_enabled,
+    tq_encode_kv_to_paged_cache,
     tq_fused_kv_update_attention,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
@@ -2143,6 +2144,52 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         )
         old_seq_lens = torch.clamp(seq_lens_t - current_lens, min=0).contiguous()
         num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
+
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            tq_encode_kv_to_paged_cache(
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.slot_mapping[:num_tokens],
+                kv_cache,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                layer._tq_k_qjl_proj,
+                layer._tq_v_rot,
+                layer._tq_v_codebook,
+                layer._tq_v_boundary,
+                k_qjl_proj_t=layer._tq_k_qjl_proj_t,
+                k_variant=getattr(layer, "tq_k_variant", "prod"),
+                k_total_bits=int(layer.tq_k_total_bits),
+                k_stage1_bits=int(layer.tq_k_stage1_bits),
+                v_bits=int(layer.tq_v_stage1_bits),
+                num_kv_heads=self.num_kv_heads,
+                assume_valid_slots=True,
+                kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
+                kv_mse_shared_boundary=getattr(
+                    layer, "_tq_kv_mse_shared_boundary", False,
+                ),
+            )
+            output = self._run_dense_fia(
+                query[:num_tokens],
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.actual_seq_lengths_q,
+                attn_metadata.actual_seq_lengths_q,
+                attn_metadata,
+                output,
+                profile_name=(
+                    "turboquant_fused_kv_update_attention."
+                    "prefill_no_cache.run_dense_fia"
+                ),
+            )
+            _maybe_sync_for_profile(output)
+            _record_tq_profile(
+                "turboquant_fused_kv_update_attention.forward",
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=num_tokens,
+            )
+            return output
 
         state_to_mode = {
             AscendAttentionState.DecodeOnly: 0,
