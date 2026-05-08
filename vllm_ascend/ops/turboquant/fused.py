@@ -33,8 +33,6 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
     _maybe_sync_for_profile,
     _record_tq_profile,
     apply_rotation,
-    turboquant_encode_mse,
-    turboquant_encode_prod,
 )
 
 from .dequant import (
@@ -113,6 +111,150 @@ def _validate_cache(kv_cache: dict[str, torch.Tensor]) -> None:
         raise KeyError(f"TurboQuant KV cache is missing sidecar tensors: {missing}")
 
 
+def _pack_bits_no_profile(indices: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack low-bit indices without nested TurboQuant profile sync points."""
+
+    if indices.numel() == 0:
+        return indices.to(torch.uint8)
+
+    original_shape = indices.shape[:-1]
+    values = indices.to(torch.uint8).reshape(-1, indices.shape[-1])
+    packed_cols = (values.shape[-1] * bits + 7) // 8
+
+    def _pad_last_dim(x: torch.Tensor, pad: int) -> torch.Tensor:
+        if not pad:
+            return x
+        padded = torch.zeros(
+            (x.shape[0], x.shape[-1] + pad),
+            dtype=torch.uint8,
+            device=x.device,
+        )
+        padded[:, : x.shape[-1]] = x
+        return padded
+
+    if bits == 1:
+        values = _pad_last_dim(values & 0x1, (-values.shape[-1]) % 8)
+        chunks = values.view(values.shape[0], -1, 8)
+        packed = (
+            chunks[..., 0]
+            | (chunks[..., 1] << 1)
+            | (chunks[..., 2] << 2)
+            | (chunks[..., 3] << 3)
+            | (chunks[..., 4] << 4)
+            | (chunks[..., 5] << 5)
+            | (chunks[..., 6] << 6)
+            | (chunks[..., 7] << 7)
+        )
+    elif bits == 2:
+        values = _pad_last_dim(values & 0x3, (-values.shape[-1]) % 4)
+        chunks = values.view(values.shape[0], -1, 4)
+        packed = (
+            chunks[..., 0]
+            | (chunks[..., 1] << 2)
+            | (chunks[..., 2] << 4)
+            | (chunks[..., 3] << 6)
+        )
+    elif bits == 3:
+        values = _pad_last_dim(values & 0x7, (-values.shape[-1]) % 8)
+        chunks = values.view(values.shape[0], -1, 8)
+        byte0 = chunks[..., 0] | (chunks[..., 1] << 3) | (chunks[..., 2] << 6)
+        byte1 = (
+            (chunks[..., 2] >> 2)
+            | (chunks[..., 3] << 1)
+            | (chunks[..., 4] << 4)
+            | (chunks[..., 5] << 7)
+        )
+        byte2 = (chunks[..., 5] >> 1) | (chunks[..., 6] << 2) | (chunks[..., 7] << 5)
+        packed = torch.stack([byte0, byte1, byte2], dim=-1).view(values.shape[0], -1)
+    elif bits == 4:
+        values = _pad_last_dim(values & 0xF, (-values.shape[-1]) % 2)
+        chunks = values.view(values.shape[0], -1, 2)
+        packed = chunks[..., 0] | (chunks[..., 1] << 4)
+    else:
+        values = indices.to(torch.int64)
+        flat = values.reshape(-1, values.shape[-1])
+        packed = torch.zeros(
+            (flat.shape[0], packed_cols),
+            dtype=torch.uint8,
+            device=flat.device,
+        )
+        bit_cursor = 0
+        mask = (1 << bits) - 1
+        for col in range(flat.shape[-1]):
+            value = flat[:, col] & mask
+            byte_index = bit_cursor // 8
+            bit_offset = bit_cursor % 8
+            packed[:, byte_index] |= (value << bit_offset).to(torch.uint8)
+            if bit_offset + bits > 8:
+                packed[:, byte_index + 1] |= (value >> (8 - bit_offset)).to(torch.uint8)
+            bit_cursor += bits
+
+    return packed[:, :packed_cols].reshape(*original_shape, packed_cols).contiguous()
+
+
+def _encode_scalar_with_boundary_no_profile(
+    x: torch.Tensor,
+    boundary: torch.Tensor,
+) -> torch.Tensor:
+    if boundary.numel() == 3:
+        return (
+            (x > boundary[0]).to(torch.uint8)
+            + (x > boundary[1]).to(torch.uint8)
+            + (x > boundary[2]).to(torch.uint8)
+        )
+    return torch.sum(x.unsqueeze(-1) > boundary, dim=-1).to(torch.uint8)
+
+
+def _encode_mse_cache_no_profile(
+    x: torch.Tensor,
+    rotation: torch.Tensor,
+    codebook: torch.Tensor,
+    boundary: torch.Tensor,
+    bits: int,
+    *,
+    return_rot_and_dequant: bool,
+) -> dict[str, torch.Tensor]:
+    norm = torch.clamp(x.norm(dim=-1, keepdim=True), min=1e-6)
+    x_rot = apply_rotation(x / norm, rotation)
+    idx = _encode_scalar_with_boundary_no_profile(x_rot, boundary)
+    out = {
+        "idx": _pack_bits_no_profile(idx, bits),
+        "norm": norm.to(torch.float32),
+    }
+    if return_rot_and_dequant:
+        out["x_rot"] = x_rot
+        out["x_hat_rot"] = codebook[idx.long()].to(x.dtype)
+    return out
+
+
+def _encode_prod_cache_no_profile(
+    x: torch.Tensor,
+    rotation: torch.Tensor,
+    codebook: torch.Tensor,
+    boundary: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+) -> dict[str, torch.Tensor]:
+    stage1_bits = get_stage1_bits(total_bits, "prod")
+    mse = _encode_mse_cache_no_profile(
+        x,
+        rotation,
+        codebook,
+        boundary,
+        stage1_bits,
+        return_rot_and_dequant=True,
+    )
+    residual = mse["x_rot"] - mse["x_hat_rot"]
+    gamma = residual.norm(dim=-1, keepdim=True).to(torch.float32)
+    qjl_sign = (apply_rotation(residual, qjl_proj.transpose(0, 1)) >= 0).to(torch.uint8)
+    return {
+        "idx": mse["idx"],
+        "qjl": _pack_bits_no_profile(qjl_sign, 1),
+        "gamma": gamma,
+        "norm": mse["norm"],
+    }
+
+
 def tq_encode_kv_to_paged_cache_reference(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -131,6 +273,7 @@ def tq_encode_kv_to_paged_cache_reference(
     k_stage1_bits: int,
     v_bits: int,
     num_kv_heads: int | None = None,
+    assume_valid_slots: bool = False,
 ) -> None:
     """Reference fused encode + bit-pack + paged sidecar cache write.
 
@@ -150,11 +293,21 @@ def tq_encode_kv_to_paged_cache_reference(
 
     num_tokens = int(slots.numel())
     num_kv_heads = int(num_kv_heads if num_kv_heads is not None else key.shape[1])
-    actual_key = key[:num_tokens].to(torch.float32)
-    actual_value = value[:num_tokens].to(torch.float32)
+    if assume_valid_slots:
+        valid_slots = slots
+        actual_key = key[:num_tokens].to(torch.float32)
+        actual_value = value[:num_tokens].to(torch.float32)
+    else:
+        valid = slots >= 0
+        valid_slots = slots[valid]
+        if valid_slots.numel() == 0:
+            _record_tq_profile("turboquant_encode_cache_update.total", 0.0, vectors=0)
+            return
+        actual_key = key[:num_tokens][valid].to(torch.float32)
+        actual_value = value[:num_tokens][valid].to(torch.float32)
 
     if k_variant == "prod":
-        encoded_k = turboquant_encode_prod(
+        encoded_k = _encode_prod_cache_no_profile(
             actual_key,
             k_rotation,
             k_codebook,
@@ -163,34 +316,30 @@ def tq_encode_kv_to_paged_cache_reference(
             int(k_total_bits),
         )
     elif k_variant == "mse":
-        encoded_k = turboquant_encode_mse(
+        encoded_k = _encode_mse_cache_no_profile(
             actual_key,
             k_rotation,
             k_codebook,
             k_boundary,
             int(k_stage1_bits),
+            return_rot_and_dequant=False,
         )
     else:
         raise ValueError(f"Unsupported TurboQuant K variant: {k_variant}")
 
-    encoded_v = turboquant_encode_mse(
+    encoded_v = _encode_mse_cache_no_profile(
         actual_value,
         v_rotation,
         v_codebook,
         v_boundary,
         int(v_bits),
+        return_rot_and_dequant=False,
     )
-
-    valid = slots >= 0
-    if not bool(valid.any().item()):
-        _record_tq_profile("turboquant_encode_cache_update.total", 0.0, vectors=0)
-        return
-    valid_slots = slots[valid]
 
     def _write(cache_name: str, encoded: torch.Tensor) -> None:
         cache = kv_cache[cache_name]
         flat_cache = cache.view(-1, num_kv_heads, cache.shape[-1])
-        flat_cache[valid_slots] = encoded[valid].to(flat_cache.dtype)
+        flat_cache[valid_slots] = encoded.to(flat_cache.dtype)
 
     _write("k_idx", encoded_k["idx"])
     _write("k_norm", encoded_k["norm"])
@@ -205,7 +354,7 @@ def tq_encode_kv_to_paged_cache_reference(
     _record_tq_profile(
         "turboquant_encode_cache_update.total",
         (time.perf_counter() - t0) * 1000.0,
-        vectors=int(valid.sum().item()) * num_kv_heads,
+        vectors=int(valid_slots.numel()) * num_kv_heads,
     )
 
 
@@ -416,6 +565,7 @@ def tq_fused_kv_update_attention_reference(
         k_stage1_bits=int(k_stage1_bits),
         v_bits=int(v_bits),
         num_kv_heads=int(key.shape[1]),
+        assume_valid_slots=True,
     )
 
     old_seq_lens_list = _to_int_list(old_seq_lens)

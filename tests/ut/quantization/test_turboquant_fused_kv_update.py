@@ -133,6 +133,65 @@ def test_encode_kv_to_paged_cache_matches_runtime_encode():
     assert torch.allclose(_flat(cache["v_norm"], num_kv_heads)[slots], encoded_v["norm"])
 
 
+def test_encode_kv_to_paged_cache_ignores_padding_slots():
+    torch.manual_seed(3)
+    head_dim = 8
+    num_kv_heads = 2
+    k_total_bits = 3
+    v_bits = 2
+    params = _make_params(head_dim, k_total_bits, v_bits)
+    cache = _make_sidecar_cache(2, 4, num_kv_heads, head_dim, k_total_bits, v_bits)
+    key = torch.randn(3, num_kv_heads, head_dim)
+    value = torch.randn(3, num_kv_heads, head_dim)
+    slots = torch.tensor([0, -1, 5], dtype=torch.int64)
+
+    tq_encode_kv_to_paged_cache_reference(
+        key,
+        value,
+        slots,
+        cache,
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+    )
+
+    valid = slots >= 0
+    valid_slots = slots[valid]
+    encoded_k = turboquant_encode_prod(
+        key[valid],
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        k_total_bits,
+    )
+    encoded_v = turboquant_encode_mse(
+        value[valid],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        v_bits,
+    )
+
+    assert torch.equal(_flat(cache["k_idx"], num_kv_heads)[valid_slots], encoded_k["idx"])
+    assert torch.equal(_flat(cache["k_qjl"], num_kv_heads)[valid_slots], encoded_k["qjl"])
+    assert torch.allclose(_flat(cache["k_gamma"], num_kv_heads)[valid_slots], encoded_k["gamma"])
+    assert torch.allclose(_flat(cache["k_norm"], num_kv_heads)[valid_slots], encoded_k["norm"])
+    assert torch.equal(_flat(cache["v_idx"], num_kv_heads)[valid_slots], encoded_v["idx"])
+    assert torch.allclose(_flat(cache["v_norm"], num_kv_heads)[valid_slots], encoded_v["norm"])
+    assert torch.count_nonzero(_flat(cache["k_idx"], num_kv_heads)[-1]) == 0
+    assert torch.count_nonzero(_flat(cache["v_idx"], num_kv_heads)[-1]) == 0
+
+
 def test_fused_kv_update_attention_uses_dense_current_chunk_and_updates_cache():
     torch.manual_seed(1)
     head_dim = 8
