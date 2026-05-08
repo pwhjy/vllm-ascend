@@ -71,6 +71,7 @@ from vllm_ascend.ops.turboquant.dequant import (
 )
 from vllm_ascend.ops.turboquant.fused import (
     fused_kv_update_attention_enabled,
+    tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
     tq_fused_kv_update_attention,
 )
@@ -2181,6 +2182,119 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 profile_name=(
                     "turboquant_fused_kv_update_attention."
                     "prefill_no_cache.run_dense_fia"
+                ),
+            )
+            _maybe_sync_for_profile(output)
+            _record_tq_profile(
+                "turboquant_fused_kv_update_attention.forward",
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=num_tokens,
+            )
+            return output
+
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA", "1") == "1"
+        ):
+            q_ends = [int(v) for v in attn_metadata.actual_seq_lengths_q]
+            q_starts = [0] + q_ends[:-1]
+            current_lens_list = [
+                max(0, q_end - q_start)
+                for q_start, q_end in zip(q_starts, q_ends)
+            ]
+            old_seq_lens_list = [
+                max(0, int(total_len) - cur_len)
+                for total_len, cur_len in zip(
+                    attn_metadata.seq_lens_list,
+                    current_lens_list,
+                )
+            ]
+
+            tq_encode_kv_to_paged_cache(
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.slot_mapping[:num_tokens],
+                kv_cache,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                layer._tq_k_qjl_proj,
+                layer._tq_v_rot,
+                layer._tq_v_codebook,
+                layer._tq_v_boundary,
+                k_qjl_proj_t=layer._tq_k_qjl_proj_t,
+                k_variant=getattr(layer, "tq_k_variant", "prod"),
+                k_total_bits=int(layer.tq_k_total_bits),
+                k_stage1_bits=int(layer.tq_k_stage1_bits),
+                v_bits=int(layer.tq_v_stage1_bits),
+                num_kv_heads=self.num_kv_heads,
+                assume_valid_slots=True,
+                kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
+                kv_mse_shared_boundary=getattr(
+                    layer, "_tq_kv_mse_shared_boundary", False,
+                ),
+            )
+
+            _maybe_sync_for_profile(kv_cache, attn_metadata.block_tables)
+            t_decode = time.perf_counter()
+            history_k, history_v = tq_decode_history_to_dense(
+                kv_cache,
+                attn_metadata.block_tables,
+                old_seq_lens_list,
+                layer._tq_k_codebook,
+                layer._tq_v_codebook,
+                layer._tq_k_rot_t,
+                layer._tq_k_qjl_proj,
+                layer._tq_v_rot_t,
+                k_variant=getattr(layer, "tq_k_variant", "prod"),
+                k_total_bits=int(layer.tq_k_total_bits),
+                k_stage1_bits=int(layer.tq_k_stage1_bits),
+                v_bits=int(layer.tq_v_stage1_bits),
+                head_dim=self.head_size,
+                target_dtype=query.dtype,
+            )
+            _maybe_sync_for_profile(history_k, history_v)
+            _record_tq_profile(
+                "turboquant_fused_kv_update_attention.decode.decode_history",
+                (time.perf_counter() - t_decode) * 1000.0,
+                vectors=sum(old_seq_lens_list) * self.num_kv_heads,
+            )
+
+            key_chunks: list[torch.Tensor] = []
+            value_chunks: list[torch.Tensor] = []
+            hist_cursor = 0
+            for q_start, q_end, old_len in zip(
+                q_starts,
+                q_ends,
+                old_seq_lens_list,
+            ):
+                if old_len > 0:
+                    key_chunks.append(history_k[hist_cursor:hist_cursor + old_len])
+                    value_chunks.append(history_v[hist_cursor:hist_cursor + old_len])
+                    hist_cursor += old_len
+                if q_end > q_start:
+                    key_chunks.append(key[q_start:q_end].to(query.dtype))
+                    value_chunks.append(value[q_start:q_end].to(query.dtype))
+
+            dense_k = torch.cat(key_chunks, dim=0).contiguous()
+            dense_v = torch.cat(value_chunks, dim=0).contiguous()
+            actual_seq_lengths_kv = []
+            running_kv_len = 0
+            for old_len, cur_len in zip(old_seq_lens_list, current_lens_list):
+                running_kv_len += old_len + cur_len
+                actual_seq_lengths_kv.append(running_kv_len)
+
+            output = self._run_dense_fia(
+                query[:num_tokens],
+                dense_k,
+                dense_v,
+                attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv,
+                attn_metadata,
+                output,
+                profile_name=(
+                    "turboquant_fused_kv_update_attention."
+                    "decode.run_dense_fia"
                 ),
             )
             _maybe_sync_for_profile(output)

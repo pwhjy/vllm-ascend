@@ -38,8 +38,8 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 from .dequant import (
     build_token_map_from_block_table,
     custom_strict_enabled,
-    tq_dequant_mse_paged_reference_rot,
-    tq_dequant_prod_paged_reference_rot,
+    tq_dequant_mse_paged_rot,
+    tq_dequant_prod_paged_rot,
 )
 
 
@@ -649,7 +649,7 @@ def _decode_history_to_dense(
         )
 
     if k_variant == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
-        k_rot = tq_dequant_prod_paged_reference_rot(
+        k_rot = tq_dequant_prod_paged_rot(
             kv_cache["k_idx"],
             kv_cache["k_qjl"],
             kv_cache["k_gamma"],
@@ -663,7 +663,7 @@ def _decode_history_to_dense(
             target_dtype,
         )
     else:
-        k_rot = tq_dequant_mse_paged_reference_rot(
+        k_rot = tq_dequant_mse_paged_rot(
             kv_cache["k_idx"],
             kv_cache["k_norm"],
             token_block_ids,
@@ -674,7 +674,7 @@ def _decode_history_to_dense(
             target_dtype,
         )
 
-    v_rot = tq_dequant_mse_paged_reference_rot(
+    v_rot = tq_dequant_mse_paged_rot(
         kv_cache["v_idx"],
         kv_cache["v_norm"],
         token_block_ids,
@@ -687,6 +687,41 @@ def _decode_history_to_dense(
     dense_k = apply_rotation(k_rot, k_rotation_t.to(device=k_rot.device, dtype=target_dtype))
     dense_v = apply_rotation(v_rot, v_rotation_t.to(device=v_rot.device, dtype=target_dtype))
     return dense_k.contiguous(), dense_v.contiguous()
+
+
+def tq_decode_history_to_dense(
+    kv_cache: dict[str, torch.Tensor],
+    block_table: torch.Tensor,
+    old_seq_lens: torch.Tensor | list[int],
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    k_rotation_t: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    *,
+    k_variant: str,
+    k_total_bits: int,
+    k_stage1_bits: int,
+    v_bits: int,
+    head_dim: int,
+    target_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _decode_history_to_dense(
+        kv_cache,
+        block_table,
+        _to_int_list(old_seq_lens),
+        k_codebook,
+        v_codebook,
+        k_rotation_t,
+        k_qjl_proj,
+        v_rotation_t,
+        k_variant=k_variant,
+        k_total_bits=k_total_bits,
+        k_stage1_bits=k_stage1_bits,
+        v_bits=v_bits,
+        head_dim=head_dim,
+        target_dtype=target_dtype,
+    )
 
 
 def _dense_history_current_attention(
@@ -1110,6 +1145,7 @@ __all__ = [
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
+    "tq_decode_history_to_dense",
     "tq_encode_kv_to_paged_cache",
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
