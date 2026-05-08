@@ -55,6 +55,12 @@ def fused_kv_update_attention_custom_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION", "0") == "1"
 
 
+def encode_cache_update_custom_enabled() -> bool:
+    """Try the Phase-A Ascend C cache-update op before the reference path."""
+
+    return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", "0") == "1"
+
+
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
     return bool(getattr(tensor, "is_npu", False)) or tensor.device.type in {
         "npu",
@@ -109,6 +115,21 @@ def _validate_cache(kv_cache: dict[str, torch.Tensor]) -> None:
     missing = [name for name in required if name not in kv_cache]
     if missing:
         raise KeyError(f"TurboQuant KV cache is missing sidecar tensors: {missing}")
+
+
+def _empty_history_tensors(
+    *,
+    num_kv_heads: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    empty = torch.empty(
+        (0, int(num_kv_heads), int(head_dim)),
+        dtype=dtype,
+        device=device,
+    )
+    return empty, empty
 
 
 def _pack_bits_no_profile(indices: torch.Tensor, bits: int) -> torch.Tensor:
@@ -363,6 +384,127 @@ def tq_encode_kv_to_paged_cache_reference(
     )
 
 
+def tq_encode_kv_to_paged_cache(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: dict[str, torch.Tensor],
+    k_rotation: torch.Tensor,
+    k_codebook: torch.Tensor,
+    k_boundary: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation: torch.Tensor,
+    v_codebook: torch.Tensor,
+    v_boundary: torch.Tensor,
+    *,
+    k_variant: str,
+    k_total_bits: int,
+    k_stage1_bits: int,
+    v_bits: int,
+    num_kv_heads: int | None = None,
+    assume_valid_slots: bool = False,
+    k_qjl_proj_t: torch.Tensor | None = None,
+) -> None:
+    """Dispatch Phase A: encode current K/V and update sidecar cache.
+
+    The custom op is the P6 stepping stone from the final-architecture design.
+    It is intentionally gated separately from the full fused attention op so
+    we can bring up cache update independently, then fold it into the unified
+    serving op once the Ascend C kernel is ready.
+    """
+
+    custom_enabled = encode_cache_update_custom_enabled()
+    if custom_enabled:
+        _maybe_sync_for_profile(key, value, slot_mapping)
+        custom_t0 = time.perf_counter()
+        fallback_reasons: list[str] = []
+        if k_variant != "prod":
+            fallback_reasons.append(f"unsupported K variant: {k_variant}")
+        if not assume_valid_slots:
+            fallback_reasons.append("custom cache update requires valid slots")
+        tensors = (
+            key,
+            value,
+            slot_mapping,
+            kv_cache["k_idx"],
+            kv_cache.get("k_qjl", torch.empty(0, device=key.device, dtype=torch.uint8)),
+            kv_cache.get("k_gamma", torch.empty(0, device=key.device, dtype=torch.float32)),
+            kv_cache["k_norm"],
+            kv_cache["v_idx"],
+            kv_cache["v_norm"],
+            k_rotation,
+            k_boundary,
+            k_codebook,
+            k_qjl_proj_t if k_qjl_proj_t is not None else k_qjl_proj,
+            v_rotation,
+            v_boundary,
+        )
+        if not _custom_op_available("tq_encode_kv_to_paged_cache", *tensors):
+            fallback_reasons.append("torch.ops._C_ascend.tq_encode_kv_to_paged_cache is unavailable")
+
+        if not fallback_reasons:
+            try:
+                torch.ops._C_ascend.tq_encode_kv_to_paged_cache(
+                    key.to(torch.float32).contiguous(),
+                    value.to(torch.float32).contiguous(),
+                    slot_mapping.contiguous(),
+                    kv_cache["k_idx"],
+                    kv_cache.get("k_qjl", torch.empty(0, device=key.device, dtype=torch.uint8)),
+                    kv_cache.get("k_gamma", torch.empty(0, device=key.device, dtype=torch.float32)),
+                    kv_cache["k_norm"],
+                    kv_cache["v_idx"],
+                    kv_cache["v_norm"],
+                    k_rotation.contiguous(),
+                    k_boundary.contiguous(),
+                    k_codebook.contiguous(),
+                    (k_qjl_proj_t if k_qjl_proj_t is not None else k_qjl_proj.transpose(0, 1)).contiguous(),
+                    v_rotation.contiguous(),
+                    v_boundary.contiguous(),
+                    int(k_total_bits),
+                    int(k_stage1_bits),
+                    int(v_bits),
+                    int(key.shape[-1]),
+                )
+                _maybe_sync_for_profile(kv_cache)
+                _record_tq_profile(
+                    "turboquant_encode_cache_update.total",
+                    (time.perf_counter() - custom_t0) * 1000.0,
+                    vectors=int(slot_mapping.numel()) * int(key.shape[1]),
+                )
+                return
+            except Exception:
+                if custom_strict_enabled():
+                    raise
+                fallback_reasons.append("custom cache update call failed")
+
+        if custom_strict_enabled():
+            raise RuntimeError(
+                "TurboQuant encode cache-update custom op fallback: "
+                + "; ".join(fallback_reasons)
+            )
+
+    return tq_encode_kv_to_paged_cache_reference(
+        key,
+        value,
+        slot_mapping,
+        kv_cache,
+        k_rotation,
+        k_codebook,
+        k_boundary,
+        k_qjl_proj,
+        v_rotation,
+        v_codebook,
+        v_boundary,
+        k_variant=k_variant,
+        k_total_bits=k_total_bits,
+        k_stage1_bits=k_stage1_bits,
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+        assume_valid_slots=assume_valid_slots,
+        k_qjl_proj_t=k_qjl_proj_t,
+    )
+
+
 def _decode_history_to_dense(
     kv_cache: dict[str, torch.Tensor],
     block_table: torch.Tensor,
@@ -380,6 +522,14 @@ def _decode_history_to_dense(
     head_dim: int,
     target_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if not any(int(seq_len) > 0 for seq_len in old_seq_lens):
+        return _empty_history_tensors(
+            num_kv_heads=int(kv_cache["k_idx"].shape[2]),
+            head_dim=int(head_dim),
+            dtype=target_dtype,
+            device=block_table.device,
+        )
+
     block_size = int(kv_cache["k_idx"].shape[1])
     token_block_ids, token_offsets = build_token_map_from_block_table(
         block_table,
@@ -387,13 +537,12 @@ def _decode_history_to_dense(
         block_size,
     )
     if token_block_ids.numel() == 0:
-        num_kv_heads = int(kv_cache["k_idx"].shape[2])
-        empty = torch.empty(
-            (0, num_kv_heads, head_dim),
+        return _empty_history_tensors(
+            num_kv_heads=int(kv_cache["k_idx"].shape[2]),
+            head_dim=int(head_dim),
             dtype=target_dtype,
             device=block_table.device,
         )
-        return empty, empty
 
     if k_variant == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
         k_rot = tq_dequant_prod_paged_reference_rot(
@@ -554,7 +703,7 @@ def tq_fused_kv_update_attention_reference(
     _maybe_sync_for_profile(query, key, value, block_table, slot_mapping)
     t0 = time.perf_counter()
 
-    tq_encode_kv_to_paged_cache_reference(
+    tq_encode_kv_to_paged_cache(
         key,
         value,
         slot_mapping,
@@ -772,9 +921,11 @@ def tq_fused_kv_update_attention(
 
 __all__ = [
     "current_lengths_from_start_loc",
+    "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
+    "tq_encode_kv_to_paged_cache",
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",

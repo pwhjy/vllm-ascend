@@ -2,6 +2,7 @@ import torch
 
 from vllm_ascend.ops.turboquant.fused import (
     old_seq_lens_from_total,
+    tq_encode_kv_to_paged_cache,
     tq_encode_kv_to_paged_cache_reference,
     tq_fused_kv_update_attention_reference,
 )
@@ -190,6 +191,61 @@ def test_encode_kv_to_paged_cache_ignores_padding_slots():
     assert torch.allclose(_flat(cache["v_norm"], num_kv_heads)[valid_slots], encoded_v["norm"])
     assert torch.count_nonzero(_flat(cache["k_idx"], num_kv_heads)[-1]) == 0
     assert torch.count_nonzero(_flat(cache["v_idx"], num_kv_heads)[-1]) == 0
+
+
+def test_encode_kv_to_paged_cache_dispatch_falls_back_to_reference(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", raising=False)
+    torch.manual_seed(4)
+    head_dim = 8
+    num_kv_heads = 2
+    k_total_bits = 3
+    v_bits = 2
+    params = _make_params(head_dim, k_total_bits, v_bits)
+    cache = _make_sidecar_cache(2, 4, num_kv_heads, head_dim, k_total_bits, v_bits)
+    ref_cache = _make_sidecar_cache(2, 4, num_kv_heads, head_dim, k_total_bits, v_bits)
+    key = torch.randn(3, num_kv_heads, head_dim)
+    value = torch.randn(3, num_kv_heads, head_dim)
+    slots = torch.tensor([0, 3, 5], dtype=torch.int64)
+
+    tq_encode_kv_to_paged_cache(
+        key,
+        value,
+        slots,
+        cache,
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+    )
+    tq_encode_kv_to_paged_cache_reference(
+        key,
+        value,
+        slots,
+        ref_cache,
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+    )
+
+    for name, tensor in cache.items():
+        assert torch.equal(tensor, ref_cache[name])
 
 
 def test_fused_kv_update_attention_uses_dense_current_chunk_and_updates_cache():

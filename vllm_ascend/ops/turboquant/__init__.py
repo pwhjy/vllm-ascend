@@ -25,9 +25,11 @@ from .dequant import (
 )
 from .fused import (
     current_lengths_from_start_loc,
+    encode_cache_update_custom_enabled,
     fused_kv_update_attention_custom_enabled,
     fused_kv_update_attention_enabled,
     old_seq_lens_from_total,
+    tq_encode_kv_to_paged_cache,
     tq_encode_kv_to_paged_cache_reference,
     tq_fused_kv_update_attention,
     tq_fused_kv_update_attention_reference,
@@ -50,9 +52,11 @@ __all__ = [
     "tq_dequant_prod_paged_reference_rot",
     "tq_dequant_prod_paged_rot",
     "current_lengths_from_start_loc",
+    "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
+    "tq_encode_kv_to_paged_cache",
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",
