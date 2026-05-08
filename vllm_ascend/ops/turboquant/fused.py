@@ -41,6 +41,7 @@ from .dequant import (
     tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_reference_rot,
     tq_dequant_prod_paged_k_score,
+    tq_dequant_prod_paged_k_score_reference,
     tq_dequant_prod_paged_reference_rot,
 )
 
@@ -73,6 +74,15 @@ def compressed_decode_current_enabled() -> bool:
     """Use compressed-history scores plus dense-current V for decode."""
 
     return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "1") == "1"
+
+
+def compressed_decode_current_custom_k_score_enabled() -> bool:
+    """Use custom compressed K-score inside the decode-current path."""
+
+    return (
+        os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE", "0")
+        == "1"
+    )
 
 
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
@@ -794,7 +804,12 @@ def tq_prod_mse_history_current_decode_attention(
         if profile_prefix is not None:
             _maybe_sync_for_profile(query_f, block_table)
             t_stage = time.perf_counter()
-        history_scores = tq_dequant_prod_paged_k_score(
+        k_score_fn = (
+            tq_dequant_prod_paged_k_score
+            if compressed_decode_current_custom_k_score_enabled()
+            else tq_dequant_prod_paged_k_score_reference
+        )
+        history_scores = k_score_fn(
             query_f,
             kv_cache["k_idx"],
             kv_cache["k_qjl"],
@@ -1321,6 +1336,7 @@ def tq_fused_kv_update_attention(
 __all__ = [
     "current_lengths_from_start_loc",
     "combined_kv_mse_encode_enabled",
+    "compressed_decode_current_custom_k_score_enabled",
     "compressed_decode_current_enabled",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
