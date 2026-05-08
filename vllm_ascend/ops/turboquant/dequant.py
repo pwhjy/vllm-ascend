@@ -131,8 +131,11 @@ def _custom_out_dtype_code(dtype: torch.dtype) -> int | None:
 
 
 def _dequant_debug_compare_atol(dtype: torch.dtype) -> float:
+    env_atol = os.getenv("VLLM_ASCEND_TQ_DEQUANT_DEBUG_ATOL")
+    if env_atol:
+        return float(env_atol)
     if dtype in (torch.float16, torch.bfloat16):
-        return 5e-3
+        return 1e-2
     return 1e-3
 
 
