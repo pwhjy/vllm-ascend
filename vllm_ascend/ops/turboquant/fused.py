@@ -85,6 +85,17 @@ def compressed_decode_current_custom_k_score_enabled() -> bool:
     )
 
 
+def decode_compressed_full_cache_enabled() -> bool:
+    """Use compressed full-cache attention after Phase-A cache update.
+
+    This is a performance A/B path. It is safe as separate kernel launches, but
+    differs from the final architecture because the current token is read back
+    from compressed cache instead of participating as dense K/V.
+    """
+
+    return os.getenv("VLLM_ASCEND_TQ_USE_DECODE_COMPRESSED_FULL_CACHE", "0") == "1"
+
+
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
     return bool(getattr(tensor, "is_npu", False)) or tensor.device.type in {
         "npu",
@@ -1338,6 +1349,7 @@ __all__ = [
     "combined_kv_mse_encode_enabled",
     "compressed_decode_current_custom_k_score_enabled",
     "compressed_decode_current_enabled",
+    "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",

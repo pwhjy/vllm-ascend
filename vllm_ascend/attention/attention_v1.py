@@ -71,6 +71,7 @@ from vllm_ascend.ops.turboquant.dequant import (
 )
 from vllm_ascend.ops.turboquant.fused import (
     compressed_decode_current_enabled,
+    decode_compressed_full_cache_enabled,
     fused_kv_update_attention_enabled,
     tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
@@ -2236,6 +2237,46 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
             )
+
+            if (
+                decode_compressed_full_cache_enabled()
+                and fused_attention_custom_enabled()
+                and bool(attn_metadata.causal)
+                and getattr(layer, "tq_k_variant", "prod") == "prod"
+                and "k_qjl" in kv_cache
+                and "k_gamma" in kv_cache
+                and all(cur_len == 1 for cur_len in current_lens_list)
+            ):
+                try:
+                    t_compressed_full = time.perf_counter()
+                    output = self._run_turboquant_fused_decode_attention(
+                        query,
+                        kv_cache,
+                        attn_metadata.block_tables,
+                        attn_metadata.seq_lens_list,
+                        output,
+                        layer,
+                    )
+                    _record_tq_profile(
+                        (
+                            "turboquant_fused_kv_update_attention."
+                            "decode.compressed_full_cache.total"
+                        ),
+                        (time.perf_counter() - t_compressed_full) * 1000.0,
+                        vectors=num_tokens,
+                    )
+                    _record_tq_profile(
+                        "turboquant_fused_kv_update_attention.forward",
+                        (time.perf_counter() - t0) * 1000.0,
+                        vectors=num_tokens,
+                    )
+                    return output
+                except Exception:
+                    if (
+                        os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+                        or attention_debug_compare_enabled()
+                    ):
+                        raise
 
             if (
                 compressed_decode_current_enabled()
