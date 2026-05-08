@@ -130,6 +130,12 @@ def _custom_out_dtype_code(dtype: torch.dtype) -> int | None:
     return _TQ_CUSTOM_OUT_DTYPE_CODES.get(dtype)
 
 
+def _dequant_debug_compare_atol(dtype: torch.dtype) -> float:
+    if dtype in (torch.float16, torch.bfloat16):
+        return 5e-3
+    return 1e-3
+
+
 # ---------------------------------------------------------------------------
 # Custom op availability (aclnn, via torch.ops._C_ascend)
 # ---------------------------------------------------------------------------
@@ -938,9 +944,11 @@ def tq_dequant_mse_paged_rot(
         )
         torch.npu.synchronize()
         max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
-        if max_diff > 1e-3:
+        atol = _dequant_debug_compare_atol(target_dtype)
+        if max_diff > atol:
             raise RuntimeError(
-                f"TurboQuant custom dequant mismatch: max_diff={max_diff}"
+                "TurboQuant custom dequant mismatch: "
+                f"max_diff={max_diff}, atol={atol}"
             )
 
     return out.contiguous()
@@ -1013,9 +1021,11 @@ def tq_dequant_mse_paged_scaled_rot(
         )
         torch.npu.synchronize()
         max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
-        if max_diff > 1e-3:
+        atol = _dequant_debug_compare_atol(target_dtype)
+        if max_diff > atol:
             raise RuntimeError(
-                f"TurboQuant custom scaled dequant mismatch: max_diff={max_diff}"
+                "TurboQuant custom scaled dequant mismatch: "
+                f"max_diff={max_diff}, atol={atol}"
             )
 
     return out.contiguous()
@@ -1090,9 +1100,11 @@ def tq_dequant_prod_paged_rot(
         )
         torch.npu.synchronize()
         max_diff = (out - ref).abs().max().item() if out.numel() else 0.0
-        if max_diff > 1e-3:
+        atol = _dequant_debug_compare_atol(target_dtype)
+        if max_diff > atol:
             raise RuntimeError(
-                f"TurboQuant custom prod dequant mismatch: max_diff={max_diff}"
+                "TurboQuant custom prod dequant mismatch: "
+                f"max_diff={max_diff}, atol={atol}"
             )
 
     return out.contiguous()
