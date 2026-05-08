@@ -25,6 +25,7 @@ from .dequant import (
 )
 from .fused import (
     combined_kv_mse_encode_enabled,
+    compressed_decode_current_enabled,
     current_lengths_from_start_loc,
     encode_cache_update_custom_enabled,
     fused_kv_update_attention_custom_enabled,
@@ -35,6 +36,7 @@ from .fused import (
     tq_encode_kv_to_paged_cache_reference,
     tq_fused_kv_update_attention,
     tq_fused_kv_update_attention_reference,
+    tq_prod_mse_history_current_decode_attention,
 )
 
 __all__ = [
@@ -54,6 +56,7 @@ __all__ = [
     "tq_dequant_prod_paged_reference_rot",
     "tq_dequant_prod_paged_rot",
     "combined_kv_mse_encode_enabled",
+    "compressed_decode_current_enabled",
     "current_lengths_from_start_loc",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
@@ -64,4 +67,5 @@ __all__ = [
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",
+    "tq_prod_mse_history_current_decode_attention",
 ]

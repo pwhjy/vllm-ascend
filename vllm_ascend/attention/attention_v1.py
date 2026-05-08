@@ -70,10 +70,12 @@ from vllm_ascend.ops.turboquant.dequant import (
     tq_dequant_mse_paged_scaled_rot,
 )
 from vllm_ascend.ops.turboquant.fused import (
+    compressed_decode_current_enabled,
     fused_kv_update_attention_enabled,
     tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
     tq_fused_kv_update_attention,
+    tq_prod_mse_history_current_decode_attention,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
@@ -2234,6 +2236,63 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
             )
+
+            if (
+                compressed_decode_current_enabled()
+                and bool(attn_metadata.causal)
+                and getattr(layer, "tq_k_variant", "prod") == "prod"
+                and "k_qjl" in kv_cache
+                and "k_gamma" in kv_cache
+                and all(cur_len == 1 for cur_len in current_lens_list)
+            ):
+                try:
+                    _maybe_sync_for_profile(query, key, value, kv_cache)
+                    t_compressed = time.perf_counter()
+                    compressed_out = tq_prod_mse_history_current_decode_attention(
+                        query[:num_tokens],
+                        key[:num_tokens],
+                        value[:num_tokens],
+                        kv_cache,
+                        attn_metadata.block_tables,
+                        old_seq_lens_list,
+                        layer._tq_k_codebook,
+                        layer._tq_v_codebook,
+                        layer._tq_k_rot,
+                        layer._tq_k_qjl_proj,
+                        layer._tq_v_rot_t,
+                        k_total_bits=int(layer.tq_k_total_bits),
+                        v_bits=int(layer.tq_v_stage1_bits),
+                        head_dim=self.head_size,
+                        scale=self.scale,
+                        score_dtype=torch.float32,
+                        output_dtype=output.dtype,
+                        profile_prefix=(
+                            "turboquant_fused_kv_update_attention."
+                            "decode.compressed"
+                        ),
+                    )
+                    output[:num_tokens] = compressed_out.to(dtype=output.dtype)
+                    _maybe_sync_for_profile(output)
+                    _record_tq_profile(
+                        (
+                            "turboquant_fused_kv_update_attention."
+                            "decode.compressed.total"
+                        ),
+                        (time.perf_counter() - t_compressed) * 1000.0,
+                        vectors=num_tokens,
+                    )
+                    _record_tq_profile(
+                        "turboquant_fused_kv_update_attention.forward",
+                        (time.perf_counter() - t0) * 1000.0,
+                        vectors=num_tokens,
+                    )
+                    return output
+                except Exception:
+                    if (
+                        os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+                        or attention_debug_compare_enabled()
+                    ):
+                        raise
 
             _maybe_sync_for_profile(kv_cache, attn_metadata.block_tables)
             t_decode = time.perf_counter()

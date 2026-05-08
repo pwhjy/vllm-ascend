@@ -2,9 +2,11 @@ import torch
 
 from vllm_ascend.ops.turboquant.fused import (
     old_seq_lens_from_total,
+    tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
     tq_encode_kv_to_paged_cache_reference,
     tq_fused_kv_update_attention_reference,
+    tq_prod_mse_history_current_decode_attention,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import (
     get_stage1_bits,
@@ -460,5 +462,111 @@ def test_fused_kv_update_attention_single_token_decode_matches_dense_reference()
     expanded_v = all_v.repeat_interleave(q_per_kv, dim=1)
     scores = torch.einsum("qhd,shd->qhs", query, expanded_k) / (head_dim**0.5)
     ref = torch.einsum("qhs,shd->qhd", torch.softmax(scores, dim=-1), expanded_v)
+
+    assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+
+def test_compressed_history_current_decode_attention_matches_dense_reference():
+    torch.manual_seed(6)
+    head_dim = 16
+    num_heads = 4
+    num_kv_heads = 2
+    q_per_kv = num_heads // num_kv_heads
+    k_total_bits = 3
+    v_bits = 2
+    params = _make_params(head_dim, k_total_bits, v_bits)
+    cache = _make_sidecar_cache(2, 4, num_kv_heads, head_dim, k_total_bits, v_bits)
+
+    history_key = torch.randn(3, num_kv_heads, head_dim)
+    history_value = torch.randn(3, num_kv_heads, head_dim)
+    current_key = torch.randn(2, num_kv_heads, head_dim)
+    current_value = torch.randn(2, num_kv_heads, head_dim)
+    query = torch.randn(2, num_heads, head_dim)
+    block_table = torch.tensor([[0], [1]], dtype=torch.int32)
+    old_seq_lens = [2, 1]
+
+    tq_encode_kv_to_paged_cache_reference(
+        history_key,
+        history_value,
+        torch.tensor([0, 1, 4], dtype=torch.int64),
+        cache,
+        params["k_rotation"],
+        params["k_codebook"],
+        params["k_boundary"],
+        params["k_qjl_proj"],
+        params["v_rotation"],
+        params["v_codebook"],
+        params["v_boundary"],
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        num_kv_heads=num_kv_heads,
+    )
+
+    out = tq_prod_mse_history_current_decode_attention(
+        query,
+        current_key,
+        current_value,
+        cache,
+        block_table,
+        old_seq_lens,
+        params["k_codebook"],
+        params["v_codebook"],
+        params["k_rotation"],
+        params["k_qjl_proj"],
+        params["v_rotation"].transpose(0, 1).contiguous(),
+        k_total_bits=k_total_bits,
+        v_bits=v_bits,
+        head_dim=head_dim,
+        scale=1.0 / (head_dim**0.5),
+    )
+
+    hist_k, hist_v = tq_decode_history_to_dense(
+        cache,
+        block_table,
+        old_seq_lens,
+        params["k_codebook"],
+        params["v_codebook"],
+        params["k_rotation"].transpose(0, 1).contiguous(),
+        params["k_qjl_proj"],
+        params["v_rotation"].transpose(0, 1).contiguous(),
+        k_variant="prod",
+        k_total_bits=k_total_bits,
+        k_stage1_bits=params["k_stage1_bits"],
+        v_bits=v_bits,
+        head_dim=head_dim,
+        target_dtype=torch.float32,
+    )
+
+    ref = torch.empty_like(out)
+    hist_cursor = 0
+    for batch_idx, old_len in enumerate(old_seq_lens):
+        all_k = torch.cat(
+            [
+                hist_k[hist_cursor:hist_cursor + old_len],
+                current_key[batch_idx:batch_idx + 1],
+            ],
+            dim=0,
+        )
+        all_v = torch.cat(
+            [
+                hist_v[hist_cursor:hist_cursor + old_len],
+                current_value[batch_idx:batch_idx + 1],
+            ],
+            dim=0,
+        )
+        hist_cursor += old_len
+        expanded_k = all_k.repeat_interleave(q_per_kv, dim=1)
+        expanded_v = all_v.repeat_interleave(q_per_kv, dim=1)
+        scores = (
+            torch.einsum("hd,shd->hs", query[batch_idx], expanded_k)
+            / (head_dim**0.5)
+        )
+        ref[batch_idx] = torch.einsum(
+            "hs,shd->hd",
+            torch.softmax(scores, dim=-1),
+            expanded_v,
+        )
 
     assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)

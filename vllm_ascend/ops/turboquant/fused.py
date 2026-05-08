@@ -36,10 +36,11 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 )
 
 from .dequant import (
-    build_token_map_from_block_table,
+    cached_token_map_from_block_table,
     custom_strict_enabled,
     tq_dequant_mse_paged_rot,
     tq_dequant_mse_paged_reference_rot,
+    tq_dequant_prod_paged_k_score,
     tq_dequant_prod_paged_reference_rot,
 )
 
@@ -66,6 +67,12 @@ def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
     return os.getenv("VLLM_ASCEND_TQ_COMBINE_KV_MSE_ENCODE", "1") == "1"
+
+
+def compressed_decode_current_enabled() -> bool:
+    """Use compressed-history scores plus dense-current V for decode."""
+
+    return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "1") == "1"
 
 
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
@@ -636,7 +643,7 @@ def _decode_history_to_dense(
         )
 
     block_size = int(kv_cache["k_idx"].shape[1])
-    token_block_ids, token_offsets = build_token_map_from_block_table(
+    token_block_ids, token_offsets = cached_token_map_from_block_table(
         block_table,
         old_seq_lens,
         block_size,
@@ -723,6 +730,178 @@ def tq_decode_history_to_dense(
         head_dim=head_dim,
         target_dtype=target_dtype,
     )
+
+
+def tq_prod_mse_history_current_decode_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: dict[str, torch.Tensor],
+    block_table: torch.Tensor,
+    old_seq_lens: torch.Tensor | list[int],
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    k_rotation: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    *,
+    k_total_bits: int,
+    v_bits: int,
+    head_dim: int,
+    scale: float,
+    score_dtype: torch.dtype = torch.float32,
+    output_dtype: torch.dtype | None = None,
+    profile_prefix: str | None = None,
+) -> torch.Tensor:
+    """Decode-only final-architecture attention without dense historical K.
+
+    Historical K stays compressed and is used only for K-score. Historical V is
+    dequantized, then the dense current K/V is appended logically in the
+    softmax domain. This is equivalent to dense attention over
+    ``compressed history + dense current`` for one current token per request.
+    """
+
+    _validate_cache(kv_cache)
+    if "k_qjl" not in kv_cache or "k_gamma" not in kv_cache:
+        raise ValueError("prod K decode requires k_qjl and k_gamma sidecar cache")
+
+    old_seq_lens_list = _to_int_list(old_seq_lens)
+    batch = len(old_seq_lens_list)
+    if batch == 0:
+        return torch.empty(
+            (0, int(query.shape[1]), int(head_dim)),
+            dtype=output_dtype or score_dtype,
+            device=query.device,
+        )
+    if (
+        int(query.shape[0]) < batch
+        or int(key.shape[0]) < batch
+        or int(value.shape[0]) < batch
+    ):
+        raise ValueError("Decode compressed-current path expects one current token per request")
+
+    num_heads = int(query.shape[1])
+    num_kv_heads = int(kv_cache["k_idx"].shape[2])
+    if num_heads % num_kv_heads != 0:
+        raise ValueError("num_heads must be divisible by num_kv_heads")
+    q_per_kv = num_heads // num_kv_heads
+    max_old_len = max(old_seq_lens_list, default=0)
+    query_f = query[:batch].to(score_dtype)
+    key_f = key[:batch].to(score_dtype)
+    value_f = value[:batch].to(score_dtype)
+
+    if max_old_len > 0:
+        if profile_prefix is not None:
+            _maybe_sync_for_profile(query_f, block_table)
+            t_stage = time.perf_counter()
+        history_scores = tq_dequant_prod_paged_k_score(
+            query_f,
+            kv_cache["k_idx"],
+            kv_cache["k_qjl"],
+            kv_cache["k_gamma"],
+            kv_cache["k_norm"],
+            block_table,
+            old_seq_lens_list,
+            k_codebook,
+            k_rotation,
+            k_qjl_proj,
+            int(k_total_bits),
+            int(head_dim),
+            scale=float(scale),
+            max_seq_len=max_old_len,
+            score_dtype=score_dtype,
+        )
+        if profile_prefix is not None:
+            _maybe_sync_for_profile(history_scores)
+            _record_tq_profile(
+                f"{profile_prefix}.compressed_k_score",
+                (time.perf_counter() - t_stage) * 1000.0,
+                vectors=sum(old_seq_lens_list) * num_kv_heads,
+            )
+
+        block_size = int(kv_cache["v_idx"].shape[1])
+        token_block_ids, token_offsets = cached_token_map_from_block_table(
+            block_table,
+            old_seq_lens_list,
+            block_size,
+        )
+        if profile_prefix is not None:
+            _maybe_sync_for_profile(token_block_ids, token_offsets)
+            t_stage = time.perf_counter()
+        history_v_rot = tq_dequant_mse_paged_rot(
+            kv_cache["v_idx"],
+            kv_cache["v_norm"],
+            token_block_ids,
+            token_offsets,
+            v_codebook,
+            int(v_bits),
+            int(head_dim),
+            score_dtype,
+        )
+        history_v = apply_rotation(
+            history_v_rot,
+            v_rotation_t.to(device=query.device, dtype=score_dtype),
+        ).contiguous()
+        if profile_prefix is not None:
+            _maybe_sync_for_profile(history_v)
+            _record_tq_profile(
+                f"{profile_prefix}.decode_v",
+                (time.perf_counter() - t_stage) * 1000.0,
+                vectors=sum(old_seq_lens_list) * num_kv_heads,
+            )
+    else:
+        history_scores = torch.empty(
+            (batch, num_heads, 0),
+            dtype=score_dtype,
+            device=query.device,
+        )
+        history_v = torch.empty(
+            (0, num_kv_heads, int(head_dim)),
+            dtype=score_dtype,
+            device=query.device,
+        )
+
+    if profile_prefix is not None:
+        _maybe_sync_for_profile(query_f, key_f, value_f, history_scores, history_v)
+        t_stage = time.perf_counter()
+    q_group = query_f.reshape(batch, num_kv_heads, q_per_kv, int(head_dim))
+    current_scores = torch.einsum("bkqd,bkd->bkq", q_group, key_f)
+    current_scores = current_scores.reshape(batch, num_heads, 1) * float(scale)
+    scores = torch.cat((history_scores, current_scores), dim=-1)
+    probs = torch.softmax(scores, dim=-1)
+
+    out = torch.empty(
+        (batch, num_heads, int(head_dim)),
+        dtype=score_dtype,
+        device=query.device,
+    )
+    hist_cursor = 0
+    for batch_idx, old_len in enumerate(old_seq_lens_list):
+        prob_group = probs[batch_idx].reshape(num_kv_heads, q_per_kv, -1)
+        cur_out = (
+            prob_group[..., -1].unsqueeze(-1)
+            * value_f[batch_idx].unsqueeze(1)
+        )
+        if old_len > 0:
+            batch_v = history_v[hist_cursor:hist_cursor + old_len]
+            cur_out = cur_out + torch.einsum(
+                "kqs,skd->kqd",
+                prob_group[..., :old_len],
+                batch_v,
+            )
+            hist_cursor += old_len
+        out[batch_idx] = cur_out.reshape(num_heads, int(head_dim))
+
+    if output_dtype is not None:
+        out = out.to(output_dtype)
+    if profile_prefix is not None:
+        _maybe_sync_for_profile(out)
+        _record_tq_profile(
+            f"{profile_prefix}.combine_current",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=batch,
+        )
+    return out.contiguous()
 
 
 def _dense_history_current_attention(
@@ -1142,6 +1321,7 @@ def tq_fused_kv_update_attention(
 __all__ = [
     "current_lengths_from_start_loc",
     "combined_kv_mse_encode_enabled",
+    "compressed_decode_current_enabled",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
@@ -1151,4 +1331,5 @@ __all__ = [
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",
+    "tq_prod_mse_history_current_decode_attention",
 ]
