@@ -1432,7 +1432,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
     """
 
     def _prepare_turboquant_runtime(self, layer: AttentionLayer, device: torch.device) -> None:
-        if getattr(layer, "tq_runtime_prepared", False) and hasattr(layer, "_tq_k_qjl_proj_t"):
+        if (
+            getattr(layer, "tq_runtime_prepared", False)
+            and hasattr(layer, "_tq_k_qjl_proj_t")
+            and hasattr(layer, "_tq_kv_mse_rotation")
+            and hasattr(layer, "_tq_kv_mse_shared_boundary")
+        ):
             return
         target_dtype = getattr(layer, "tq_scalar_dtype", torch.float32)
         layer._tq_k_codebook = layer.k_codebook.data.to(device=device, dtype=target_dtype)
@@ -1448,6 +1453,21 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         layer._tq_k_qjl_query_matrix = (
             layer._tq_k_rot @ layer._tq_k_qjl_proj_t
         ).contiguous()
+        if (
+            layer._tq_k_rot.shape == layer._tq_v_rot.shape
+            and int(layer.tq_k_stage1_bits) == int(layer.tq_v_stage1_bits)
+        ):
+            layer._tq_kv_mse_shared_boundary = bool(
+                layer.k_boundary.shape == layer.v_boundary.shape
+                and torch.equal(layer.k_boundary.data, layer.v_boundary.data)
+            )
+            layer._tq_kv_mse_rotation = torch.stack(
+                (layer.k_rot.data, layer.v_rot.data),
+                dim=0,
+            ).to(device=device, dtype=target_dtype).contiguous()
+        else:
+            layer._tq_kv_mse_shared_boundary = False
+            layer._tq_kv_mse_rotation = None
         layer._tq_qjl_codebook = torch.tensor(
             [-1.0, 1.0],
             dtype=torch.float32,
@@ -2159,6 +2179,10 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             causal=bool(attn_metadata.causal),
             output_dtype=output.dtype,
             mode=state_to_mode.get(attn_metadata.attn_state, 1),
+            kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
+            kv_mse_shared_boundary=getattr(
+                layer, "_tq_kv_mse_shared_boundary", False,
+            ),
         )
         output[:num_tokens] = fused_out.to(dtype=output.dtype)
         _maybe_sync_for_profile(output)

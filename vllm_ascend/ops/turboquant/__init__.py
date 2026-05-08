@@ -24,6 +24,7 @@ from .dequant import (
     tq_dequant_prod_paged_rot,
 )
 from .fused import (
+    combined_kv_mse_encode_enabled,
     current_lengths_from_start_loc,
     encode_cache_update_custom_enabled,
     fused_kv_update_attention_custom_enabled,
@@ -51,6 +52,7 @@ __all__ = [
     "tq_dequant_prod_paged_k_score_reference",
     "tq_dequant_prod_paged_reference_rot",
     "tq_dequant_prod_paged_rot",
+    "combined_kv_mse_encode_enabled",
     "current_lengths_from_start_loc",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",

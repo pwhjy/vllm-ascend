@@ -61,6 +61,12 @@ def encode_cache_update_custom_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", "0") == "1"
 
 
+def combined_kv_mse_encode_enabled() -> bool:
+    """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
+
+    return os.getenv("VLLM_ASCEND_TQ_COMBINE_KV_MSE_ENCODE", "1") == "1"
+
+
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
     return bool(getattr(tensor, "is_npu", False)) or tensor.device.type in {
         "npu",
@@ -279,6 +285,72 @@ def _encode_prod_cache_no_profile(
     }
 
 
+def _can_combine_kv_mse_encode(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    k_boundary: torch.Tensor,
+    k_codebook: torch.Tensor,
+    v_boundary: torch.Tensor,
+    v_codebook: torch.Tensor,
+    *,
+    k_variant: str,
+    k_stage1_bits: int,
+    v_bits: int,
+    kv_mse_rotation: torch.Tensor | None,
+    kv_mse_shared_boundary: bool,
+) -> bool:
+    return (
+        combined_kv_mse_encode_enabled()
+        and _is_npu_tensor(key)
+        and k_variant == "prod"
+        and int(k_stage1_bits) == int(v_bits)
+        and kv_mse_rotation is not None
+        and bool(kv_mse_shared_boundary)
+        and key.shape == value.shape
+        and k_boundary.shape == v_boundary.shape
+        and k_codebook.shape == v_codebook.shape
+    )
+
+
+def _encode_prod_k_mse_v_cache_no_profile(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_mse_rotation: torch.Tensor,
+    codebook: torch.Tensor,
+    boundary: torch.Tensor,
+    qjl_proj: torch.Tensor,
+    total_bits: int,
+    *,
+    qjl_proj_t: torch.Tensor | None = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    stage1_bits = get_stage1_bits(total_bits, "prod")
+    kv = torch.stack((key, value), dim=0)
+    norm = torch.clamp(kv.norm(dim=-1, keepdim=True), min=1e-6)
+    flat = (kv / norm).reshape(2, -1, key.shape[-1])
+    kv_rot = torch.bmm(flat, kv_mse_rotation).reshape(2, *key.shape)
+    idx = _encode_scalar_with_boundary_no_profile(kv_rot, boundary)
+    packed = _pack_bits_no_profile(idx, stage1_bits)
+
+    key_rot = kv_rot[0]
+    key_idx = idx[0]
+    residual = key_rot - codebook[key_idx.long()].to(key.dtype)
+    gamma = residual.norm(dim=-1, keepdim=True).to(torch.float32)
+    qjl_rotation = qjl_proj_t if qjl_proj_t is not None else qjl_proj.transpose(0, 1)
+    qjl_sign = (apply_rotation(residual, qjl_rotation) >= 0).to(torch.uint8)
+
+    encoded_k = {
+        "idx": packed[0].contiguous(),
+        "qjl": _pack_bits_no_profile(qjl_sign, 1),
+        "gamma": gamma,
+        "norm": norm[0].to(torch.float32),
+    }
+    encoded_v = {
+        "idx": packed[1].contiguous(),
+        "norm": norm[1].to(torch.float32),
+    }
+    return encoded_k, encoded_v
+
+
 def tq_encode_kv_to_paged_cache_reference(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -299,6 +371,8 @@ def tq_encode_kv_to_paged_cache_reference(
     num_kv_heads: int | None = None,
     assume_valid_slots: bool = False,
     k_qjl_proj_t: torch.Tensor | None = None,
+    kv_mse_rotation: torch.Tensor | None = None,
+    kv_mse_shared_boundary: bool = False,
 ) -> None:
     """Reference fused encode + bit-pack + paged sidecar cache write.
 
@@ -331,36 +405,62 @@ def tq_encode_kv_to_paged_cache_reference(
         actual_key = key[:num_tokens][valid].to(torch.float32)
         actual_value = value[:num_tokens][valid].to(torch.float32)
 
-    if k_variant == "prod":
-        encoded_k = _encode_prod_cache_no_profile(
+    use_combined_kv_mse = _can_combine_kv_mse_encode(
+        actual_key,
+        actual_value,
+        k_boundary,
+        k_codebook,
+        v_boundary,
+        v_codebook,
+        k_variant=k_variant,
+        k_stage1_bits=int(k_stage1_bits),
+        v_bits=int(v_bits),
+        kv_mse_rotation=kv_mse_rotation,
+        kv_mse_shared_boundary=kv_mse_shared_boundary,
+    )
+    if use_combined_kv_mse:
+        assert kv_mse_rotation is not None
+        encoded_k, encoded_v = _encode_prod_k_mse_v_cache_no_profile(
             actual_key,
-            k_rotation,
+            actual_value,
+            kv_mse_rotation,
             k_codebook,
             k_boundary,
             k_qjl_proj,
             int(k_total_bits),
             qjl_proj_t=k_qjl_proj_t,
         )
-    elif k_variant == "mse":
-        encoded_k = _encode_mse_cache_no_profile(
-            actual_key,
-            k_rotation,
-            k_codebook,
-            k_boundary,
-            int(k_stage1_bits),
+    else:
+        if k_variant == "prod":
+            encoded_k = _encode_prod_cache_no_profile(
+                actual_key,
+                k_rotation,
+                k_codebook,
+                k_boundary,
+                k_qjl_proj,
+                int(k_total_bits),
+                qjl_proj_t=k_qjl_proj_t,
+            )
+        elif k_variant == "mse":
+            encoded_k = _encode_mse_cache_no_profile(
+                actual_key,
+                k_rotation,
+                k_codebook,
+                k_boundary,
+                int(k_stage1_bits),
+                return_rot_and_dequant=False,
+            )
+        else:
+            raise ValueError(f"Unsupported TurboQuant K variant: {k_variant}")
+
+        encoded_v = _encode_mse_cache_no_profile(
+            actual_value,
+            v_rotation,
+            v_codebook,
+            v_boundary,
+            int(v_bits),
             return_rot_and_dequant=False,
         )
-    else:
-        raise ValueError(f"Unsupported TurboQuant K variant: {k_variant}")
-
-    encoded_v = _encode_mse_cache_no_profile(
-        actual_value,
-        v_rotation,
-        v_codebook,
-        v_boundary,
-        int(v_bits),
-        return_rot_and_dequant=False,
-    )
 
     def _write(cache_name: str, encoded: torch.Tensor) -> None:
         cache = kv_cache[cache_name]
@@ -404,6 +504,8 @@ def tq_encode_kv_to_paged_cache(
     num_kv_heads: int | None = None,
     assume_valid_slots: bool = False,
     k_qjl_proj_t: torch.Tensor | None = None,
+    kv_mse_rotation: torch.Tensor | None = None,
+    kv_mse_shared_boundary: bool = False,
 ) -> None:
     """Dispatch Phase A: encode current K/V and update sidecar cache.
 
@@ -502,6 +604,8 @@ def tq_encode_kv_to_paged_cache(
         num_kv_heads=num_kv_heads,
         assume_valid_slots=assume_valid_slots,
         k_qjl_proj_t=k_qjl_proj_t,
+        kv_mse_rotation=kv_mse_rotation,
+        kv_mse_shared_boundary=kv_mse_shared_boundary,
     )
 
 
@@ -690,6 +794,8 @@ def tq_fused_kv_update_attention_reference(
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
     k_qjl_proj_t: torch.Tensor | None = None,
+    kv_mse_rotation: torch.Tensor | None = None,
+    kv_mse_shared_boundary: bool = False,
 ) -> torch.Tensor:
     """Reference implementation for the final unified TurboQuant op.
 
@@ -722,6 +828,8 @@ def tq_fused_kv_update_attention_reference(
         num_kv_heads=int(key.shape[1]),
         assume_valid_slots=True,
         k_qjl_proj_t=k_qjl_proj_t,
+        kv_mse_rotation=kv_mse_rotation,
+        kv_mse_shared_boundary=kv_mse_shared_boundary,
     )
 
     old_seq_lens_list = _to_int_list(old_seq_lens)
@@ -796,6 +904,8 @@ def tq_fused_kv_update_attention(
     score_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype | None = None,
     k_qjl_proj_t: torch.Tensor | None = None,
+    kv_mse_rotation: torch.Tensor | None = None,
+    kv_mse_shared_boundary: bool = False,
     mode: int = 0,
     score_tile_len: int = 64,
 ) -> torch.Tensor:
@@ -916,11 +1026,14 @@ def tq_fused_kv_update_attention(
         score_dtype=score_dtype,
         output_dtype=output_dtype,
         k_qjl_proj_t=k_qjl_proj_t,
+        kv_mse_rotation=kv_mse_rotation,
+        kv_mse_shared_boundary=kv_mse_shared_boundary,
     )
 
 
 __all__ = [
     "current_lengths_from_start_loc",
+    "combined_kv_mse_encode_enabled",
     "encode_cache_update_custom_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
