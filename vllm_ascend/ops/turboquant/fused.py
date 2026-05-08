@@ -38,8 +38,8 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 from .dequant import (
     build_token_map_from_block_table,
     custom_strict_enabled,
-    tq_dequant_mse_paged_rot,
-    tq_dequant_prod_paged_rot,
+    tq_dequant_mse_paged_reference_rot,
+    tq_dequant_prod_paged_reference_rot,
 )
 
 
@@ -649,7 +649,7 @@ def _decode_history_to_dense(
         )
 
     if k_variant == "prod" and "k_qjl" in kv_cache and "k_gamma" in kv_cache:
-        k_rot = tq_dequant_prod_paged_rot(
+        k_rot = tq_dequant_prod_paged_reference_rot(
             kv_cache["k_idx"],
             kv_cache["k_qjl"],
             kv_cache["k_gamma"],
@@ -663,7 +663,7 @@ def _decode_history_to_dense(
             target_dtype,
         )
     else:
-        k_rot = tq_dequant_mse_paged_rot(
+        k_rot = tq_dequant_mse_paged_reference_rot(
             kv_cache["k_idx"],
             kv_cache["k_norm"],
             token_block_ids,
@@ -674,7 +674,7 @@ def _decode_history_to_dense(
             target_dtype,
         )
 
-    v_rot = tq_dequant_mse_paged_rot(
+    v_rot = tq_dequant_mse_paged_reference_rot(
         kv_cache["v_idx"],
         kv_cache["v_norm"],
         token_block_ids,
