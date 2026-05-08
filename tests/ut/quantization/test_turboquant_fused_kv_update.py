@@ -232,7 +232,7 @@ def test_fused_kv_update_attention_uses_dense_current_chunk_and_updates_cache():
     scores = torch.einsum("qhd,shd->qhs", query, expanded_k) / (head_dim**0.5)
     allowed = torch.arange(4).unsqueeze(0)
     current_positions = 2 + torch.arange(2).unsqueeze(1)
-    scores = scores.masked_fill(allowed > current_positions, float("-inf"))
+    scores = scores.masked_fill((allowed > current_positions).unsqueeze(1), float("-inf"))
     ref = torch.einsum("qhs,shd->qhd", torch.softmax(scores, dim=-1), expanded_v)
 
     current_encoded = turboquant_encode_prod(

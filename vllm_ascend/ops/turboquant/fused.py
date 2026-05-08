@@ -346,7 +346,10 @@ def _dense_history_current_attention(
             total_len = old_len + cur_len
             allowed = torch.arange(total_len, device=query.device).unsqueeze(0)
             current_positions = old_len + torch.arange(q_len, device=query.device).unsqueeze(1)
-            scores = scores.masked_fill(allowed > current_positions, float("-inf"))
+            scores = scores.masked_fill(
+                (allowed > current_positions).unsqueeze(1),
+                float("-inf"),
+            )
 
         probs = torch.softmax(scores, dim=-1)
         out[q0:q1] = torch.einsum("qhs,shd->qhd", probs, expanded_v)
