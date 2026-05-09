@@ -655,6 +655,58 @@ at::Tensor tq_dequant_mse_paged_scaled_out_meta(
         packed_idx.options().dtype(scalar_type).device(at::kMeta));
 }
 
+void tq_encode_mse_paged_cache_meta(
+    const at::Tensor& x,
+    const at::Tensor& slot_mapping,
+    const at::Tensor& idx_cache,
+    const at::Tensor& norm_cache,
+    const at::Tensor& rotation,
+    const at::Tensor& boundary,
+    int64_t bits,
+    int64_t head_dim)
+{
+    (void)x;
+    (void)slot_mapping;
+    (void)idx_cache;
+    (void)norm_cache;
+    (void)rotation;
+    (void)boundary;
+    (void)bits;
+    (void)head_dim;
+    return;
+}
+
+void tq_encode_prod_paged_cache_meta(
+    const at::Tensor& x,
+    const at::Tensor& slot_mapping,
+    const at::Tensor& idx_cache,
+    const at::Tensor& qjl_cache,
+    const at::Tensor& gamma_cache,
+    const at::Tensor& norm_cache,
+    const at::Tensor& rotation,
+    const at::Tensor& boundary,
+    const at::Tensor& codebook,
+    const at::Tensor& qjl_proj_t,
+    int64_t total_bits,
+    int64_t stage1_bits,
+    int64_t head_dim)
+{
+    (void)x;
+    (void)slot_mapping;
+    (void)idx_cache;
+    (void)qjl_cache;
+    (void)gamma_cache;
+    (void)norm_cache;
+    (void)rotation;
+    (void)boundary;
+    (void)codebook;
+    (void)qjl_proj_t;
+    (void)total_bits;
+    (void)stage1_bits;
+    (void)head_dim;
+    return;
+}
+
 at::Tensor tq_dequant_prod_paged_meta(
     const at::Tensor& packed_idx,
     const at::Tensor& packed_qjl,
@@ -858,6 +910,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("tq_dequant_mse_paged", &vllm_ascend::meta::tq_dequant_mse_paged_meta);
     ops.impl("tq_dequant_mse_paged_out", &vllm_ascend::meta::tq_dequant_mse_paged_out_meta);
     ops.impl("tq_dequant_mse_paged_scaled_out", &vllm_ascend::meta::tq_dequant_mse_paged_scaled_out_meta);
+    // TurboQuant encode/cache-update milestones
+    ops.impl("tq_encode_mse_paged_cache",
+             &vllm_ascend::meta::tq_encode_mse_paged_cache_meta);
+    ops.impl("tq_encode_prod_paged_cache",
+             &vllm_ascend::meta::tq_encode_prod_paged_cache_meta);
     // TurboQuant prod paged dequant
     ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
     // TurboQuant compressed K-score

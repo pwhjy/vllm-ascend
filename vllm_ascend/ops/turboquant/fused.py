@@ -64,6 +64,16 @@ def encode_cache_update_custom_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", "0") == "1"
 
 
+def encode_cache_update_stage_profile_enabled() -> bool:
+    """Record detailed Phase-A Python fallback timings.
+
+    This adds extra sync points and is intended for diagnosis, not normal
+    throughput measurement.
+    """
+
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES", "0") == "1"
+
+
 def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
@@ -410,10 +420,34 @@ def tq_encode_kv_to_paged_cache_reference(
     the sidecar layout using ``slot_mapping``.
     """
 
+    stage_profile = encode_cache_update_stage_profile_enabled()
+
+    def _stage_start(*objs) -> float:
+        if stage_profile:
+            _maybe_sync_for_profile(*objs)
+            return time.perf_counter()
+        return 0.0
+
+    def _stage_record(
+        name: str,
+        start: float,
+        *objs,
+        vectors: int = 0,
+    ) -> None:
+        if not stage_profile:
+            return
+        _maybe_sync_for_profile(*objs)
+        _record_tq_profile(
+            f"turboquant_encode_cache_update.{name}",
+            (time.perf_counter() - start) * 1000.0,
+            vectors=vectors,
+        )
+
     _validate_cache(kv_cache)
     _maybe_sync_for_profile(key, value, slot_mapping)
     t0 = time.perf_counter()
 
+    t_stage = _stage_start(key, value, slot_mapping)
     slots = slot_mapping.to(device=key.device, dtype=torch.long).reshape(-1)
     if slots.numel() == 0:
         _record_tq_profile("turboquant_encode_cache_update.total", 0.0, vectors=0)
@@ -434,6 +468,16 @@ def tq_encode_kv_to_paged_cache_reference(
         actual_key = key[:num_tokens][valid].to(torch.float32)
         actual_value = value[:num_tokens][valid].to(torch.float32)
 
+    vector_count = int(valid_slots.numel()) * num_kv_heads
+    _stage_record(
+        "prepare",
+        t_stage,
+        actual_key,
+        actual_value,
+        valid_slots,
+        vectors=vector_count,
+    )
+
     use_combined_kv_mse = _can_combine_kv_mse_encode(
         actual_key,
         actual_value,
@@ -449,6 +493,7 @@ def tq_encode_kv_to_paged_cache_reference(
     )
     if use_combined_kv_mse:
         assert kv_mse_rotation is not None
+        t_stage = _stage_start(actual_key, actual_value)
         encoded_k, encoded_v = _encode_prod_k_mse_v_cache_no_profile(
             actual_key,
             actual_value,
@@ -459,7 +504,15 @@ def tq_encode_kv_to_paged_cache_reference(
             int(k_total_bits),
             qjl_proj_t=k_qjl_proj_t,
         )
+        _stage_record(
+            "encode.combined_kv_mse",
+            t_stage,
+            encoded_k,
+            encoded_v,
+            vectors=vector_count,
+        )
     else:
+        t_stage = _stage_start(actual_key)
         if k_variant == "prod":
             encoded_k = _encode_prod_cache_no_profile(
                 actual_key,
@@ -481,7 +534,9 @@ def tq_encode_kv_to_paged_cache_reference(
             )
         else:
             raise ValueError(f"Unsupported TurboQuant K variant: {k_variant}")
+        _stage_record("encode.k", t_stage, encoded_k, vectors=vector_count)
 
+        t_stage = _stage_start(actual_value)
         encoded_v = _encode_mse_cache_no_profile(
             actual_value,
             v_rotation,
@@ -490,12 +545,25 @@ def tq_encode_kv_to_paged_cache_reference(
             int(v_bits),
             return_rot_and_dequant=False,
         )
+        _stage_record("encode.v", t_stage, encoded_v, vectors=vector_count)
 
     def _write(cache_name: str, encoded: torch.Tensor) -> None:
         cache = kv_cache[cache_name]
         flat_cache = cache.view(-1, num_kv_heads, cache.shape[-1])
-        flat_cache.index_copy_(0, valid_slots, encoded.to(flat_cache.dtype))
+        t_write = _stage_start(encoded, flat_cache)
+        update = (
+            encoded if encoded.dtype == flat_cache.dtype
+            else encoded.to(flat_cache.dtype)
+        )
+        flat_cache.index_copy_(0, valid_slots, update)
+        _stage_record(
+            f"write.{cache_name}",
+            t_write,
+            flat_cache,
+            vectors=vector_count,
+        )
 
+    t_stage = _stage_start(kv_cache)
     _write("k_idx", encoded_k["idx"])
     _write("k_norm", encoded_k["norm"])
     _write("v_idx", encoded_v["idx"])
@@ -504,12 +572,13 @@ def tq_encode_kv_to_paged_cache_reference(
         _write("k_qjl", encoded_k["qjl"])
     if "gamma" in encoded_k and "k_gamma" in kv_cache:
         _write("k_gamma", encoded_k["gamma"])
+    _stage_record("write.total", t_stage, kv_cache, vectors=vector_count)
 
     _maybe_sync_for_profile(kv_cache)
     _record_tq_profile(
         "turboquant_encode_cache_update.total",
         (time.perf_counter() - t0) * 1000.0,
-        vectors=int(valid_slots.numel()) * num_kv_heads,
+        vectors=vector_count,
     )
 
 
@@ -607,6 +676,89 @@ def tq_encode_kv_to_paged_cache(
                 if custom_strict_enabled():
                     raise
                 fallback_reasons.append("custom cache update call failed")
+
+        staged_reasons: list[str] = []
+        if k_variant != "prod":
+            staged_reasons.append(f"unsupported K variant: {k_variant}")
+        if not assume_valid_slots:
+            staged_reasons.append("staged cache update requires valid slots")
+        if "k_qjl" not in kv_cache or "k_gamma" not in kv_cache:
+            staged_reasons.append("prod staged cache update requires k_qjl/k_gamma")
+        if (
+            kv_cache.get("k_norm", torch.empty(0)).dtype != torch.float32
+            or kv_cache.get("k_gamma", torch.empty(0)).dtype != torch.float32
+            or kv_cache.get("v_norm", torch.empty(0)).dtype != torch.float32
+        ):
+            staged_reasons.append("staged cache update requires fp32 scalar caches")
+        if int(key.shape[-1]) > 256 or int(value.shape[-1]) > 256:
+            staged_reasons.append("staged cache update supports head_dim <= 256")
+
+        staged_tensors = (
+            key,
+            value,
+            slot_mapping,
+            kv_cache["k_idx"],
+            kv_cache.get("k_qjl", torch.empty(0, device=key.device, dtype=torch.uint8)),
+            kv_cache.get("k_gamma", torch.empty(0, device=key.device, dtype=torch.float32)),
+            kv_cache["k_norm"],
+            kv_cache["v_idx"],
+            kv_cache["v_norm"],
+            k_rotation,
+            k_boundary,
+            k_codebook,
+            k_qjl_proj_t if k_qjl_proj_t is not None else k_qjl_proj,
+            v_rotation,
+            v_boundary,
+        )
+        if not _custom_op_available("tq_encode_prod_paged_cache", *staged_tensors):
+            staged_reasons.append("torch.ops._C_ascend.tq_encode_prod_paged_cache is unavailable")
+        if not _custom_op_available("tq_encode_mse_paged_cache", *staged_tensors):
+            staged_reasons.append("torch.ops._C_ascend.tq_encode_mse_paged_cache is unavailable")
+
+        if not staged_reasons:
+            try:
+                qjl_proj_t = (
+                    k_qjl_proj_t if k_qjl_proj_t is not None
+                    else k_qjl_proj.transpose(0, 1)
+                )
+                torch.ops._C_ascend.tq_encode_prod_paged_cache(
+                    key.contiguous(),
+                    slot_mapping.contiguous(),
+                    kv_cache["k_idx"],
+                    kv_cache["k_qjl"],
+                    kv_cache["k_gamma"],
+                    kv_cache["k_norm"],
+                    k_rotation.contiguous(),
+                    k_boundary.contiguous(),
+                    k_codebook.contiguous(),
+                    qjl_proj_t.contiguous(),
+                    int(k_total_bits),
+                    int(k_stage1_bits),
+                    int(key.shape[-1]),
+                )
+                torch.ops._C_ascend.tq_encode_mse_paged_cache(
+                    value.contiguous(),
+                    slot_mapping.contiguous(),
+                    kv_cache["v_idx"],
+                    kv_cache["v_norm"],
+                    v_rotation.contiguous(),
+                    v_boundary.contiguous(),
+                    int(v_bits),
+                    int(value.shape[-1]),
+                )
+                _maybe_sync_for_profile(kv_cache)
+                _record_tq_profile(
+                    "turboquant_encode_cache_update.total",
+                    (time.perf_counter() - custom_t0) * 1000.0,
+                    vectors=int(slot_mapping.numel()) * int(key.shape[1]),
+                )
+                return
+            except Exception:
+                if custom_strict_enabled():
+                    raise
+                staged_reasons.append("staged custom cache update call failed")
+
+        fallback_reasons.extend(staged_reasons)
 
         if custom_strict_enabled():
             raise RuntimeError(
@@ -1351,6 +1503,7 @@ __all__ = [
     "compressed_decode_current_enabled",
     "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
+    "encode_cache_update_stage_profile_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
