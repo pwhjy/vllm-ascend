@@ -9,7 +9,6 @@
  *   by the staged M2/M3 encode ops before this kernel is launched.
  */
 
-#include <cmath>
 #include "kernel_operator.h"
 
 using namespace AscendC;
@@ -93,6 +92,34 @@ public:
         numCore_ = tiling->numCore;
         scale_ = tiling->scale;
         correction_ = tiling->correction;
+
+        pipe_.InitBuffer(expBuf_, 8U * sizeof(float));
+    }
+
+    __aicore__ inline void SToVSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventId);
+        WaitFlag<HardEvent::S_V>(eventId);
+    }
+
+    __aicore__ inline void VToSSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventId);
+        WaitFlag<HardEvent::V_S>(eventId);
+    }
+
+    __aicore__ inline float ExpScalar(float value)
+    {
+        LocalTensor<float> expLocal = expBuf_.Get<float>();
+        expLocal.SetValue(0, value);
+        SToVSync();
+        Exp(expLocal, expLocal, 1U);
+        VToSSync();
+        return expLocal.GetValue(0);
     }
 
     __aicore__ inline uint64_t CacheIndex(uint32_t b, uint32_t kvHead, uint32_t pos)
@@ -206,8 +233,8 @@ public:
     __aicore__ inline void OnlineAccumulate(float score)
     {
         float newMax = initialized_ && maxScore_ > score ? maxScore_ : score;
-        float oldScale = initialized_ ? exp(maxScore_ - newMax) : 0.0F;
-        float weight = exp(score - newMax);
+        float oldScale = initialized_ ? ExpScalar(maxScore_ - newMax) : 0.0F;
+        float weight = ExpScalar(score - newMax);
         for (uint32_t d = 0; d < headDim_; ++d) {
             accRot_[d] = accRot_[d] * oldScale + weight * vTmp_[d];
         }
@@ -291,6 +318,9 @@ public:
     }
 
 private:
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> expBuf_;
+
     GlobalTensor<float> queryGm_;
     GlobalTensor<float> keyGm_;
     GlobalTensor<float> valueGm_;
