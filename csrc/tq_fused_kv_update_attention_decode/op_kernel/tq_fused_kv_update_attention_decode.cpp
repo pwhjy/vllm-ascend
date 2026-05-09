@@ -3,10 +3,9 @@
  * This file is a part of the vllm-ascend project.
  * Licensed under the Apache License, Version 2.0 (the "License").
  *
- * Decode-only M4 TurboQuant attention:
- *   compressed historical K/V + dense current token, with query transforms and
- *   V inverse rotation inside the kernel. Current K/V cache update is provided
- *   by the staged M2/M3 encode ops before this kernel is launched.
+ * Decode-only M4 TurboQuant fused KV update + attention:
+ *   writes the current K/V sidecar cache for future steps while attention reads
+ *   compressed historical K/V plus the dense current token directly.
  */
 
 #include "kernel_operator.h"
@@ -102,6 +101,7 @@ public:
         correction_ = tiling->correction;
 
         pipe_.InitBuffer(expBuf_, 8U * sizeof(float));
+        LoadSmallParams();
     }
 
     __aicore__ inline void SToVSync()
@@ -208,15 +208,40 @@ public:
         return sum;
     }
 
-    __aicore__ inline uint32_t BoundaryIndex(
-        float x,
-        GlobalTensor<float>& boundary,
-        uint32_t bits)
+    __aicore__ inline void LoadSmallParams()
     {
-        uint32_t levels = (1U << bits) - 1U;
+        uint32_t kLevels = kStage1Bits_ < 4U ? (1U << kStage1Bits_) : 16U;
+        uint32_t vLevels = vBits_ < 4U ? (1U << vBits_) : 16U;
+        for (uint32_t i = 0; i < kLevels; ++i) {
+            kCodebook_[i] = kCodebookGm_.GetValue(i);
+        }
+        for (uint32_t i = 0; i + 1U < kLevels; ++i) {
+            kBoundary_[i] = kBoundaryGm_.GetValue(i);
+        }
+        for (uint32_t i = 0; i < vLevels; ++i) {
+            vCodebook_[i] = vCodebookGm_.GetValue(i);
+        }
+        for (uint32_t i = 0; i + 1U < vLevels; ++i) {
+            vBoundary_[i] = vBoundaryGm_.GetValue(i);
+        }
+    }
+
+    __aicore__ inline uint32_t KBoundaryIndex(float x)
+    {
+        uint32_t levels = (1U << kStage1Bits_) - 1U;
         uint32_t idx = 0;
         for (uint32_t i = 0; i < levels; ++i) {
-            idx += x > boundary.GetValue(i) ? 1U : 0U;
+            idx += x > kBoundary_[i] ? 1U : 0U;
+        }
+        return idx;
+    }
+
+    __aicore__ inline uint32_t VBoundaryIndex(float x)
+    {
+        uint32_t levels = (1U << vBits_) - 1U;
+        uint32_t idx = 0;
+        for (uint32_t i = 0; i < levels; ++i) {
+            idx += x > vBoundary_[i] ? 1U : 0U;
         }
         return idx;
     }
@@ -263,9 +288,9 @@ public:
 
         for (uint32_t d = 0; d < headDim_; ++d) {
             float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
-            uint32_t idx = BoundaryIndex(xRot, kBoundaryGm_, kStage1Bits_);
+            uint32_t idx = KBoundaryIndex(xRot);
             PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
-            float xHat = kCodebookGm_.GetValue(idx);
+            float xHat = kCodebook_[idx];
             residual[d] = xRot - xHat;
             gammaSq += residual[d] * residual[d];
         }
@@ -318,11 +343,11 @@ public:
         float gammaSq = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
             float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
-            uint32_t idx = BoundaryIndex(xRot, kBoundaryGm_, kStage1Bits_);
+            uint32_t idx = KBoundaryIndex(xRot);
             if (writeStage1) {
                 PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
             }
-            float xHat = kCodebookGm_.GetValue(idx);
+            float xHat = kCodebook_[idx];
             kResidual_[d] = xRot - xHat;
             if (writeStage1) {
                 gammaSq += kResidual_[d] * kResidual_[d];
@@ -398,7 +423,7 @@ public:
                 vPackedCols_,
                 vBits_,
                 d,
-                BoundaryIndex(xRot, vBoundaryGm_, vBits_));
+                VBoundaryIndex(xRot));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;
@@ -449,7 +474,7 @@ public:
                 vPackedCols_,
                 vBits_,
                 d,
-                BoundaryIndex(xRot, vBoundaryGm_, vBits_));
+                VBoundaryIndex(xRot));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;
@@ -493,7 +518,7 @@ public:
             uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
             uint32_t qjl = ExtractBits(kPackedQjlGm_, qjlBase, d, 1U);
             float sign = qjl != 0U ? 1.0F : -1.0F;
-            mseAcc += qRot_[d] * kCodebookGm_.GetValue(idx);
+            mseAcc += qRot_[d] * kCodebook_[idx];
             qjlAcc += qQjl_[d] * sign;
         }
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
@@ -509,7 +534,7 @@ public:
         float norm = vNormGm_.GetValue(cacheIndex);
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(vPackedIdxGm_, vBase, d, vBits_);
-            vTmp_[d] = vCodebookGm_.GetValue(idx) * norm;
+            vTmp_[d] = vCodebook_[idx] * norm;
         }
     }
 
@@ -704,6 +729,10 @@ private:
     float vTmp_[256];
     float currentVec_[256];
     float kResidual_[256];
+    float kCodebook_[16];
+    float vCodebook_[16];
+    float kBoundary_[16];
+    float vBoundary_[16];
     float maxScore_{0.0F};
     float sum_{0.0F};
     float currentWeight_{0.0F};
