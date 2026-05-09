@@ -653,7 +653,7 @@ def tq_encode_kv_to_paged_cache(
                 torch.ops._C_ascend.tq_encode_kv_to_paged_cache(
                     key.to(torch.float32).contiguous(),
                     value.to(torch.float32).contiguous(),
-                    slot_mapping.contiguous(),
+                    slot_mapping.to(torch.long).contiguous(),
                     kv_cache["k_idx"],
                     kv_cache.get("k_qjl", torch.empty(0, device=key.device, dtype=torch.uint8)),
                     kv_cache.get("k_gamma", torch.empty(0, device=key.device, dtype=torch.float32)),
