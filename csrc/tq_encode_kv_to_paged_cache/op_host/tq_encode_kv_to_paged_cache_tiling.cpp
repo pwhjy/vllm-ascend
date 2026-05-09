@@ -42,7 +42,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
     uint32_t partitionCount =
-        (vPackedCols % 4U) == 0U
+        stage1Bits == 2U && (kQjlCols % 4U) == 0U && (vPackedCols % 4U) == 0U
         && (vBits == 1U || vBits == 2U || vBits == 4U) ? 4U : 1U;
     uint64_t usefulCore =
         static_cast<uint64_t>(totalTokens) * numKvHeads * partitionCount;
