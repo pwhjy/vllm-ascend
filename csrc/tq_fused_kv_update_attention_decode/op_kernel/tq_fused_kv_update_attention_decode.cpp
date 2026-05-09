@@ -405,37 +405,40 @@ public:
         return acc * scale_;
     }
 
-    __aicore__ inline void LoadCurrentVRot(uint32_t b, uint32_t kvHead)
-    {
-        uint64_t vBase =
-            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
-        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-            float acc = 0.0F;
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                acc += valueGm_.GetValue(vBase + inDim) * vRotationGm_.GetValue(
-                    static_cast<uint64_t>(inDim) * headDim_ + outDim);
-            }
-            vTmp_[outDim] = acc;
-        }
-    }
-
-    __aicore__ inline void OnlineAccumulate(float score)
+    __aicore__ inline float OnlineStep(float score)
     {
         float newMax = initialized_ && maxScore_ > score ? maxScore_ : score;
         float oldScale = initialized_ ? ExpScalar(maxScore_ - newMax) : 0.0F;
         float weight = ExpScalar(score - newMax);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            accRot_[d] = accRot_[d] * oldScale + weight * vTmp_[d];
+            accRot_[d] *= oldScale;
         }
+        currentWeight_ *= oldScale;
         sum_ = sum_ * oldScale + weight;
         maxScore_ = newMax;
         initialized_ = true;
+        return weight;
     }
 
-    __aicore__ inline void StoreOutput(uint32_t b, uint32_t head)
+    __aicore__ inline void OnlineAccumulateHistory(float score)
+    {
+        float weight = OnlineStep(score);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            accRot_[d] += weight * vTmp_[d];
+        }
+    }
+
+    __aicore__ inline void OnlineAccumulateCurrent(float score)
+    {
+        currentWeight_ += OnlineStep(score);
+    }
+
+    __aicore__ inline void StoreOutput(uint32_t b, uint32_t head, uint32_t kvHead)
     {
         uint64_t outBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
+        uint64_t valueBase =
+            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
         float invSum = sum_ > 0.0F ? 1.0F / sum_ : 0.0F;
         for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
             float acc = 0.0F;
@@ -443,6 +446,9 @@ public:
                 acc += (accRot_[inDim] * invSum) * vRotationTGm_.GetValue(
                     static_cast<uint64_t>(inDim) * headDim_ + outDim);
             }
+            // Current dense V is combined in original space; only compressed
+            // history needs inverse rotation.
+            acc += currentWeight_ * invSum * valueGm_.GetValue(valueBase + outDim);
             outGm_.SetValue(outBase + outDim, acc);
         }
     }
@@ -478,18 +484,18 @@ public:
         }
         maxScore_ = -3.4028234663852886e38F;
         sum_ = 0.0F;
+        currentWeight_ = 0.0F;
         initialized_ = false;
 
         for (uint32_t pos = 0; pos < oldLen; ++pos) {
             float score = HistoryScore(b, kvHead, pos);
             LoadHistoryVRot(b, kvHead, pos);
-            OnlineAccumulate(score);
+            OnlineAccumulateHistory(score);
         }
 
         float curScore = CurrentScore(b, head, kvHead);
-        LoadCurrentVRot(b, kvHead);
-        OnlineAccumulate(curScore);
-        StoreOutput(b, head);
+        OnlineAccumulateCurrent(curScore);
+        StoreOutput(b, head, kvHead);
     }
 
     __aicore__ inline void Process()
@@ -563,6 +569,7 @@ private:
     float vTmp_[256];
     float maxScore_{0.0F};
     float sum_{0.0F};
+    float currentWeight_{0.0F};
     bool initialized_{false};
 };
 
