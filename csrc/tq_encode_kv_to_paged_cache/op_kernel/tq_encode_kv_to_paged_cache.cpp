@@ -255,7 +255,52 @@ public:
         vNormCacheGm_.SetValue(slotHead, norm);
     }
 
-    __aicore__ inline void ProcessOne(uint32_t token, uint32_t kvHead)
+    __aicore__ inline bool CanPartitionEncode()
+    {
+        return (vPackedCols_ % 4U) == 0U
+            && (vBits_ == 1U || vBits_ == 2U || vBits_ == 4U);
+    }
+
+    __aicore__ inline void EncodeVPartition(
+        uint32_t token,
+        uint32_t kvHead,
+        uint64_t slotHead,
+        uint32_t partition)
+    {
+        uint32_t colStart = (vPackedCols_ * partition) / 4U;
+        uint32_t colEnd = (vPackedCols_ * (partition + 1U)) / 4U;
+        uint8_t packed[128];
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            packed[col] = 0;
+        }
+
+        LoadCurrentVector(valueGm_, token, kvHead);
+        float norm = CalcNorm();
+        float invNorm = 1.0F / norm;
+        uint32_t dimsPerByte = 8U / vBits_;
+        uint32_t dimStart = colStart * dimsPerByte;
+        uint32_t dimEnd = colEnd * dimsPerByte;
+        if (dimEnd > headDim_) {
+            dimEnd = headDim_;
+        }
+        for (uint32_t d = dimStart; d < dimEnd; ++d) {
+            float xRot = CalcRot(vRotationGm_, d, invNorm);
+            PackIndex(packed, vPackedCols_, vBits_, d, VBoundaryIndex(xRot));
+        }
+
+        uint64_t packedBase = slotHead * vPackedCols_;
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            vIdxCacheGm_.SetValue(packedBase + col, packed[col]);
+        }
+        if (partition == 0U) {
+            vNormCacheGm_.SetValue(slotHead, norm);
+        }
+    }
+
+    __aicore__ inline void ProcessOne(
+        uint32_t token,
+        uint32_t kvHead,
+        uint32_t partition)
     {
         int64_t slot = slotMappingGm_.GetValue(token);
         if (slot < 0) {
@@ -267,8 +312,15 @@ public:
         }
 
         uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
-        EncodeK(token, kvHead, slotHead);
-        EncodeV(token, kvHead, slotHead);
+        if (CanPartitionEncode()) {
+            if (partition == 0U) {
+                EncodeK(token, kvHead, slotHead);
+            }
+            EncodeVPartition(token, kvHead, slotHead, partition);
+        } else if (partition == 0U) {
+            EncodeK(token, kvHead, slotHead);
+            EncodeV(token, kvHead, slotHead);
+        }
     }
 
     __aicore__ inline void Process()
@@ -278,17 +330,21 @@ public:
         if (totalPairs == 0) {
             return;
         }
+        uint64_t partitionCount = CanPartitionEncode() ? 4U : 1U;
+        uint64_t totalTasks = totalPairs * partitionCount;
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
-        uint64_t pairsPerCore = (totalPairs + coreCount - 1) / coreCount;
-        uint64_t startPair = static_cast<uint64_t>(GetBlockIdx()) * pairsPerCore;
-        uint64_t endPair = startPair + pairsPerCore;
-        if (endPair > totalPairs) {
-            endPair = totalPairs;
+        uint64_t tasksPerCore = (totalTasks + coreCount - 1) / coreCount;
+        uint64_t startTask = static_cast<uint64_t>(GetBlockIdx()) * tasksPerCore;
+        uint64_t endTask = startTask + tasksPerCore;
+        if (endTask > totalTasks) {
+            endTask = totalTasks;
         }
-        for (uint64_t pair = startPair; pair < endPair; ++pair) {
+        for (uint64_t task = startTask; task < endTask; ++task) {
+            uint64_t pair = task / partitionCount;
             ProcessOne(
                 static_cast<uint32_t>(pair / numKvHeads_),
-                static_cast<uint32_t>(pair % numKvHeads_));
+                static_cast<uint32_t>(pair % numKvHeads_),
+                static_cast<uint32_t>(task - pair * partitionCount));
         }
     }
 
