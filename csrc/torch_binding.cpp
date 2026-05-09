@@ -53,6 +53,7 @@
 #include "tq_encode_prod_paged_cache/tq_encode_prod_paged_cache_torch_adpt.h"
 #include "tq_prod_paged_k_score/tq_prod_paged_k_score_torch_adpt.h"
 #include "tq_prod_mse_paged_attention/tq_prod_mse_paged_attention_torch_adpt.h"
+#include "tq_fused_kv_update_attention_decode/tq_fused_kv_update_attention_decode_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -1236,6 +1237,119 @@ at::Tensor tq_prod_mse_paged_attention(
     return out;
 }
 
+at::Tensor tq_fused_kv_update_attention_decode(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& k_packed_idx,
+    const at::Tensor& k_packed_qjl,
+    const at::Tensor& k_gamma,
+    const at::Tensor& k_norm,
+    const at::Tensor& v_packed_idx,
+    const at::Tensor& v_norm,
+    const at::Tensor& block_table,
+    const at::Tensor& old_seq_lens,
+    const at::Tensor& k_rotation,
+    const at::Tensor& k_qjl_query_matrix,
+    const at::Tensor& v_rotation,
+    const at::Tensor& v_rotation_t,
+    const at::Tensor& k_codebook,
+    const at::Tensor& v_codebook,
+    int64_t k_total_bits,
+    int64_t v_bits,
+    int64_t head_dim,
+    double scale,
+    int64_t max_seq_len)
+{
+    TORCH_CHECK(query.scalar_type() == at::kFloat, "query must be fp32");
+    TORCH_CHECK(key.scalar_type() == at::kFloat, "key must be fp32");
+    TORCH_CHECK(value.scalar_type() == at::kFloat, "value must be fp32");
+    TORCH_CHECK(k_packed_idx.scalar_type() == at::kByte,
+                "k_packed_idx must be uint8");
+    TORCH_CHECK(k_packed_qjl.scalar_type() == at::kByte,
+                "k_packed_qjl must be uint8");
+    TORCH_CHECK(k_gamma.scalar_type() == at::kFloat, "k_gamma must be fp32");
+    TORCH_CHECK(k_norm.scalar_type() == at::kFloat, "k_norm must be fp32");
+    TORCH_CHECK(v_packed_idx.scalar_type() == at::kByte,
+                "v_packed_idx must be uint8");
+    TORCH_CHECK(v_norm.scalar_type() == at::kFloat, "v_norm must be fp32");
+    TORCH_CHECK(block_table.scalar_type() == at::kInt,
+                "block_table must be int32");
+    TORCH_CHECK(old_seq_lens.scalar_type() == at::kInt,
+                "old_seq_lens must be int32");
+    TORCH_CHECK(k_rotation.scalar_type() == at::kFloat,
+                "k_rotation must be fp32");
+    TORCH_CHECK(k_qjl_query_matrix.scalar_type() == at::kFloat,
+                "k_qjl_query_matrix must be fp32");
+    TORCH_CHECK(v_rotation.scalar_type() == at::kFloat,
+                "v_rotation must be fp32");
+    TORCH_CHECK(v_rotation_t.scalar_type() == at::kFloat,
+                "v_rotation_t must be fp32");
+    TORCH_CHECK(k_codebook.scalar_type() == at::kFloat,
+                "k_codebook must be fp32");
+    TORCH_CHECK(v_codebook.scalar_type() == at::kFloat,
+                "v_codebook must be fp32");
+    TORCH_CHECK(query.dim() == 3, "query must be [batch, num_heads, head_dim]");
+    TORCH_CHECK(key.dim() == 3, "key must be [batch, num_kv_heads, head_dim]");
+    TORCH_CHECK(value.sizes() == key.sizes(), "value must have same shape as key");
+    TORCH_CHECK(k_packed_idx.dim() == 4,
+                "k_packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(k_packed_qjl.dim() == 4,
+                "k_packed_qjl must be [num_blocks, block_size, num_kv_heads, qjl_cols]");
+    TORCH_CHECK(k_gamma.dim() == 4,
+                "k_gamma must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(k_norm.dim() == 4,
+                "k_norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(v_packed_idx.dim() == 4,
+                "v_packed_idx must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(v_norm.dim() == 4,
+                "v_norm must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(block_table.dim() == 2,
+                "block_table must be [batch, max_blocks_per_seq]");
+    TORCH_CHECK(old_seq_lens.dim() == 1, "old_seq_lens must be [batch]");
+    TORCH_CHECK(query.size(0) == key.size(0), "query/key batch mismatch");
+    TORCH_CHECK(query.size(0) == block_table.size(0),
+                "query batch must match block_table");
+    TORCH_CHECK(query.size(0) == old_seq_lens.size(0),
+                "query batch must match old_seq_lens");
+    TORCH_CHECK(query.size(1) % key.size(1) == 0,
+                "num_heads must be divisible by num_kv_heads");
+    TORCH_CHECK(k_packed_idx.size(2) == key.size(1),
+                "cache num_kv_heads must match key");
+    TORCH_CHECK(query.size(2) == head_dim && key.size(2) == head_dim,
+                "last dim must match head_dim");
+    TORCH_CHECK(k_rotation.size(0) == head_dim && k_rotation.size(1) == head_dim,
+                "k_rotation must be [head_dim, head_dim]");
+    TORCH_CHECK(k_qjl_query_matrix.size(0) == head_dim
+                    && k_qjl_query_matrix.size(1) == head_dim,
+                "k_qjl_query_matrix must be [head_dim, head_dim]");
+    TORCH_CHECK(v_rotation.size(0) == head_dim && v_rotation.size(1) == head_dim,
+                "v_rotation must be [head_dim, head_dim]");
+    TORCH_CHECK(v_rotation_t.size(0) == head_dim
+                    && v_rotation_t.size(1) == head_dim,
+                "v_rotation_t must be [head_dim, head_dim]");
+    TORCH_CHECK(k_total_bits >= 2 && k_total_bits <= 5,
+                "prod k_total_bits must be in [2, 5]");
+    TORCH_CHECK(v_bits >= 1 && v_bits <= 4, "v_bits must be in [1, 4]");
+    TORCH_CHECK(head_dim > 0 && head_dim <= 256,
+                "head_dim must be in (0, 256]");
+    TORCH_CHECK(max_seq_len >= 0, "max_seq_len must be non-negative");
+
+    at::Tensor out = at::empty(
+        {query.size(0), query.size(1), head_dim},
+        query.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
+        query, key, value,
+        k_packed_idx, k_packed_qjl, k_gamma, k_norm,
+        v_packed_idx, v_norm, block_table, old_seq_lens,
+        k_rotation, k_qjl_query_matrix, v_rotation, v_rotation_t,
+        k_codebook, v_codebook,
+        k_total_bits, v_bits, head_dim, scale, max_seq_len, out);
+
+    return out;
+}
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -1614,5 +1728,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("tq_prod_mse_paged_attention", torch::kPrivateUse1,
              &vllm_ascend::tq_prod_mse_paged_attention);
+    ops.def(
+        "tq_fused_kv_update_attention_decode("
+        "Tensor query, Tensor key, Tensor value, "
+        "Tensor k_packed_idx, Tensor k_packed_qjl, "
+        "Tensor k_gamma, Tensor k_norm, "
+        "Tensor v_packed_idx, Tensor v_norm, "
+        "Tensor block_table, Tensor old_seq_lens, "
+        "Tensor k_rotation, Tensor k_qjl_query_matrix, "
+        "Tensor v_rotation, Tensor v_rotation_t, "
+        "Tensor k_codebook, Tensor v_codebook, "
+        "int k_total_bits, int v_bits, int head_dim, "
+        "float scale, int max_seq_len) -> Tensor"
+    );
+    ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
+             &vllm_ascend::tq_fused_kv_update_attention_decode);
 }
 #endif

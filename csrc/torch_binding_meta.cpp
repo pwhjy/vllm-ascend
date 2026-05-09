@@ -803,6 +803,56 @@ at::Tensor tq_prod_mse_paged_attention_meta(
         q_rot.options().dtype(at::kFloat).device(at::kMeta));
 }
 
+at::Tensor tq_fused_kv_update_attention_decode_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& k_packed_idx,
+    const at::Tensor& k_packed_qjl,
+    const at::Tensor& k_gamma,
+    const at::Tensor& k_norm,
+    const at::Tensor& v_packed_idx,
+    const at::Tensor& v_norm,
+    const at::Tensor& block_table,
+    const at::Tensor& old_seq_lens,
+    const at::Tensor& k_rotation,
+    const at::Tensor& k_qjl_query_matrix,
+    const at::Tensor& v_rotation,
+    const at::Tensor& v_rotation_t,
+    const at::Tensor& k_codebook,
+    const at::Tensor& v_codebook,
+    int64_t k_total_bits,
+    int64_t v_bits,
+    int64_t head_dim,
+    double scale,
+    int64_t max_seq_len)
+{
+    (void)key;
+    (void)value;
+    (void)k_packed_idx;
+    (void)k_packed_qjl;
+    (void)k_gamma;
+    (void)k_norm;
+    (void)v_packed_idx;
+    (void)v_norm;
+    (void)block_table;
+    (void)old_seq_lens;
+    (void)k_rotation;
+    (void)k_qjl_query_matrix;
+    (void)v_rotation;
+    (void)v_rotation_t;
+    (void)k_codebook;
+    (void)v_codebook;
+    (void)k_total_bits;
+    (void)v_bits;
+    (void)scale;
+    (void)max_seq_len;
+
+    return at::empty(
+        {query.size(0), query.size(1), head_dim},
+        query.options().dtype(at::kFloat).device(at::kMeta));
+}
+
 at::Tensor npu_lightning_indexer_quant_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -922,6 +972,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // TurboQuant fused decode attention prototype
     ops.impl("tq_prod_mse_paged_attention",
              &vllm_ascend::meta::tq_prod_mse_paged_attention_meta);
+    ops.impl("tq_fused_kv_update_attention_decode",
+             &vllm_ascend::meta::tq_fused_kv_update_attention_decode_meta);
 }
 }
 #endif

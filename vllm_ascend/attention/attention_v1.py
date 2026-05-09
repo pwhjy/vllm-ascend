@@ -72,9 +72,11 @@ from vllm_ascend.ops.turboquant.dequant import (
 from vllm_ascend.ops.turboquant.fused import (
     compressed_decode_current_enabled,
     decode_compressed_full_cache_enabled,
+    fused_decode_attention_m4_enabled,
     fused_kv_update_attention_enabled,
     tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
+    tq_fused_decode_history_current_attention,
     tq_fused_kv_update_attention,
     tq_prod_mse_history_current_decode_attention,
 )
@@ -2237,6 +2239,54 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
             )
+
+            if (
+                fused_decode_attention_m4_enabled()
+                and bool(attn_metadata.causal)
+                and getattr(layer, "tq_k_variant", "prod") == "prod"
+                and "k_qjl" in kv_cache
+                and "k_gamma" in kv_cache
+                and all(cur_len == 1 for cur_len in current_lens_list)
+            ):
+                try:
+                    m4_out = tq_fused_decode_history_current_attention(
+                        query[:num_tokens],
+                        key[:num_tokens],
+                        value[:num_tokens],
+                        kv_cache,
+                        attn_metadata.block_tables,
+                        old_seq_lens_list,
+                        layer._tq_k_rot,
+                        layer._tq_k_qjl_query_matrix,
+                        layer._tq_v_rot,
+                        layer._tq_v_rot_t,
+                        layer._tq_k_codebook,
+                        layer._tq_v_codebook,
+                        k_total_bits=int(layer.tq_k_total_bits),
+                        v_bits=int(layer.tq_v_stage1_bits),
+                        head_dim=self.head_size,
+                        scale=self.scale,
+                        output_dtype=output.dtype,
+                        max_seq_len=max(old_seq_lens_list, default=0),
+                        profile_prefix=(
+                            "turboquant_fused_kv_update_attention."
+                            "decode.m4_attention"
+                        ),
+                    )
+                    output[:num_tokens] = m4_out.to(dtype=output.dtype)
+                    _maybe_sync_for_profile(output)
+                    _record_tq_profile(
+                        "turboquant_fused_kv_update_attention.forward",
+                        (time.perf_counter() - t0) * 1000.0,
+                        vectors=num_tokens,
+                    )
+                    return output
+                except Exception:
+                    if (
+                        os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+                        or attention_debug_compare_enabled()
+                    ):
+                        raise
 
             if (
                 decode_compressed_full_cache_enabled()

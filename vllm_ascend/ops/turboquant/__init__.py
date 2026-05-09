@@ -31,6 +31,7 @@ from .fused import (
     decode_compressed_full_cache_enabled,
     encode_cache_update_custom_enabled,
     encode_cache_update_stage_profile_enabled,
+    fused_decode_attention_m4_enabled,
     fused_kv_update_attention_custom_enabled,
     fused_kv_update_attention_enabled,
     old_seq_lens_from_total,
@@ -39,6 +40,7 @@ from .fused import (
     tq_encode_kv_to_paged_cache_reference,
     tq_fused_kv_update_attention,
     tq_fused_kv_update_attention_reference,
+    tq_fused_decode_history_current_attention,
     tq_prod_mse_history_current_decode_attention,
 )
 
@@ -65,6 +67,7 @@ __all__ = [
     "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
     "encode_cache_update_stage_profile_enabled",
+    "fused_decode_attention_m4_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
@@ -73,5 +76,6 @@ __all__ = [
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",
+    "tq_fused_decode_history_current_attention",
     "tq_prod_mse_history_current_decode_attention",
 ]

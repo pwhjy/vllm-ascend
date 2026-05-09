@@ -86,6 +86,12 @@ def compressed_decode_current_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "0") == "1"
 
 
+def fused_decode_attention_m4_enabled() -> bool:
+    """Use the M4 decode-only custom attention kernel after staged cache update."""
+
+    return os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4", "0") == "1"
+
+
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
@@ -1083,6 +1089,102 @@ def tq_prod_mse_history_current_decode_attention(
     return out.contiguous()
 
 
+def tq_fused_decode_history_current_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: dict[str, torch.Tensor],
+    block_table: torch.Tensor,
+    old_seq_lens: torch.Tensor | list[int],
+    k_rotation: torch.Tensor,
+    k_qjl_query_matrix: torch.Tensor,
+    v_rotation: torch.Tensor,
+    v_rotation_t: torch.Tensor,
+    k_codebook: torch.Tensor,
+    v_codebook: torch.Tensor,
+    *,
+    k_total_bits: int,
+    v_bits: int,
+    head_dim: int,
+    scale: float,
+    output_dtype: torch.dtype | None = None,
+    max_seq_len: int | None = None,
+    profile_prefix: str | None = None,
+) -> torch.Tensor:
+    """M4 decode-only custom attention after staged cache update."""
+
+    _validate_cache(kv_cache)
+    if "k_qjl" not in kv_cache or "k_gamma" not in kv_cache:
+        raise ValueError("M4 decode attention requires k_qjl/k_gamma sidecars")
+    old_seq_lens_t = _as_int32_tensor(old_seq_lens, query.device)
+    max_seq = (
+        int(max_seq_len)
+        if max_seq_len is not None
+        else max(_to_int_list(old_seq_lens_t), default=0)
+    )
+    tensors = (
+        query,
+        key,
+        value,
+        kv_cache["k_idx"],
+        kv_cache["k_qjl"],
+        kv_cache["k_gamma"],
+        kv_cache["k_norm"],
+        kv_cache["v_idx"],
+        kv_cache["v_norm"],
+        block_table,
+        old_seq_lens_t,
+        k_rotation,
+        k_qjl_query_matrix,
+        v_rotation,
+        v_rotation_t,
+        k_codebook,
+        v_codebook,
+    )
+    if not _custom_op_available("tq_fused_kv_update_attention_decode", *tensors):
+        raise RuntimeError(
+            "torch.ops._C_ascend.tq_fused_kv_update_attention_decode is unavailable"
+        )
+
+    if profile_prefix is not None:
+        _maybe_sync_for_profile(*tensors)
+        t0 = time.perf_counter()
+    out = torch.ops._C_ascend.tq_fused_kv_update_attention_decode(
+        query.to(torch.float32).contiguous(),
+        key.to(torch.float32).contiguous(),
+        value.to(torch.float32).contiguous(),
+        kv_cache["k_idx"],
+        kv_cache["k_qjl"],
+        kv_cache["k_gamma"],
+        kv_cache["k_norm"],
+        kv_cache["v_idx"],
+        kv_cache["v_norm"],
+        block_table.to(torch.int32).contiguous(),
+        old_seq_lens_t,
+        k_rotation.to(torch.float32).contiguous(),
+        k_qjl_query_matrix.to(torch.float32).contiguous(),
+        v_rotation.to(torch.float32).contiguous(),
+        v_rotation_t.to(torch.float32).contiguous(),
+        k_codebook.to(torch.float32).contiguous(),
+        v_codebook.to(torch.float32).contiguous(),
+        int(k_total_bits),
+        int(v_bits),
+        int(head_dim),
+        float(scale),
+        int(max_seq),
+    )
+    if output_dtype is not None:
+        out = out.to(output_dtype)
+    if profile_prefix is not None:
+        _maybe_sync_for_profile(out)
+        _record_tq_profile(
+            f"{profile_prefix}.total",
+            (time.perf_counter() - t0) * 1000.0,
+            vectors=int(query.shape[0]),
+        )
+    return out.contiguous()
+
+
 def _dense_history_current_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -1505,6 +1607,7 @@ __all__ = [
     "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
     "encode_cache_update_stage_profile_enabled",
+    "fused_decode_attention_m4_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",
@@ -1513,5 +1616,6 @@ __all__ = [
     "tq_encode_kv_to_paged_cache_reference",
     "tq_fused_kv_update_attention",
     "tq_fused_kv_update_attention_reference",
+    "tq_fused_decode_history_current_attention",
     "tq_prod_mse_history_current_decode_attention",
 ]
