@@ -61,6 +61,7 @@ public:
         stage1Bits_ = tiling->stage1Bits;
         headDim_ = tiling->headDim;
         numCore_ = tiling->numCore;
+        LoadSmallParams();
     }
 
     __aicore__ inline float ReadX(uint32_t token, uint32_t kvHead, uint32_t d)
@@ -70,11 +71,29 @@ public:
         return static_cast<float>(xGm_.GetValue(index));
     }
 
-    __aicore__ inline float CalcNorm(uint32_t token, uint32_t kvHead)
+    __aicore__ inline void LoadCurrentVector(uint32_t token, uint32_t kvHead)
+    {
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            currentVec_[d] = ReadX(token, kvHead, d);
+        }
+    }
+
+    __aicore__ inline void LoadSmallParams()
+    {
+        uint32_t levels = stage1Bits_ < 4U ? (1U << stage1Bits_) : 16U;
+        for (uint32_t i = 0; i < levels; ++i) {
+            codebook_[i] = codebookGm_.GetValue(i);
+        }
+        for (uint32_t i = 0; i + 1U < levels; ++i) {
+            boundary_[i] = boundaryGm_.GetValue(i);
+        }
+    }
+
+    __aicore__ inline float CalcNorm()
     {
         float sum = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float v = ReadX(token, kvHead, d);
+            float v = currentVec_[d];
             sum += v * v;
         }
         if (sum < 1.0e-12F) {
@@ -84,14 +103,12 @@ public:
     }
 
     __aicore__ inline float CalcRot(
-        uint32_t token,
-        uint32_t kvHead,
         uint32_t outDim,
         float invNorm)
     {
         float sum = 0.0F;
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-            float x = ReadX(token, kvHead, inDim) * invNorm;
+            float x = currentVec_[inDim] * invNorm;
             float r = rotationGm_.GetValue(
                 static_cast<uint64_t>(inDim) * headDim_ + outDim);
             sum += x * r;
@@ -104,7 +121,7 @@ public:
         uint32_t levels = (1U << stage1Bits_) - 1U;
         uint32_t idx = 0;
         for (uint32_t i = 0; i < levels; ++i) {
-            idx += x > boundaryGm_.GetValue(i) ? 1U : 0U;
+            idx += x > boundary_[i] ? 1U : 0U;
         }
         return idx;
     }
@@ -135,6 +152,10 @@ public:
             return;
         }
 
+        if (headDim_ > 256U || stage1Bits_ == 0U || stage1Bits_ > 4U) {
+            return;
+        }
+
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
         float residual[256];
@@ -146,15 +167,16 @@ public:
             qjlPacked[col] = 0;
         }
 
-        float norm = CalcNorm(token, kvHead);
+        LoadCurrentVector(token, kvHead);
+        float norm = CalcNorm();
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
 
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(token, kvHead, d, invNorm);
+            float xRot = CalcRot(d, invNorm);
             uint32_t idx = BoundaryIndex(xRot);
             PackIndex(idxPacked, idxPackedCols_, stage1Bits_, d, idx);
-            float xHat = codebookGm_.GetValue(idx);
+            float xHat = codebook_[idx];
             residual[d] = xRot - xHat;
             gammaSq += residual[d] * residual[d];
         }
@@ -227,6 +249,9 @@ private:
     uint32_t stage1Bits_{0};
     uint32_t headDim_{0};
     uint32_t numCore_{0};
+    float currentVec_[256];
+    float codebook_[16];
+    float boundary_[16];
 };
 
 extern "C" __global__ __aicore__ void tq_encode_prod_paged_cache(
