@@ -15,10 +15,10 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     gert::TilingContext* context)
 {
     auto queryShape = context->GetInputShape(0)->GetStorageShape();
-    auto kPackedIdxShape = context->GetInputShape(3)->GetStorageShape();
-    auto kPackedQjlShape = context->GetInputShape(4)->GetStorageShape();
-    auto vPackedIdxShape = context->GetInputShape(7)->GetStorageShape();
-    auto blockTableShape = context->GetInputShape(9)->GetStorageShape();
+    auto kPackedIdxShape = context->GetInputShape(4)->GetStorageShape();
+    auto kPackedQjlShape = context->GetInputShape(5)->GetStorageShape();
+    auto vPackedIdxShape = context->GetInputShape(8)->GetStorageShape();
+    auto blockTableShape = context->GetInputShape(10)->GetStorageShape();
 
     uint32_t batch = static_cast<uint32_t>(queryShape.GetDim(0));
     uint32_t numHeads = static_cast<uint32_t>(queryShape.GetDim(1));

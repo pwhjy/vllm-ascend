@@ -18,6 +18,8 @@ public:
             .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("value").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("slotMapping").ParamType(REQUIRED).DataType({ge::DT_INT64})
+            .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("kPackedIdx").ParamType(REQUIRED).DataType({ge::DT_UINT8})
             .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("kPackedQjl").ParamType(REQUIRED).DataType({ge::DT_UINT8})
@@ -38,9 +40,15 @@ public:
             .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("kQjlQueryMatrix").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("kQjlProjT").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("kBoundary").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("vRotation").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("vRotationT").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("vBoundary").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND}).AutoContiguous();
         this->Input("kCodebook").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND}).AutoContiguous();

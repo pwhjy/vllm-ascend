@@ -1093,13 +1093,17 @@ def tq_fused_decode_history_current_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    slot_mapping: torch.Tensor,
     kv_cache: dict[str, torch.Tensor],
     block_table: torch.Tensor,
     old_seq_lens: torch.Tensor | list[int],
     k_rotation: torch.Tensor,
     k_qjl_query_matrix: torch.Tensor,
+    k_qjl_proj_t: torch.Tensor,
+    k_boundary: torch.Tensor,
     v_rotation: torch.Tensor,
     v_rotation_t: torch.Tensor,
+    v_boundary: torch.Tensor,
     k_codebook: torch.Tensor,
     v_codebook: torch.Tensor,
     *,
@@ -1111,7 +1115,7 @@ def tq_fused_decode_history_current_attention(
     max_seq_len: int | None = None,
     profile_prefix: str | None = None,
 ) -> torch.Tensor:
-    """M4 decode-only custom attention after staged cache update."""
+    """M4 decode-only custom cache update + attention."""
 
     _validate_cache(kv_cache)
     if "k_qjl" not in kv_cache or "k_gamma" not in kv_cache:
@@ -1126,6 +1130,7 @@ def tq_fused_decode_history_current_attention(
         query,
         key,
         value,
+        slot_mapping,
         kv_cache["k_idx"],
         kv_cache["k_qjl"],
         kv_cache["k_gamma"],
@@ -1136,8 +1141,11 @@ def tq_fused_decode_history_current_attention(
         old_seq_lens_t,
         k_rotation,
         k_qjl_query_matrix,
+        k_qjl_proj_t,
+        k_boundary,
         v_rotation,
         v_rotation_t,
+        v_boundary,
         k_codebook,
         v_codebook,
     )
@@ -1153,6 +1161,7 @@ def tq_fused_decode_history_current_attention(
         query.to(torch.float32).contiguous(),
         key.to(torch.float32).contiguous(),
         value.to(torch.float32).contiguous(),
+        slot_mapping.to(torch.long).contiguous(),
         kv_cache["k_idx"],
         kv_cache["k_qjl"],
         kv_cache["k_gamma"],
@@ -1163,8 +1172,11 @@ def tq_fused_decode_history_current_attention(
         old_seq_lens_t,
         k_rotation.to(torch.float32).contiguous(),
         k_qjl_query_matrix.to(torch.float32).contiguous(),
+        k_qjl_proj_t.to(torch.float32).contiguous(),
+        k_boundary.to(torch.float32).contiguous(),
         v_rotation.to(torch.float32).contiguous(),
         v_rotation_t.to(torch.float32).contiguous(),
+        v_boundary.to(torch.float32).contiguous(),
         k_codebook.to(torch.float32).contiguous(),
         v_codebook.to(torch.float32).contiguous(),
         int(k_total_bits),

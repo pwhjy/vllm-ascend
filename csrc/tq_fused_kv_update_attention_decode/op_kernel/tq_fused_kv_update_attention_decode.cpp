@@ -40,6 +40,7 @@ public:
         GM_ADDR query,
         GM_ADDR key,
         GM_ADDR value,
+        GM_ADDR slotMapping,
         GM_ADDR kPackedIdx,
         GM_ADDR kPackedQjl,
         GM_ADDR kGamma,
@@ -50,8 +51,11 @@ public:
         GM_ADDR oldSeqLens,
         GM_ADDR kRotation,
         GM_ADDR kQjlQueryMatrix,
+        GM_ADDR kQjlProjT,
+        GM_ADDR kBoundary,
         GM_ADDR vRotation,
         GM_ADDR vRotationT,
+        GM_ADDR vBoundary,
         GM_ADDR kCodebook,
         GM_ADDR vCodebook,
         GM_ADDR out,
@@ -60,6 +64,7 @@ public:
         queryGm_.SetGlobalBuffer((__gm__ float*)query);
         keyGm_.SetGlobalBuffer((__gm__ float*)key);
         valueGm_.SetGlobalBuffer((__gm__ float*)value);
+        slotMappingGm_.SetGlobalBuffer((__gm__ int64_t*)slotMapping);
         kPackedIdxGm_.SetGlobalBuffer((__gm__ uint8_t*)kPackedIdx);
         kPackedQjlGm_.SetGlobalBuffer((__gm__ uint8_t*)kPackedQjl);
         kGammaGm_.SetGlobalBuffer((__gm__ float*)kGamma);
@@ -70,8 +75,11 @@ public:
         oldSeqLensGm_.SetGlobalBuffer((__gm__ int32_t*)oldSeqLens);
         kRotationGm_.SetGlobalBuffer((__gm__ float*)kRotation);
         kQjlQueryMatrixGm_.SetGlobalBuffer((__gm__ float*)kQjlQueryMatrix);
+        kQjlProjTGm_.SetGlobalBuffer((__gm__ float*)kQjlProjT);
+        kBoundaryGm_.SetGlobalBuffer((__gm__ float*)kBoundary);
         vRotationGm_.SetGlobalBuffer((__gm__ float*)vRotation);
         vRotationTGm_.SetGlobalBuffer((__gm__ float*)vRotationT);
+        vBoundaryGm_.SetGlobalBuffer((__gm__ float*)vBoundary);
         kCodebookGm_.SetGlobalBuffer((__gm__ float*)kCodebook);
         vCodebookGm_.SetGlobalBuffer((__gm__ float*)vCodebook);
         outGm_.SetGlobalBuffer((__gm__ float*)out);
@@ -122,6 +130,16 @@ public:
         return expLocal.GetValue(0);
     }
 
+    __aicore__ inline float SqrtScalar(float value)
+    {
+        LocalTensor<float> sqrtLocal = expBuf_.Get<float>();
+        sqrtLocal.SetValue(0, value);
+        SToVSync();
+        Sqrt(sqrtLocal, sqrtLocal, 1U);
+        VToSSync();
+        return sqrtLocal.GetValue(0);
+    }
+
     __aicore__ inline uint64_t CacheIndex(uint32_t b, uint32_t kvHead, uint32_t pos)
     {
         uint32_t blockOffset = pos / blockSize_;
@@ -149,6 +167,177 @@ public:
         }
         uint32_t mask = (1U << bits) - 1U;
         return (value >> bitOff) & mask;
+    }
+
+    __aicore__ inline float ReadCurrent(
+        GlobalTensor<float>& tensor,
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t d)
+    {
+        uint64_t index =
+            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_ + d;
+        return tensor.GetValue(index);
+    }
+
+    __aicore__ inline float CalcCurrentNorm(
+        GlobalTensor<float>& tensor,
+        uint32_t b,
+        uint32_t kvHead)
+    {
+        float sum = 0.0F;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float value = ReadCurrent(tensor, b, kvHead, d);
+            sum += value * value;
+        }
+        if (sum < 1.0e-12F) {
+            sum = 1.0e-12F;
+        }
+        return SqrtScalar(sum);
+    }
+
+    __aicore__ inline float CalcCurrentRot(
+        GlobalTensor<float>& tensor,
+        GlobalTensor<float>& rotation,
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t outDim,
+        float invNorm)
+    {
+        float sum = 0.0F;
+        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+            float x = ReadCurrent(tensor, b, kvHead, inDim) * invNorm;
+            float r = rotation.GetValue(
+                static_cast<uint64_t>(inDim) * headDim_ + outDim);
+            sum += x * r;
+        }
+        return sum;
+    }
+
+    __aicore__ inline uint32_t BoundaryIndex(
+        float x,
+        GlobalTensor<float>& boundary,
+        uint32_t bits)
+    {
+        uint32_t levels = (1U << bits) - 1U;
+        uint32_t idx = 0;
+        for (uint32_t i = 0; i < levels; ++i) {
+            idx += x > boundary.GetValue(i) ? 1U : 0U;
+        }
+        return idx;
+    }
+
+    __aicore__ inline void PackIndex(
+        uint8_t* packed,
+        uint32_t packedCols,
+        uint32_t bits,
+        uint32_t d,
+        uint32_t idx)
+    {
+        uint32_t bitPos = d * bits;
+        uint32_t byteId = bitPos >> 3;
+        uint32_t bitOff = bitPos & 7U;
+        uint32_t value = idx << bitOff;
+        packed[byteId] = static_cast<uint8_t>(
+            static_cast<uint32_t>(packed[byteId]) | (value & 0xFFU));
+        if (bitOff + bits > 8U && byteId + 1U < packedCols) {
+            packed[byteId + 1U] = static_cast<uint8_t>(
+                static_cast<uint32_t>(packed[byteId + 1U]) | (value >> 8U));
+        }
+    }
+
+    __aicore__ inline void EncodeCurrentK(
+        uint32_t b,
+        uint32_t kvHead,
+        uint64_t slotHead)
+    {
+        uint8_t idxPacked[128];
+        uint8_t qjlPacked[64];
+        float residual[256];
+
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            idxPacked[col] = 0;
+        }
+        for (uint32_t col = 0; col < kQjlCols_; ++col) {
+            qjlPacked[col] = 0;
+        }
+
+        float norm = CalcCurrentNorm(keyGm_, b, kvHead);
+        float invNorm = 1.0F / norm;
+        float gammaSq = 0.0F;
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float xRot = CalcCurrentRot(
+                keyGm_, kRotationGm_, b, kvHead, d, invNorm);
+            uint32_t idx = BoundaryIndex(xRot, kBoundaryGm_, kStage1Bits_);
+            PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
+            float xHat = kCodebookGm_.GetValue(idx);
+            residual[d] = xRot - xHat;
+            gammaSq += residual[d] * residual[d];
+        }
+
+        float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
+        for (uint32_t j = 0; j < headDim_; ++j) {
+            float sum = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                float p = kQjlProjTGm_.GetValue(
+                    static_cast<uint64_t>(d) * headDim_ + j);
+                sum += residual[d] * p;
+            }
+            PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
+        }
+
+        uint64_t idxBase = slotHead * kPackedCols_;
+        uint64_t qjlBase = slotHead * kQjlCols_;
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            kPackedIdxGm_.SetValue(idxBase + col, idxPacked[col]);
+        }
+        for (uint32_t col = 0; col < kQjlCols_; ++col) {
+            kPackedQjlGm_.SetValue(qjlBase + col, qjlPacked[col]);
+        }
+        kGammaGm_.SetValue(slotHead, gamma);
+        kNormGm_.SetValue(slotHead, norm);
+    }
+
+    __aicore__ inline void EncodeCurrentV(
+        uint32_t b,
+        uint32_t kvHead,
+        uint64_t slotHead)
+    {
+        uint8_t packed[128];
+        for (uint32_t col = 0; col < vPackedCols_; ++col) {
+            packed[col] = 0;
+        }
+
+        float norm = CalcCurrentNorm(valueGm_, b, kvHead);
+        float invNorm = 1.0F / norm;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float xRot = CalcCurrentRot(
+                valueGm_, vRotationGm_, b, kvHead, d, invNorm);
+            PackIndex(
+                packed,
+                vPackedCols_,
+                vBits_,
+                d,
+                BoundaryIndex(xRot, vBoundaryGm_, vBits_));
+        }
+
+        uint64_t packedBase = slotHead * vPackedCols_;
+        for (uint32_t col = 0; col < vPackedCols_; ++col) {
+            vPackedIdxGm_.SetValue(packedBase + col, packed[col]);
+        }
+        vNormGm_.SetValue(slotHead, norm);
+    }
+
+    __aicore__ inline void EncodeCurrentKv(uint32_t b, uint32_t kvHead)
+    {
+        int64_t slot = slotMappingGm_.GetValue(b);
+        if (slot < 0) {
+            return;
+        }
+        uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
+        EncodeCurrentK(b, kvHead, slotHead);
+        EncodeCurrentV(b, kvHead, slotHead);
     }
 
     __aicore__ inline void BuildQueryTransforms(uint32_t b, uint32_t head)
@@ -270,6 +459,13 @@ public:
         if (kvHead >= numKvHeads_) {
             return;
         }
+        // Current dense K/V is used directly by this attention step; the cache
+        // write is for future steps, so no cross-core read-after-write barrier
+        // is required here.
+        if (head % qPerKv_ == 0U) {
+            EncodeCurrentKv(b, kvHead);
+        }
+
         int32_t oldLenRaw = oldSeqLensGm_.GetValue(b);
         uint32_t oldLen = oldLenRaw > 0 ? static_cast<uint32_t>(oldLenRaw) : 0U;
         if (oldLen > maxSeqLen_) {
@@ -324,6 +520,7 @@ private:
     GlobalTensor<float> queryGm_;
     GlobalTensor<float> keyGm_;
     GlobalTensor<float> valueGm_;
+    GlobalTensor<int64_t> slotMappingGm_;
     GlobalTensor<uint8_t> kPackedIdxGm_;
     GlobalTensor<uint8_t> kPackedQjlGm_;
     GlobalTensor<float> kGammaGm_;
@@ -334,8 +531,11 @@ private:
     GlobalTensor<int32_t> oldSeqLensGm_;
     GlobalTensor<float> kRotationGm_;
     GlobalTensor<float> kQjlQueryMatrixGm_;
+    GlobalTensor<float> kQjlProjTGm_;
+    GlobalTensor<float> kBoundaryGm_;
     GlobalTensor<float> vRotationGm_;
     GlobalTensor<float> vRotationTGm_;
+    GlobalTensor<float> vBoundaryGm_;
     GlobalTensor<float> kCodebookGm_;
     GlobalTensor<float> vCodebookGm_;
     GlobalTensor<float> outGm_;
@@ -370,6 +570,7 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
     GM_ADDR query,
     GM_ADDR key,
     GM_ADDR value,
+    GM_ADDR slotMapping,
     GM_ADDR kPackedIdx,
     GM_ADDR kPackedQjl,
     GM_ADDR kGamma,
@@ -380,8 +581,11 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
     GM_ADDR oldSeqLens,
     GM_ADDR kRotation,
     GM_ADDR kQjlQueryMatrix,
+    GM_ADDR kQjlProjT,
+    GM_ADDR kBoundary,
     GM_ADDR vRotation,
     GM_ADDR vRotationT,
+    GM_ADDR vBoundary,
     GM_ADDR kCodebook,
     GM_ADDR vCodebook,
     GM_ADDR out,
@@ -398,6 +602,7 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
         query,
         key,
         value,
+        slotMapping,
         kPackedIdx,
         kPackedQjl,
         kGamma,
@@ -408,8 +613,11 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
         oldSeqLens,
         kRotation,
         kQjlQueryMatrix,
+        kQjlProjT,
+        kBoundary,
         vRotation,
         vRotationT,
+        vBoundary,
         kCodebook,
         vCodebook,
         out,

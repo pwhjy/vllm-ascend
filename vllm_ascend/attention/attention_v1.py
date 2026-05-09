@@ -2215,31 +2215,6 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 )
             ]
 
-            tq_encode_kv_to_paged_cache(
-                key[:num_tokens],
-                value[:num_tokens],
-                attn_metadata.slot_mapping[:num_tokens],
-                kv_cache,
-                layer._tq_k_rot,
-                layer._tq_k_codebook,
-                layer._tq_k_boundary,
-                layer._tq_k_qjl_proj,
-                layer._tq_v_rot,
-                layer._tq_v_codebook,
-                layer._tq_v_boundary,
-                k_qjl_proj_t=layer._tq_k_qjl_proj_t,
-                k_variant=getattr(layer, "tq_k_variant", "prod"),
-                k_total_bits=int(layer.tq_k_total_bits),
-                k_stage1_bits=int(layer.tq_k_stage1_bits),
-                v_bits=int(layer.tq_v_stage1_bits),
-                num_kv_heads=self.num_kv_heads,
-                assume_valid_slots=True,
-                kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
-                kv_mse_shared_boundary=getattr(
-                    layer, "_tq_kv_mse_shared_boundary", False,
-                ),
-            )
-
             if (
                 fused_decode_attention_m4_enabled()
                 and bool(attn_metadata.causal)
@@ -2253,13 +2228,17 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         query[:num_tokens],
                         key[:num_tokens],
                         value[:num_tokens],
+                        attn_metadata.slot_mapping[:num_tokens],
                         kv_cache,
                         attn_metadata.block_tables,
                         old_seq_lens_list,
                         layer._tq_k_rot,
                         layer._tq_k_qjl_query_matrix,
+                        layer._tq_k_qjl_proj_t,
+                        layer._tq_k_boundary,
                         layer._tq_v_rot,
                         layer._tq_v_rot_t,
+                        layer._tq_v_boundary,
                         layer._tq_k_codebook,
                         layer._tq_v_codebook,
                         k_total_bits=int(layer.tq_k_total_bits),
@@ -2287,6 +2266,31 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         or attention_debug_compare_enabled()
                     ):
                         raise
+
+            tq_encode_kv_to_paged_cache(
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.slot_mapping[:num_tokens],
+                kv_cache,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                layer._tq_k_qjl_proj,
+                layer._tq_v_rot,
+                layer._tq_v_codebook,
+                layer._tq_v_boundary,
+                k_qjl_proj_t=layer._tq_k_qjl_proj_t,
+                k_variant=getattr(layer, "tq_k_variant", "prod"),
+                k_total_bits=int(layer.tq_k_total_bits),
+                k_stage1_bits=int(layer.tq_k_stage1_bits),
+                v_bits=int(layer.tq_v_stage1_bits),
+                num_kv_heads=self.num_kv_heads,
+                assume_valid_slots=True,
+                kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
+                kv_mse_shared_boundary=getattr(
+                    layer, "_tq_kv_mse_shared_boundary", False,
+                ),
+            )
 
             if (
                 decode_compressed_full_cache_enabled()

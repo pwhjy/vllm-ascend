@@ -807,6 +807,7 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     const at::Tensor& query,
     const at::Tensor& key,
     const at::Tensor& value,
+    const at::Tensor& slot_mapping,
     const at::Tensor& k_packed_idx,
     const at::Tensor& k_packed_qjl,
     const at::Tensor& k_gamma,
@@ -817,8 +818,11 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     const at::Tensor& old_seq_lens,
     const at::Tensor& k_rotation,
     const at::Tensor& k_qjl_query_matrix,
+    const at::Tensor& k_qjl_proj_t,
+    const at::Tensor& k_boundary,
     const at::Tensor& v_rotation,
     const at::Tensor& v_rotation_t,
+    const at::Tensor& v_boundary,
     const at::Tensor& k_codebook,
     const at::Tensor& v_codebook,
     int64_t k_total_bits,
@@ -829,6 +833,7 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
 {
     (void)key;
     (void)value;
+    (void)slot_mapping;
     (void)k_packed_idx;
     (void)k_packed_qjl;
     (void)k_gamma;
@@ -839,8 +844,11 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     (void)old_seq_lens;
     (void)k_rotation;
     (void)k_qjl_query_matrix;
+    (void)k_qjl_proj_t;
+    (void)k_boundary;
     (void)v_rotation;
     (void)v_rotation_t;
+    (void)v_boundary;
     (void)k_codebook;
     (void)v_codebook;
     (void)k_total_bits;
