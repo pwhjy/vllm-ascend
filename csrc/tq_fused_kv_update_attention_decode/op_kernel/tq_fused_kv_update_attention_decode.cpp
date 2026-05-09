@@ -323,15 +323,57 @@ public:
         vNormGm_.SetValue(slotHead, norm);
     }
 
-    __aicore__ inline void EncodeCurrentKv(uint32_t b, uint32_t kvHead)
+    __aicore__ inline bool CanPartitionCurrentVEncode()
     {
-        int64_t slot = slotMappingGm_.GetValue(b);
-        if (slot < 0) {
+        return qPerKv_ == 4U && (vBits_ == 1U || vBits_ == 2U || vBits_ == 4U);
+    }
+
+    __aicore__ inline void EncodeCurrentVRange(
+        uint32_t b,
+        uint32_t kvHead,
+        uint64_t slotHead,
+        uint32_t groupHead)
+    {
+        uint32_t colStart = (vPackedCols_ * groupHead) / qPerKv_;
+        uint32_t colEnd = (vPackedCols_ * (groupHead + 1U)) / qPerKv_;
+        if (colStart >= colEnd || colStart >= vPackedCols_) {
             return;
         }
-        uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
-        EncodeCurrentK(b, kvHead, slotHead);
-        EncodeCurrentV(b, kvHead, slotHead);
+        if (colEnd > vPackedCols_) {
+            colEnd = vPackedCols_;
+        }
+
+        uint8_t packed[128];
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            packed[col] = 0;
+        }
+
+        LoadCurrentVector(valueGm_, b, kvHead);
+        float norm = CalcCurrentNormFromBuffer();
+        float invNorm = 1.0F / norm;
+        uint32_t dimsPerByte = 8U / vBits_;
+        uint32_t dimStart = colStart * dimsPerByte;
+        uint32_t dimEnd = colEnd * dimsPerByte;
+        if (dimEnd > headDim_) {
+            dimEnd = headDim_;
+        }
+        for (uint32_t d = dimStart; d < dimEnd; ++d) {
+            float xRot = CalcCurrentRotFromBuffer(vRotationGm_, d, invNorm);
+            PackIndex(
+                packed,
+                vPackedCols_,
+                vBits_,
+                d,
+                BoundaryIndex(xRot, vBoundaryGm_, vBits_));
+        }
+
+        uint64_t packedBase = slotHead * vPackedCols_;
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            vPackedIdxGm_.SetValue(packedBase + col, packed[col]);
+        }
+        if (groupHead == 0U) {
+            vNormGm_.SetValue(slotHead, norm);
+        }
     }
 
     __aicore__ inline void BuildQueryTransforms(uint32_t b, uint32_t head)
@@ -462,8 +504,19 @@ public:
         // Current dense K/V is used directly by this attention step; the cache
         // write is for future steps, so no cross-core read-after-write barrier
         // is required here.
-        if (head % qPerKv_ == 0U) {
-            EncodeCurrentKv(b, kvHead);
+        uint32_t groupHead = head - kvHead * qPerKv_;
+        int64_t slot = slotMappingGm_.GetValue(b);
+        if (slot >= 0) {
+            uint64_t slotHead =
+                static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
+            if (groupHead == 0U) {
+                EncodeCurrentK(b, kvHead, slotHead);
+            }
+            if (CanPartitionCurrentVEncode()) {
+                EncodeCurrentVRange(b, kvHead, slotHead, groupHead);
+            } else if (groupHead == 0U) {
+                EncodeCurrentV(b, kvHead, slotHead);
+            }
         }
 
         int32_t oldLenRaw = oldSeqLensGm_.GetValue(b);
