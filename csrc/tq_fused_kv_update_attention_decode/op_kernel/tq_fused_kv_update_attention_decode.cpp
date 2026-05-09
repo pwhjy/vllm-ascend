@@ -169,26 +169,23 @@ public:
         return (value >> bitOff) & mask;
     }
 
-    __aicore__ inline float ReadCurrent(
-        GlobalTensor<float>& tensor,
-        uint32_t b,
-        uint32_t kvHead,
-        uint32_t d)
-    {
-        uint64_t index =
-            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_ + d;
-        return tensor.GetValue(index);
-    }
-
-    __aicore__ inline float CalcCurrentNorm(
+    __aicore__ inline void LoadCurrentVector(
         GlobalTensor<float>& tensor,
         uint32_t b,
         uint32_t kvHead)
     {
+        uint64_t base =
+            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            currentVec_[d] = tensor.GetValue(base + d);
+        }
+    }
+
+    __aicore__ inline float CalcCurrentNormFromBuffer()
+    {
         float sum = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float value = ReadCurrent(tensor, b, kvHead, d);
-            sum += value * value;
+            sum += currentVec_[d] * currentVec_[d];
         }
         if (sum < 1.0e-12F) {
             sum = 1.0e-12F;
@@ -196,17 +193,14 @@ public:
         return SqrtScalar(sum);
     }
 
-    __aicore__ inline float CalcCurrentRot(
-        GlobalTensor<float>& tensor,
+    __aicore__ inline float CalcCurrentRotFromBuffer(
         GlobalTensor<float>& rotation,
-        uint32_t b,
-        uint32_t kvHead,
         uint32_t outDim,
         float invNorm)
     {
         float sum = 0.0F;
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-            float x = ReadCurrent(tensor, b, kvHead, inDim) * invNorm;
+            float x = currentVec_[inDim] * invNorm;
             float r = rotation.GetValue(
                 static_cast<uint64_t>(inDim) * headDim_ + outDim);
             sum += x * r;
@@ -262,13 +256,13 @@ public:
             qjlPacked[col] = 0;
         }
 
-        float norm = CalcCurrentNorm(keyGm_, b, kvHead);
+        LoadCurrentVector(keyGm_, b, kvHead);
+        float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
 
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcCurrentRot(
-                keyGm_, kRotationGm_, b, kvHead, d, invNorm);
+            float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
             uint32_t idx = BoundaryIndex(xRot, kBoundaryGm_, kStage1Bits_);
             PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
             float xHat = kCodebookGm_.GetValue(idx);
@@ -309,11 +303,11 @@ public:
             packed[col] = 0;
         }
 
-        float norm = CalcCurrentNorm(valueGm_, b, kvHead);
+        LoadCurrentVector(valueGm_, b, kvHead);
+        float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcCurrentRot(
-                valueGm_, vRotationGm_, b, kvHead, d, invNorm);
+            float xRot = CalcCurrentRotFromBuffer(vRotationGm_, d, invNorm);
             PackIndex(
                 packed,
                 vPackedCols_,
@@ -567,6 +561,7 @@ private:
     float qQjl_[256];
     float accRot_[256];
     float vTmp_[256];
+    float currentVec_[256];
     float maxScore_{0.0F};
     float sum_{0.0F};
     float currentWeight_{0.0F};
