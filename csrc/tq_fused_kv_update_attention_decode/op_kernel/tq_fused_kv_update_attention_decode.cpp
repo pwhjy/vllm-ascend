@@ -293,6 +293,91 @@ public:
         kNormGm_.SetValue(slotHead, norm);
     }
 
+    __aicore__ inline bool CanPartitionCurrentKQjlEncode()
+    {
+        return qPerKv_ == 4U && kStage1Bits_ == 2U
+            && (kQjlCols_ % qPerKv_) == 0U;
+    }
+
+    __aicore__ inline void PrepareCurrentKResidual(
+        uint32_t b,
+        uint32_t kvHead,
+        uint64_t slotHead,
+        bool writeStage1)
+    {
+        uint8_t idxPacked[128];
+        if (writeStage1) {
+            for (uint32_t col = 0; col < kPackedCols_; ++col) {
+                idxPacked[col] = 0;
+            }
+        }
+
+        LoadCurrentVector(keyGm_, b, kvHead);
+        float norm = CalcCurrentNormFromBuffer();
+        float invNorm = 1.0F / norm;
+        float gammaSq = 0.0F;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
+            uint32_t idx = BoundaryIndex(xRot, kBoundaryGm_, kStage1Bits_);
+            if (writeStage1) {
+                PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
+            }
+            float xHat = kCodebookGm_.GetValue(idx);
+            kResidual_[d] = xRot - xHat;
+            if (writeStage1) {
+                gammaSq += kResidual_[d] * kResidual_[d];
+            }
+        }
+
+        if (writeStage1) {
+            uint64_t idxBase = slotHead * kPackedCols_;
+            for (uint32_t col = 0; col < kPackedCols_; ++col) {
+                kPackedIdxGm_.SetValue(idxBase + col, idxPacked[col]);
+            }
+            kGammaGm_.SetValue(
+                slotHead, gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F);
+            kNormGm_.SetValue(slotHead, norm);
+        }
+    }
+
+    __aicore__ inline void EncodeCurrentKQjlRange(
+        uint64_t slotHead,
+        uint32_t groupHead)
+    {
+        uint32_t colStart = (kQjlCols_ * groupHead) / qPerKv_;
+        uint32_t colEnd = (kQjlCols_ * (groupHead + 1U)) / qPerKv_;
+        if (colStart >= colEnd || colStart >= kQjlCols_) {
+            return;
+        }
+        if (colEnd > kQjlCols_) {
+            colEnd = kQjlCols_;
+        }
+
+        uint8_t qjlPacked[64];
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            qjlPacked[col] = 0;
+        }
+        uint32_t dimStart = colStart * 8U;
+        uint32_t dimEnd = colEnd * 8U;
+        if (dimEnd > headDim_) {
+            dimEnd = headDim_;
+        }
+        for (uint32_t j = dimStart; j < dimEnd; ++j) {
+            float sum = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                float p = kQjlProjTGm_.GetValue(
+                    static_cast<uint64_t>(d) * headDim_ + j);
+                sum += kResidual_[d] * p;
+            }
+            PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
+        }
+
+        uint64_t qjlBase = slotHead * kQjlCols_;
+        for (uint32_t col = colStart; col < colEnd; ++col) {
+            kPackedQjlGm_.SetValue(qjlBase + col, qjlPacked[col]);
+        }
+    }
+
     __aicore__ inline void EncodeCurrentV(
         uint32_t b,
         uint32_t kvHead,
@@ -509,7 +594,10 @@ public:
         if (slot >= 0) {
             uint64_t slotHead =
                 static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
-            if (groupHead == 0U) {
+            if (CanPartitionCurrentKQjlEncode()) {
+                PrepareCurrentKResidual(b, kvHead, slotHead, groupHead == 0U);
+                EncodeCurrentKQjlRange(slotHead, groupHead);
+            } else if (groupHead == 0U) {
                 EncodeCurrentK(b, kvHead, slotHead);
             }
             if (CanPartitionCurrentVEncode()) {
@@ -615,6 +703,7 @@ private:
     float accRot_[256];
     float vTmp_[256];
     float currentVec_[256];
+    float kResidual_[256];
     float maxScore_{0.0F};
     float sum_{0.0F};
     float currentWeight_{0.0F};
