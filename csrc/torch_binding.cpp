@@ -49,6 +49,7 @@
 #include "tq_dequant_mse_paged/tq_dequant_mse_paged_torch_adpt.h"
 #include "tq_dequant_mse_paged_scaled/tq_dequant_mse_paged_scaled_torch_adpt.h"
 #include "tq_dequant_prod_paged/tq_dequant_prod_paged_torch_adpt.h"
+#include "tq_encode_kv_to_paged_cache/tq_encode_kv_to_paged_cache_torch_adpt.h"
 #include "tq_encode_mse_paged_cache/tq_encode_mse_paged_cache_torch_adpt.h"
 #include "tq_encode_prod_paged_cache/tq_encode_prod_paged_cache_torch_adpt.h"
 #include "tq_prod_paged_k_score/tq_prod_paged_k_score_torch_adpt.h"
@@ -1048,6 +1049,80 @@ void tq_encode_prod_paged_cache(
         total_bits, stage1_bits, head_dim);
 }
 
+void tq_encode_kv_to_paged_cache(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& slot_mapping,
+    const at::Tensor& k_idx_cache,
+    const at::Tensor& k_qjl_cache,
+    const at::Tensor& k_gamma_cache,
+    const at::Tensor& k_norm_cache,
+    const at::Tensor& v_idx_cache,
+    const at::Tensor& v_norm_cache,
+    const at::Tensor& k_rotation,
+    const at::Tensor& k_boundary,
+    const at::Tensor& k_codebook,
+    const at::Tensor& k_qjl_proj_t,
+    const at::Tensor& v_rotation,
+    const at::Tensor& v_boundary,
+    int64_t total_bits,
+    int64_t stage1_bits,
+    int64_t v_bits,
+    int64_t head_dim)
+{
+    check_tq_encode_common_inputs(
+        key, slot_mapping, k_idx_cache, k_norm_cache, k_rotation, k_boundary,
+        stage1_bits, head_dim);
+    check_tq_encode_common_inputs(
+        value, slot_mapping, v_idx_cache, v_norm_cache, v_rotation, v_boundary,
+        v_bits, head_dim);
+    TORCH_CHECK(key.scalar_type() == at::kFloat,
+                "combined encode key must be fp32");
+    TORCH_CHECK(value.scalar_type() == at::kFloat,
+                "combined encode value must be fp32");
+    TORCH_CHECK(key.sizes() == value.sizes(),
+                "key and value must have identical shapes");
+    TORCH_CHECK(k_qjl_cache.scalar_type() == at::kByte,
+                "k_qjl_cache must be uint8");
+    TORCH_CHECK(k_gamma_cache.scalar_type() == at::kFloat,
+                "k_gamma_cache must be fp32");
+    TORCH_CHECK(k_codebook.scalar_type() == at::kFloat,
+                "k_codebook must be fp32");
+    TORCH_CHECK(k_qjl_proj_t.scalar_type() == at::kFloat,
+                "k_qjl_proj_t must be fp32");
+    TORCH_CHECK(k_qjl_cache.dim() == 4,
+                "k_qjl_cache must be [num_blocks, block_size, num_kv_heads, packed_cols]");
+    TORCH_CHECK(k_gamma_cache.dim() == 4,
+                "k_gamma_cache must be [num_blocks, block_size, num_kv_heads, 1]");
+    TORCH_CHECK(k_codebook.dim() == 1, "k_codebook must be 1D");
+    TORCH_CHECK(k_qjl_proj_t.dim() == 2,
+                "k_qjl_proj_t must be [head_dim, head_dim]");
+    TORCH_CHECK(k_qjl_cache.size(2) == key.size(1),
+                "k_qjl_cache num_kv_heads must match key");
+    TORCH_CHECK(k_gamma_cache.size(2) == key.size(1),
+                "k_gamma_cache num_kv_heads must match key");
+    TORCH_CHECK(k_gamma_cache.size(3) == 1,
+                "k_gamma_cache last dim must be 1");
+    TORCH_CHECK(k_qjl_proj_t.size(0) == head_dim
+                    && k_qjl_proj_t.size(1) == head_dim,
+                "k_qjl_proj_t shape must match head_dim");
+    TORCH_CHECK(total_bits >= 2 && total_bits <= 5,
+                "prod total_bits must be in [2, 5]");
+    int64_t qjl_cols = (head_dim + 7) / 8;
+    TORCH_CHECK(k_qjl_cache.size(3) >= qjl_cols,
+                "k_qjl_cache packed cols are too small for head_dim");
+    TORCH_CHECK(qjl_cols <= 64,
+                "qjl packed cols must be <= 64 for the combined encode kernel");
+
+    EXEC_NPU_CMD(aclnnTqEncodeKvToPagedCache,
+        key, value, slot_mapping,
+        k_idx_cache, k_qjl_cache, k_gamma_cache, k_norm_cache,
+        v_idx_cache, v_norm_cache,
+        k_rotation, k_boundary, k_codebook, k_qjl_proj_t,
+        v_rotation, v_boundary,
+        total_bits, stage1_bits, v_bits, head_dim);
+}
+
 at::Tensor tq_dequant_prod_paged(
     const at::Tensor& packed_idx,
     const at::Tensor& packed_qjl,
@@ -1720,6 +1795,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("tq_encode_prod_paged_cache", torch::kPrivateUse1,
              &vllm_ascend::tq_encode_prod_paged_cache);
+    ops.def(
+        "tq_encode_kv_to_paged_cache(Tensor key, Tensor value, "
+        "                            Tensor slot_mapping, "
+        "                            Tensor k_idx_cache, Tensor k_qjl_cache, "
+        "                            Tensor k_gamma_cache, Tensor k_norm_cache, "
+        "                            Tensor v_idx_cache, Tensor v_norm_cache, "
+        "                            Tensor k_rotation, Tensor k_boundary, "
+        "                            Tensor k_codebook, Tensor k_qjl_proj_t, "
+        "                            Tensor v_rotation, Tensor v_boundary, "
+        "                            int total_bits, int stage1_bits, "
+        "                            int v_bits, int head_dim) -> ()"
+    );
+    ops.impl("tq_encode_kv_to_paged_cache", torch::kPrivateUse1,
+             &vllm_ascend::tq_encode_kv_to_paged_cache);
 
     ops.def(
         "tq_dequant_prod_paged(Tensor packed_idx, Tensor packed_qjl, "

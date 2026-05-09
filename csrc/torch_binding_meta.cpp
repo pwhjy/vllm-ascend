@@ -707,6 +707,49 @@ void tq_encode_prod_paged_cache_meta(
     return;
 }
 
+void tq_encode_kv_to_paged_cache_meta(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& slot_mapping,
+    const at::Tensor& k_idx_cache,
+    const at::Tensor& k_qjl_cache,
+    const at::Tensor& k_gamma_cache,
+    const at::Tensor& k_norm_cache,
+    const at::Tensor& v_idx_cache,
+    const at::Tensor& v_norm_cache,
+    const at::Tensor& k_rotation,
+    const at::Tensor& k_boundary,
+    const at::Tensor& k_codebook,
+    const at::Tensor& k_qjl_proj_t,
+    const at::Tensor& v_rotation,
+    const at::Tensor& v_boundary,
+    int64_t total_bits,
+    int64_t stage1_bits,
+    int64_t v_bits,
+    int64_t head_dim)
+{
+    (void)key;
+    (void)value;
+    (void)slot_mapping;
+    (void)k_idx_cache;
+    (void)k_qjl_cache;
+    (void)k_gamma_cache;
+    (void)k_norm_cache;
+    (void)v_idx_cache;
+    (void)v_norm_cache;
+    (void)k_rotation;
+    (void)k_boundary;
+    (void)k_codebook;
+    (void)k_qjl_proj_t;
+    (void)v_rotation;
+    (void)v_boundary;
+    (void)total_bits;
+    (void)stage1_bits;
+    (void)v_bits;
+    (void)head_dim;
+    return;
+}
+
 at::Tensor tq_dequant_prod_paged_meta(
     const at::Tensor& packed_idx,
     const at::Tensor& packed_qjl,
@@ -973,6 +1016,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::tq_encode_mse_paged_cache_meta);
     ops.impl("tq_encode_prod_paged_cache",
              &vllm_ascend::meta::tq_encode_prod_paged_cache_meta);
+    ops.impl("tq_encode_kv_to_paged_cache",
+             &vllm_ascend::meta::tq_encode_kv_to_paged_cache_meta);
     // TurboQuant prod paged dequant
     ops.impl("tq_dequant_prod_paged", &vllm_ascend::meta::tq_dequant_prod_paged_meta);
     // TurboQuant compressed K-score
