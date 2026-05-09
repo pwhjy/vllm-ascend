@@ -14,49 +14,49 @@ public:
     {
         this->Input("x")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("slotMapping")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT64})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("idxCache")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_UINT8})
+            .Format({ge::FORMAT_ND});
         this->Input("qjlCache")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_UINT8})
+            .Format({ge::FORMAT_ND});
         this->Input("gammaCache")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND});
         this->Input("normCache")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND});
         this->Input("rotation")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("boundary")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("codebook")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("qjlProjT")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
             .AutoContiguous();
         this->Attr("totalBits").AttrType(REQUIRED).Int(0);
         this->Attr("stage1Bits").AttrType(REQUIRED).Int(0);

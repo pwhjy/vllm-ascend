@@ -722,7 +722,7 @@ def tq_encode_kv_to_paged_cache(
                     else k_qjl_proj.transpose(0, 1)
                 )
                 torch.ops._C_ascend.tq_encode_prod_paged_cache(
-                    key.contiguous(),
+                    key.to(torch.float32).contiguous(),
                     slot_mapping.contiguous(),
                     kv_cache["k_idx"],
                     kv_cache["k_qjl"],
@@ -737,7 +737,7 @@ def tq_encode_kv_to_paged_cache(
                     int(key.shape[-1]),
                 )
                 torch.ops._C_ascend.tq_encode_mse_paged_cache(
-                    value.contiguous(),
+                    value.to(torch.float32).contiguous(),
                     slot_mapping.contiguous(),
                     kv_cache["v_idx"],
                     kv_cache["v_norm"],
