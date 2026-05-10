@@ -74,6 +74,7 @@ if [[ "${PRESERVE_TQ_ENV}" != "1" ]]; then
   unset VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE
   unset VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA
   unset VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4
+  unset VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA
   unset VLLM_ASCEND_TQ_M4_GROUPED_Q
   unset VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN
   unset VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE
@@ -105,6 +106,7 @@ cmd=(
   --env-fused VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE=1
   --env-fused VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA=1
   --env-fused VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4=1
+  --env-fused VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA=1
   --env-fused VLLM_ASCEND_TQ_M4_GROUPED_Q=0
   --env-fused VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN=0
   --env-fused VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE}"
@@ -205,6 +207,10 @@ interesting = (
     "turboquant_fused_kv_update_attention.decode.m4_attention.output_cast",
     "turboquant_fused_kv_update_attention.decode.m4_attention.total",
     "turboquant_fused_kv_update_attention.forward",
+    "turboquant_chunked_prefill.run_dense_fia",
+    "turboquant_chunked_prefill.total",
+    "turboquant_prefill_cache_hit.run_dense_fia",
+    "turboquant_prefill_cache_hit.total",
 )
 if stats:
     print("\n=== Fused TurboQuant profile ===")

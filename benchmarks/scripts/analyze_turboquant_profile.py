@@ -11,6 +11,8 @@ INTERESTING_PREFIXES = (
     "turboquant_encode",
     "turboquant_decode",
     "turboquant_fused",
+    "turboquant_chunked_prefill",
+    "turboquant_prefill",
 )
 
 

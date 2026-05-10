@@ -2461,6 +2461,64 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             )
             return output
 
+        if (
+            os.getenv("VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA", "1") == "1"
+            and attn_metadata.attn_state
+            in {
+                AscendAttentionState.ChunkedPrefill,
+                AscendAttentionState.PrefillCacheHit,
+            }
+        ):
+            tq_encode_kv_to_paged_cache(
+                key[:num_tokens],
+                value[:num_tokens],
+                attn_metadata.slot_mapping[:num_tokens],
+                kv_cache,
+                layer._tq_k_rot,
+                layer._tq_k_codebook,
+                layer._tq_k_boundary,
+                layer._tq_k_qjl_proj,
+                layer._tq_v_rot,
+                layer._tq_v_codebook,
+                layer._tq_v_boundary,
+                k_qjl_proj_t=layer._tq_k_qjl_proj_t,
+                k_variant=getattr(layer, "tq_k_variant", "prod"),
+                k_total_bits=int(layer.tq_k_total_bits),
+                k_stage1_bits=int(layer.tq_k_stage1_bits),
+                v_bits=int(layer.tq_v_stage1_bits),
+                num_kv_heads=self.num_kv_heads,
+                assume_valid_slots=True,
+                kv_mse_rotation=getattr(layer, "_tq_kv_mse_rotation", None),
+                kv_mse_shared_boundary=getattr(
+                    layer, "_tq_kv_mse_shared_boundary", False,
+                ),
+            )
+            if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+                output = self._forward_turboquant_chunked_prefill(
+                    query,
+                    key,
+                    value,
+                    attn_metadata,
+                    output,
+                    layer,
+                )
+            else:
+                output = self._forward_turboquant_fused_infer_attention(
+                    query,
+                    key,
+                    value,
+                    attn_metadata,
+                    output,
+                    layer,
+                )
+            _maybe_sync_for_profile(output)
+            _record_tq_profile(
+                "turboquant_fused_kv_update_attention.forward",
+                (time.perf_counter() - t0) * 1000.0,
+                vectors=num_tokens,
+            )
+            return output
+
         state_to_mode = {
             AscendAttentionState.DecodeOnly: 0,
             AscendAttentionState.ChunkedPrefill: 1,
