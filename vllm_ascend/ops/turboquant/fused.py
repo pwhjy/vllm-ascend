@@ -122,7 +122,7 @@ def fused_decode_attention_m4_score_tile_len() -> int:
 def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     """Process all Q heads that share a KV head in one M4 decode task."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "1") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0") == "1"
 
 
 def compressed_decode_current_custom_k_score_enabled() -> bool:
