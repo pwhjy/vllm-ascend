@@ -21,6 +21,7 @@ BEGIN_TILING_DATA_DEF(TqFusedKvUpdateAttentionDecodeTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, scoreTileLen);
     TILING_DATA_FIELD_DEF(uint32_t, groupedQ);
     TILING_DATA_FIELD_DEF(uint32_t, skipCacheUpdate);
+    TILING_DATA_FIELD_DEF(uint32_t, debugMode);
     TILING_DATA_FIELD_DEF(uint32_t, headDim);
     TILING_DATA_FIELD_DEF(uint32_t, kPackedCols);
     TILING_DATA_FIELD_DEF(uint32_t, kQjlCols);

@@ -131,6 +131,21 @@ def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "0") == "1"
 
 
+def fused_decode_attention_m4_debug_mode() -> int:
+    """Diagnostic mode for decomposing the M4 decode custom op.
+
+    0 = full path, 1 = current-only, 2 = history score only,
+    3 = history score + online softmax, 4 = history attention without output
+    store, 5 = full attention without output store.
+    """
+
+    try:
+        mode = int(os.getenv("VLLM_ASCEND_TQ_M4_DEBUG_MODE", "0"))
+    except ValueError:
+        mode = 0
+    return min(5, max(0, mode))
+
+
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
@@ -1352,6 +1367,7 @@ def tq_fused_decode_history_current_attention(
         fused_decode_attention_m4_score_tile_len(),
         1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
         1 if split_cache_update else 0,
+        fused_decode_attention_m4_debug_mode(),
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -1836,6 +1852,7 @@ __all__ = [
     "encode_cache_update_custom_enabled",
     "encode_cache_update_stage_profile_enabled",
     "fused_decode_attention_m4_enabled",
+    "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_split_cache_update_enabled",

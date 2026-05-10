@@ -38,6 +38,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* scoreTileLenPtr = attr->GetAttrPointer<int64_t>(5);
     const int64_t* groupedQPtr = attr->GetAttrPointer<int64_t>(6);
     const int64_t* skipCacheUpdatePtr = attr->GetAttrPointer<int64_t>(7);
+    const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(8);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -58,6 +59,12 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     bool groupedQAttr = groupedQPtr == nullptr || *groupedQPtr != 0;
     bool skipCacheUpdateAttr =
         skipCacheUpdatePtr != nullptr && *skipCacheUpdatePtr != 0;
+    int64_t debugModeAttr = debugModePtr != nullptr ? *debugModePtr : 0;
+    uint32_t debugMode =
+        debugModeAttr > 0 ? static_cast<uint32_t>(debugModeAttr) : 0U;
+    if (debugMode > 5U) {
+        debugMode = 5U;
+    }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
@@ -89,6 +96,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_scoreTileLen(scoreTileLen);
     tiling.set_groupedQ(groupedQ ? 1U : 0U);
     tiling.set_skipCacheUpdate(skipCacheUpdateAttr ? 1U : 0U);
+    tiling.set_debugMode(debugMode);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);

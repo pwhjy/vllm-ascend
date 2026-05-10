@@ -23,6 +23,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t scoreTileLen;
     uint32_t groupedQ;
     uint32_t skipCacheUpdate;
+    uint32_t debugMode;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -96,6 +97,7 @@ public:
         scoreTileLen_ = tiling->scoreTileLen;
         groupedQ_ = tiling->groupedQ;
         skipCacheUpdate_ = tiling->skipCacheUpdate;
+        debugMode_ = tiling->debugMode;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -654,6 +656,18 @@ public:
         currentWeight_ += OnlineStep(score);
     }
 
+    __aicore__ inline float OnlineStepNoAccumulator(float score)
+    {
+        float newMax = initialized_ && maxScore_ > score ? maxScore_ : score;
+        float oldScale = initialized_ ? ExpScalar(maxScore_ - newMax) : 0.0F;
+        float weight = ExpScalar(score - newMax);
+        currentWeight_ *= oldScale;
+        sum_ = sum_ * oldScale + weight;
+        maxScore_ = newMax;
+        initialized_ = true;
+        return weight;
+    }
+
     __aicore__ inline void ScaleGlobalAccumulator(float scale)
     {
         for (uint32_t d = 0; d < headDim_; ++d) {
@@ -781,6 +795,69 @@ public:
         }
     }
 
+    __aicore__ inline float ProcessHistoryScoreOnly(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t oldLen)
+    {
+        float sink = 0.0F;
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                sink += HistoryScoreByCacheIndex(cacheIndex) * 1.0e-6F;
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
+        }
+        return sink;
+    }
+
+    __aicore__ inline float ProcessHistoryScoreOnlineOnly(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t oldLen)
+    {
+        float sink = 0.0F;
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                float score = HistoryScoreByCacheIndex(cacheIndex);
+                sink += OnlineStepNoAccumulator(score) * 1.0e-6F;
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
+        }
+        return sink + sum_ * 1.0e-6F;
+    }
+
     __aicore__ inline void ProcessHistoryTiled(
         uint32_t b,
         uint32_t kvHead,
@@ -889,6 +966,15 @@ public:
         }
     }
 
+    __aicore__ inline void StoreDebugOutput(uint32_t b, uint32_t head, float value)
+    {
+        uint64_t outBase =
+            (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            outGm_.SetValue(outBase + d, value);
+        }
+    }
+
     __aicore__ inline void StoreOutputGroup(uint32_t b, uint32_t kvHead)
     {
         uint32_t qHeadBase = kvHead * qPerKv_;
@@ -964,10 +1050,36 @@ public:
         currentWeight_ = 0.0F;
         initialized_ = false;
 
+        if (debugMode_ == 1U) {
+            float curScore = CurrentScore(b, head, kvHead);
+            OnlineAccumulateCurrent(curScore);
+            StoreOutput(b, head, kvHead);
+            return;
+        }
+        if (debugMode_ == 2U) {
+            float sink = ProcessHistoryScoreOnly(b, kvHead, oldLen);
+            StoreDebugOutput(b, head, sink);
+            return;
+        }
+        if (debugMode_ == 3U) {
+            float sink = ProcessHistoryScoreOnlineOnly(b, kvHead, oldLen);
+            StoreDebugOutput(b, head, sink);
+            return;
+        }
+
         ProcessHistoryTiled(b, kvHead, oldLen);
 
+        if (debugMode_ == 4U) {
+            StoreDebugOutput(b, head, sum_ * 1.0e-6F + accRot_[0] * 1.0e-6F);
+            return;
+        }
         float curScore = CurrentScore(b, head, kvHead);
         OnlineAccumulateCurrent(curScore);
+        if (debugMode_ == 5U) {
+            StoreDebugOutput(
+                b, head, sum_ * 1.0e-6F + currentWeight_ * 1.0e-6F);
+            return;
+        }
         StoreOutput(b, head, kvHead);
     }
 
@@ -1081,6 +1193,7 @@ private:
     uint32_t scoreTileLen_{0};
     uint32_t groupedQ_{0};
     uint32_t skipCacheUpdate_{0};
+    uint32_t debugMode_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};

@@ -62,6 +62,7 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_M4_GROUPED_Q",
     "VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN",
     "VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE",
+    "VLLM_ASCEND_TQ_M4_DEBUG_MODE",
     "VLLM_ASCEND_TQ_PROFILE_M4_STAGES",
     "VLLM_ASCEND_TQ_PROFILE_M4_SHADOW",
     "VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT",
@@ -910,6 +911,35 @@ def _run_compare(args: argparse.Namespace) -> int:
         _print_run_stats_summary(run_stats)
         return 0
 
+    if args.fused_only:
+        child_processes["fused"] = _run_child(
+            args, "fused", fused_json, env, output_dir / "fused.log"
+        )
+        fused = _read_json(fused_json)
+        worker_stats = {"fused": _summarize_worker_stats(fused)}
+        run_stats = {
+            "profile_turboquant": args.profile_turboquant,
+            "profile_turboquant_sync": args.profile_turboquant_sync,
+            "workers": worker_stats,
+            "child_processes": child_processes,
+        }
+        _write_json(run_stats_json, run_stats)
+        _write_json(
+            comparison_json,
+            {
+                "passed": True,
+                "num_prompts": len(fused.get("outputs", [])),
+                "mismatches": [],
+                "fused_json": str(fused_json),
+                "run_stats_json": str(run_stats_json),
+                "run_stats": run_stats,
+            },
+        )
+        print(f"\nPASS: fused-only run completed.")
+        print(f"Results: {output_dir}")
+        _print_run_stats_summary(run_stats)
+        return 0
+
     if args.include_plain_baseline:
         _warn_if_plain_model_looks_quantized(args.plain_model or args.model)
         child_processes["plain"] = _run_child(
@@ -1115,6 +1145,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run only the non-TurboQuant/plain worker and write plain.json "
             "plus run_stats.json."
+        ),
+    )
+    parser.add_argument(
+        "--fused-only",
+        action="store_true",
+        help=(
+            "Run only the fused TurboQuant worker and write fused.json plus "
+            "run_stats.json. Useful for diagnostic profile sweeps."
         ),
     )
     parser.add_argument(
