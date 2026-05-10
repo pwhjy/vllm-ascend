@@ -285,10 +285,10 @@ public:
 
         float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
         if (!writeCache) {
+            float packedGuard = idxPacked[0] == 0xFFU ? 1.0e-9F : 0.0F;
             kNormCacheGm_.SetValue(
                 slotHead,
-                norm + gamma * 1.0e-6F
-                    + static_cast<float>(idxPacked[0]) * 1.0e-9F);
+                norm + gamma * 1.0e-6F + packedGuard);
             return;
         }
 
