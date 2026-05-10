@@ -23,6 +23,7 @@ Optional:
   PROFILE_TQ=1
   PROFILE_SYNC=1
   PROFILE_M4_STAGES=1
+  PROFILE_ENCODE_STAGES=1
   M4_SPLIT_CACHE_UPDATE=1
   M4_DEBUG_MODE=0
   ALLOW_MISMATCH=1
@@ -61,6 +62,7 @@ PLAIN_QUANTIZATION="${PLAIN_QUANTIZATION:-none}"
 PROFILE_TQ="${PROFILE_TQ:-1}"
 PROFILE_SYNC="${PROFILE_SYNC:-1}"
 PROFILE_M4_STAGES="${PROFILE_M4_STAGES:-1}"
+PROFILE_ENCODE_STAGES="${PROFILE_ENCODE_STAGES:-1}"
 M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE:-1}"
 M4_DEBUG_MODE="${M4_DEBUG_MODE:-0}"
 ALLOW_MISMATCH="${ALLOW_MISMATCH:-1}"
@@ -77,6 +79,7 @@ if [[ "${PRESERVE_TQ_ENV}" != "1" ]]; then
   unset VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE
   unset VLLM_ASCEND_TQ_M4_DEBUG_MODE
   unset VLLM_ASCEND_TQ_PROFILE_M4_STAGES
+  unset VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES
   unset VLLM_ASCEND_TQ_PROFILE_M4_SHADOW
   unset VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT
   unset VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE
@@ -107,6 +110,7 @@ cmd=(
   --env-fused VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE}"
   --env-fused VLLM_ASCEND_TQ_M4_DEBUG_MODE="${M4_DEBUG_MODE}"
   --env-fused VLLM_ASCEND_TQ_PROFILE_M4_STAGES="${PROFILE_M4_STAGES}"
+  --env-fused VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES="${PROFILE_ENCODE_STAGES}"
   --env-fused VLLM_ASCEND_TQ_PROFILE_M4_SHADOW=0
   --env-fused VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT=0
   --env-fused VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE=0
@@ -193,6 +197,8 @@ profile = children.get("fused", {}).get("turboquant_profile", {})
 stats = profile.get("stats", {})
 interesting = (
     "turboquant_encode_cache_update.total",
+    "turboquant_encode_cache_update.custom.prepare_inputs",
+    "turboquant_encode_cache_update.custom.op",
     "turboquant_fused_kv_update_attention.prefill_no_cache.run_dense_fia",
     "turboquant_fused_kv_update_attention.decode.m4_attention.prepare_inputs",
     "turboquant_fused_kv_update_attention.decode.m4_attention.custom_op",

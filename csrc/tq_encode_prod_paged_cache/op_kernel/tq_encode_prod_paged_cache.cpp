@@ -102,18 +102,19 @@ public:
         return sqrt(sum);
     }
 
-    __aicore__ inline float CalcRot(
-        uint32_t outDim,
-        float invNorm)
+    __aicore__ inline void CalcRot(float invNorm)
     {
-        float sum = 0.0F;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            residual_[d] = 0.0F;
+        }
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
             float x = currentVec_[inDim] * invNorm;
-            float r = rotationGm_.GetValue(
-                static_cast<uint64_t>(inDim) * headDim_ + outDim);
-            sum += x * r;
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                residual_[outDim] +=
+                    x * rotationGm_.GetValue(matrixBase + outDim);
+            }
         }
-        return sum;
     }
 
     __aicore__ inline uint32_t BoundaryIndex(float x)
@@ -158,7 +159,6 @@ public:
 
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
-        float residual[256];
 
         for (uint32_t col = 0; col < idxPackedCols_; ++col) {
             idxPacked[col] = 0;
@@ -172,25 +172,36 @@ public:
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
 
+        CalcRot(invNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(d, invNorm);
+            float xRot = residual_[d];
             uint32_t idx = BoundaryIndex(xRot);
             PackIndex(idxPacked, idxPackedCols_, stage1Bits_, d, idx);
             float xHat = codebook_[idx];
-            residual[d] = xRot - xHat;
-            gammaSq += residual[d] * residual[d];
+            residual_[d] = xRot - xHat;
+            gammaSq += residual_[d] * residual_[d];
         }
 
         float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
 
         for (uint32_t j = 0; j < headDim_; ++j) {
-            float sum = 0.0F;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                float p = qjlProjTGm_.GetValue(
-                    static_cast<uint64_t>(d) * headDim_ + j);
-                sum += residual[d] * p;
+            currentVec_[j] = 0.0F;
+        }
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float residual = residual_[d];
+            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                currentVec_[j] +=
+                    residual * qjlProjTGm_.GetValue(matrixBase + j);
             }
-            PackIndex(qjlPacked, qjlPackedCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
+        }
+        for (uint32_t j = 0; j < headDim_; ++j) {
+            PackIndex(
+                qjlPacked,
+                qjlPackedCols_,
+                1U,
+                j,
+                currentVec_[j] >= 0.0F ? 1U : 0U);
         }
 
         uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
@@ -250,6 +261,7 @@ private:
     uint32_t headDim_{0};
     uint32_t numCore_{0};
     float currentVec_[256];
+    float residual_[256];
     float codebook_[16];
     float boundary_[16];
 };

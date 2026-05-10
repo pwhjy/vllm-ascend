@@ -87,18 +87,18 @@ public:
         return sqrt(sum);
     }
 
-    __aicore__ inline float CalcRot(
-        uint32_t outDim,
-        float invNorm)
+    __aicore__ inline void CalcRot(float invNorm)
     {
-        float sum = 0.0F;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            rotVec_[d] = 0.0F;
+        }
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
             float x = currentVec_[inDim] * invNorm;
-            float r = rotationGm_.GetValue(
-                static_cast<uint64_t>(inDim) * headDim_ + outDim);
-            sum += x * r;
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                rotVec_[outDim] += x * rotationGm_.GetValue(matrixBase + outDim);
+            }
         }
-        return sum;
     }
 
     __aicore__ inline uint32_t BoundaryIndex(float x)
@@ -145,9 +145,9 @@ public:
         float norm = CalcNorm();
         float invNorm = 1.0F / norm;
 
+        CalcRot(invNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(d, invNorm);
-            PackIndex(packed, d, BoundaryIndex(xRot));
+            PackIndex(packed, d, BoundaryIndex(rotVec_[d]));
         }
 
         uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
@@ -195,6 +195,7 @@ private:
     uint32_t headDim_{0};
     uint32_t numCore_{0};
     float currentVec_[256];
+    float rotVec_[256];
     float boundary_[16];
 };
 

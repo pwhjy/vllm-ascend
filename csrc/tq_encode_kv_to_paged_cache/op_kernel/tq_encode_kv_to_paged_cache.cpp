@@ -126,19 +126,23 @@ public:
         return sqrt(sum);
     }
 
-    __aicore__ inline float CalcRot(
+    __aicore__ inline void CalcRotRange(
         GlobalTensor<float>& rotation,
-        uint32_t outDim,
-        float invNorm)
+        float invNorm,
+        uint32_t dimStart,
+        uint32_t dimEnd)
     {
-        float sum = 0.0F;
+        for (uint32_t d = dimStart; d < dimEnd; ++d) {
+            kResidual_[d] = 0.0F;
+        }
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
             float x = currentVec_[inDim] * invNorm;
-            float r = rotation.GetValue(
-                static_cast<uint64_t>(inDim) * headDim_ + outDim);
-            sum += x * r;
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = dimStart; outDim < dimEnd; ++outDim) {
+                kResidual_[outDim] +=
+                    x * rotation.GetValue(matrixBase + outDim);
+            }
         }
-        return sum;
     }
 
     __aicore__ inline uint32_t KBoundaryIndex(float x)
@@ -198,8 +202,9 @@ public:
         float norm = CalcNorm();
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
+        CalcRotRange(kRotationGm_, invNorm, 0U, headDim_);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(kRotationGm_, d, invNorm);
+            float xRot = kResidual_[d];
             uint32_t idx = KBoundaryIndex(xRot);
             PackIndex(idxPacked, kPackedCols_, stage1Bits_, d, idx);
             float residual = xRot - kCodebook_[idx];
@@ -209,13 +214,23 @@ public:
 
         float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
         for (uint32_t j = 0; j < headDim_; ++j) {
-            float sum = 0.0F;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                float p = kQjlProjTGm_.GetValue(
-                    static_cast<uint64_t>(d) * headDim_ + j);
-                sum += kResidual_[d] * p;
+            currentVec_[j] = 0.0F;
+        }
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float residual = kResidual_[d];
+            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                currentVec_[j] +=
+                    residual * kQjlProjTGm_.GetValue(matrixBase + j);
             }
-            PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
+        }
+        for (uint32_t j = 0; j < headDim_; ++j) {
+            PackIndex(
+                qjlPacked,
+                kQjlCols_,
+                1U,
+                j,
+                currentVec_[j] >= 0.0F ? 1U : 0U);
         }
 
         uint64_t idxBase = slotHead * kPackedCols_;
@@ -243,9 +258,14 @@ public:
         LoadCurrentVector(valueGm_, token, kvHead);
         float norm = CalcNorm();
         float invNorm = 1.0F / norm;
+        CalcRotRange(vRotationGm_, invNorm, 0U, headDim_);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(vRotationGm_, d, invNorm);
-            PackIndex(packed, vPackedCols_, vBits_, d, VBoundaryIndex(xRot));
+            PackIndex(
+                packed,
+                vPackedCols_,
+                vBits_,
+                d,
+                VBoundaryIndex(kResidual_[d]));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;
@@ -283,9 +303,14 @@ public:
         if (dimEnd > headDim_) {
             dimEnd = headDim_;
         }
+        CalcRotRange(vRotationGm_, invNorm, dimStart, dimEnd);
         for (uint32_t d = dimStart; d < dimEnd; ++d) {
-            float xRot = CalcRot(vRotationGm_, d, invNorm);
-            PackIndex(packed, vPackedCols_, vBits_, d, VBoundaryIndex(xRot));
+            PackIndex(
+                packed,
+                vPackedCols_,
+                vBits_,
+                d,
+                VBoundaryIndex(kResidual_[d]));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;

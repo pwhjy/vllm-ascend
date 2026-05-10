@@ -166,7 +166,8 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
     print("=== M4 Debug Sweep Summary ===")
     print(
         f"{'mode':>4s} {'gen_s':>8s} {'out_tok/s':>9s} "
-        f"{'forward':>9s} {'encode':>9s} {'m4_total':>9s} "
+        f"{'forward':>9s} {'encode':>9s} {'enc_op':>9s} "
+        f"{'m4_total':>9s} "
         f"{'custom':>9s} {'prepare':>9s} {'out_cast':>9s} {'ref':>9s}"
     )
     for mode_dir in mode_dirs:
@@ -188,6 +189,9 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
                 stats, "turboquant_fused_kv_update_attention.forward"
             ),
             "encode": _avg_ms(stats, "turboquant_encode_cache_update.total"),
+            "encode_op": _avg_ms(
+                stats, "turboquant_encode_cache_update.custom.op"
+            ),
             "m4_total": _avg_ms(stats, f"{prefix}.total"),
             "custom": _avg_ms(stats, f"{prefix}.custom_op"),
             "prepare": _avg_ms(stats, f"{prefix}.prepare_inputs"),
@@ -200,6 +204,7 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
         print(
             f"{mode:4d} {row['generate_s']:8.3f} {row['out_tps']:9.3f} "
             f"{row['forward']:9.3f} {row['encode']:9.3f} "
+            f"{row['encode_op']:9.3f} "
             f"{row['m4_total']:9.3f} {row['custom']:9.3f} "
             f"{row['prepare']:9.3f} {row['out_cast']:9.3f} {row['ref']:9.3f}"
         )
@@ -216,7 +221,9 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
     delta("zero_store_output (mode8 - mode6)", 8, 6)
     delta("current_score+online (mode9 - mode8)", 9, 8)
     delta("current path query delta (mode1 - mode9)", 1, 9)
-    delta("history_score floor (mode2 - mode6)", 2, 6)
+    delta("history_score only (mode2 - mode7)", 2, 7)
+    delta("history+softmax+v no_store (mode5 - mode7)", 5, 7)
+    delta("query+history score (mode2 - mode6)", 2, 6)
     print()
     return True
 
