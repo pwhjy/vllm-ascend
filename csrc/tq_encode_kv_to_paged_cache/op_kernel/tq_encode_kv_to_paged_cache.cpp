@@ -257,80 +257,8 @@ public:
 
     __aicore__ inline bool CanPartitionEncode()
     {
-        return stage1Bits_ == 2U && (kQjlCols_ % 4U) == 0U
-            && (vPackedCols_ % 4U) == 0U
+        return (vPackedCols_ % 4U) == 0U
             && (vBits_ == 1U || vBits_ == 2U || vBits_ == 4U);
-    }
-
-    __aicore__ inline void PrepareKResidual(
-        uint32_t token,
-        uint32_t kvHead,
-        uint64_t slotHead,
-        bool writeStage1)
-    {
-        uint8_t idxPacked[128];
-        if (writeStage1) {
-            for (uint32_t col = 0; col < kPackedCols_; ++col) {
-                idxPacked[col] = 0;
-            }
-        }
-
-        LoadCurrentVector(keyGm_, token, kvHead);
-        float norm = CalcNorm();
-        float invNorm = 1.0F / norm;
-        float gammaSq = 0.0F;
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcRot(kRotationGm_, d, invNorm);
-            uint32_t idx = KBoundaryIndex(xRot);
-            if (writeStage1) {
-                PackIndex(idxPacked, kPackedCols_, stage1Bits_, d, idx);
-            }
-            float residual = xRot - kCodebook_[idx];
-            kResidual_[d] = residual;
-            if (writeStage1) {
-                gammaSq += residual * residual;
-            }
-        }
-
-        if (writeStage1) {
-            uint64_t idxBase = slotHead * kPackedCols_;
-            for (uint32_t col = 0; col < kPackedCols_; ++col) {
-                kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
-            }
-            kGammaCacheGm_.SetValue(
-                slotHead, gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F);
-            kNormCacheGm_.SetValue(slotHead, norm);
-        }
-    }
-
-    __aicore__ inline void EncodeKQjlRange(uint64_t slotHead, uint32_t partition)
-    {
-        uint32_t colStart = (kQjlCols_ * partition) / 4U;
-        uint32_t colEnd = (kQjlCols_ * (partition + 1U)) / 4U;
-        uint8_t qjlPacked[64];
-        for (uint32_t col = colStart; col < colEnd; ++col) {
-            qjlPacked[col] = 0;
-        }
-
-        uint32_t dimStart = colStart * 8U;
-        uint32_t dimEnd = colEnd * 8U;
-        if (dimEnd > headDim_) {
-            dimEnd = headDim_;
-        }
-        for (uint32_t j = dimStart; j < dimEnd; ++j) {
-            float sum = 0.0F;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                float p = kQjlProjTGm_.GetValue(
-                    static_cast<uint64_t>(d) * headDim_ + j);
-                sum += kResidual_[d] * p;
-            }
-            PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
-        }
-
-        uint64_t qjlBase = slotHead * kQjlCols_;
-        for (uint32_t col = colStart; col < colEnd; ++col) {
-            kQjlCacheGm_.SetValue(qjlBase + col, qjlPacked[col]);
-        }
     }
 
     __aicore__ inline void EncodeVPartition(
@@ -385,8 +313,9 @@ public:
 
         uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
         if (CanPartitionEncode()) {
-            PrepareKResidual(token, kvHead, slotHead, partition == 0U);
-            EncodeKQjlRange(slotHead, partition);
+            if (partition == 0U) {
+                EncodeK(token, kvHead, slotHead);
+            }
             EncodeVPartition(token, kvHead, slotHead, partition);
         } else if (partition == 0U) {
             EncodeK(token, kvHead, slotHead);
