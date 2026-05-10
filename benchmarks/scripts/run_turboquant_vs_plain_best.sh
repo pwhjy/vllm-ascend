@@ -223,3 +223,5 @@ print(f"\nResults: {root}")
 print(f"Plain comparison: {root / 'plain_comparison.json'}")
 print(f"Run stats: {root / 'run_stats.json'}")
 PY
+
+python benchmarks/scripts/analyze_turboquant_profile.py "${OUT}"

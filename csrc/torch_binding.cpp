@@ -1340,7 +1340,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     double scale,
     int64_t max_seq_len,
     int64_t score_tile_len,
-    int64_t grouped_q)
+    int64_t grouped_q,
+    int64_t skip_cache_update)
 {
     TORCH_CHECK(query.scalar_type() == at::kFloat, "query must be fp32");
     TORCH_CHECK(key.scalar_type() == at::kFloat, "key must be fp32");
@@ -1437,6 +1438,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "score_tile_len must be in [0, 64]");
     TORCH_CHECK(grouped_q == 0 || grouped_q == 1,
                 "grouped_q must be 0 or 1");
+    TORCH_CHECK(skip_cache_update == 0 || skip_cache_update == 1,
+                "skip_cache_update must be 0 or 1");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
@@ -1450,7 +1453,7 @@ at::Tensor tq_fused_kv_update_attention_decode(
         k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
         v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
         k_total_bits, v_bits, head_dim, scale, max_seq_len,
-        score_tile_len, grouped_q, out);
+        score_tile_len, grouped_q, skip_cache_update, out);
 
     return out;
 }
@@ -1861,7 +1864,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor k_codebook, Tensor v_codebook, "
         "int k_total_bits, int v_bits, int head_dim, "
         "float scale, int max_seq_len, int score_tile_len, "
-        "int grouped_q) -> Tensor"
+        "int grouped_q, int skip_cache_update) -> Tensor"
     );
     ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
              &vllm_ascend::tq_fused_kv_update_attention_decode);
