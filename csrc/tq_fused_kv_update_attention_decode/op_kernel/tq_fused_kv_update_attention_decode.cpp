@@ -218,6 +218,36 @@ public:
         for (uint32_t i = 0; i + 1U < vLevels; ++i) {
             vBoundary_[i] = vBoundaryGm_.GetValue(i);
         }
+        kCb0_ = kLevels > 0U ? kCodebook_[0] : 0.0F;
+        kCb1_ = kLevels > 1U ? kCodebook_[1] : 0.0F;
+        kCb2_ = kLevels > 2U ? kCodebook_[2] : 0.0F;
+        kCb3_ = kLevels > 3U ? kCodebook_[3] : 0.0F;
+        vCb0_ = vLevels > 0U ? vCodebook_[0] : 0.0F;
+        vCb1_ = vLevels > 1U ? vCodebook_[1] : 0.0F;
+        vCb2_ = vLevels > 2U ? vCodebook_[2] : 0.0F;
+        vCb3_ = vLevels > 3U ? vCodebook_[3] : 0.0F;
+    }
+
+    __aicore__ inline bool CanUseKHistory2BitFastPath()
+    {
+        return kStage1Bits_ == 2U && (headDim_ & 3U) == 0U;
+    }
+
+    __aicore__ inline bool CanUseVHistory2BitFastPath()
+    {
+        return vBits_ == 2U && (headDim_ & 3U) == 0U;
+    }
+
+    __aicore__ inline float LookupKCodebook2(uint32_t idx)
+    {
+        return idx == 0U ? kCb0_
+            : (idx == 1U ? kCb1_ : (idx == 2U ? kCb2_ : kCb3_));
+    }
+
+    __aicore__ inline float LookupVCodebook2(uint32_t idx)
+    {
+        return idx == 0U ? vCb0_
+            : (idx == 1U ? vCb1_ : (idx == 2U ? vCb2_ : vCb3_));
     }
 
     __aicore__ inline uint32_t KBoundaryIndex(float x)
@@ -525,8 +555,80 @@ public:
         }
     }
 
+    __aicore__ inline float HistoryScore2BitByCacheIndex(uint64_t cacheIndex)
+    {
+        uint64_t idxBase = cacheIndex * kPackedCols_;
+        uint64_t qjlBase = cacheIndex * kQjlCols_;
+        float gamma = kGammaGm_.GetValue(cacheIndex);
+        float norm = kNormGm_.GetValue(cacheIndex);
+        float mseAcc = 0.0F;
+        float qjlAcc = 0.0F;
+        uint32_t pairs = headDim_ >> 3;
+        for (uint32_t pair = 0; pair < pairs; ++pair) {
+            uint32_t qjlBits = static_cast<uint32_t>(
+                kPackedQjlGm_.GetValue(qjlBase + pair));
+            uint32_t firstGroup = pair << 1;
+            uint32_t d = pair << 3;
+            uint32_t idxBits = static_cast<uint32_t>(
+                kPackedIdxGm_.GetValue(idxBase + firstGroup));
+            uint32_t idx0 = idxBits & 3U;
+            uint32_t idx1 = (idxBits >> 2) & 3U;
+            uint32_t idx2 = (idxBits >> 4) & 3U;
+            uint32_t idx3 = (idxBits >> 6) & 3U;
+            mseAcc += qRot_[d] * LookupKCodebook2(idx0);
+            mseAcc += qRot_[d + 1U] * LookupKCodebook2(idx1);
+            mseAcc += qRot_[d + 2U] * LookupKCodebook2(idx2);
+            mseAcc += qRot_[d + 3U] * LookupKCodebook2(idx3);
+            qjlAcc += (qjlBits & 1U) != 0U ? qQjl_[d] : -qQjl_[d];
+            qjlAcc += (qjlBits & 2U) != 0U ? qQjl_[d + 1U] : -qQjl_[d + 1U];
+            qjlAcc += (qjlBits & 4U) != 0U ? qQjl_[d + 2U] : -qQjl_[d + 2U];
+            qjlAcc += (qjlBits & 8U) != 0U ? qQjl_[d + 3U] : -qQjl_[d + 3U];
+
+            idxBits = static_cast<uint32_t>(
+                kPackedIdxGm_.GetValue(idxBase + firstGroup + 1U));
+            idx0 = idxBits & 3U;
+            idx1 = (idxBits >> 2) & 3U;
+            idx2 = (idxBits >> 4) & 3U;
+            idx3 = (idxBits >> 6) & 3U;
+            d += 4U;
+            mseAcc += qRot_[d] * LookupKCodebook2(idx0);
+            mseAcc += qRot_[d + 1U] * LookupKCodebook2(idx1);
+            mseAcc += qRot_[d + 2U] * LookupKCodebook2(idx2);
+            mseAcc += qRot_[d + 3U] * LookupKCodebook2(idx3);
+            qjlAcc += (qjlBits & 16U) != 0U ? qQjl_[d] : -qQjl_[d];
+            qjlAcc += (qjlBits & 32U) != 0U ? qQjl_[d + 1U] : -qQjl_[d + 1U];
+            qjlAcc += (qjlBits & 64U) != 0U ? qQjl_[d + 2U] : -qQjl_[d + 2U];
+            qjlAcc += (qjlBits & 128U) != 0U ? qQjl_[d + 3U] : -qQjl_[d + 3U];
+        }
+        if ((headDim_ & 4U) != 0U) {
+            uint32_t group = pairs << 1;
+            uint32_t idxBits = static_cast<uint32_t>(
+                kPackedIdxGm_.GetValue(idxBase + group));
+            uint32_t qjlBits = static_cast<uint32_t>(
+                kPackedQjlGm_.GetValue(qjlBase + pairs));
+            uint32_t d = group << 2;
+            uint32_t idx0 = idxBits & 3U;
+            uint32_t idx1 = (idxBits >> 2) & 3U;
+            uint32_t idx2 = (idxBits >> 4) & 3U;
+            uint32_t idx3 = (idxBits >> 6) & 3U;
+            mseAcc += qRot_[d] * LookupKCodebook2(idx0);
+            mseAcc += qRot_[d + 1U] * LookupKCodebook2(idx1);
+            mseAcc += qRot_[d + 2U] * LookupKCodebook2(idx2);
+            mseAcc += qRot_[d + 3U] * LookupKCodebook2(idx3);
+            qjlAcc += (qjlBits & 1U) != 0U ? qQjl_[d] : -qQjl_[d];
+            qjlAcc += (qjlBits & 2U) != 0U ? qQjl_[d + 1U] : -qQjl_[d + 1U];
+            qjlAcc += (qjlBits & 4U) != 0U ? qQjl_[d + 2U] : -qQjl_[d + 2U];
+            qjlAcc += (qjlBits & 8U) != 0U ? qQjl_[d + 3U] : -qQjl_[d + 3U];
+        }
+        return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
+    }
+
     __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
     {
+        if (CanUseKHistory2BitFastPath()) {
+            return HistoryScore2BitByCacheIndex(cacheIndex);
+        }
+
         uint64_t idxBase = cacheIndex * kPackedCols_;
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
@@ -582,10 +684,37 @@ public:
         scoreGroup_[3] = (mseAcc3 + qjlScale * qjlAcc3) * outScale;
     }
 
+    __aicore__ inline void AccumulateHistoryV2BitByCacheIndex(
+        uint64_t cacheIndex,
+        float weight)
+    {
+        uint64_t vBase = cacheIndex * vPackedCols_;
+        float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
+        uint32_t groups = headDim_ >> 2;
+        for (uint32_t group = 0; group < groups; ++group) {
+            uint32_t idxBits = static_cast<uint32_t>(
+                vPackedIdxGm_.GetValue(vBase + group));
+            uint32_t d = group << 2;
+            uint32_t idx0 = idxBits & 3U;
+            uint32_t idx1 = (idxBits >> 2) & 3U;
+            uint32_t idx2 = (idxBits >> 4) & 3U;
+            uint32_t idx3 = (idxBits >> 6) & 3U;
+            accRot_[d] += scaledNorm * LookupVCodebook2(idx0);
+            accRot_[d + 1U] += scaledNorm * LookupVCodebook2(idx1);
+            accRot_[d + 2U] += scaledNorm * LookupVCodebook2(idx2);
+            accRot_[d + 3U] += scaledNorm * LookupVCodebook2(idx3);
+        }
+    }
+
     __aicore__ inline void AccumulateHistoryVByCacheIndex(
         uint64_t cacheIndex,
         float weight)
     {
+        if (CanUseVHistory2BitFastPath()) {
+            AccumulateHistoryV2BitByCacheIndex(cacheIndex, weight);
+            return;
+        }
+
         uint64_t vBase = cacheIndex * vPackedCols_;
         float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
         for (uint32_t d = 0; d < headDim_; ++d) {
@@ -1104,6 +1233,14 @@ private:
     float kResidual_[256];
     float kCodebook_[16];
     float vCodebook_[16];
+    float kCb0_{0.0F};
+    float kCb1_{0.0F};
+    float kCb2_{0.0F};
+    float kCb3_{0.0F};
+    float vCb0_{0.0F};
+    float vCb1_{0.0F};
+    float vCb2_{0.0F};
+    float vCb3_{0.0F};
     float kBoundary_[16];
     float vBoundary_[16];
     float maxScore_{0.0F};
