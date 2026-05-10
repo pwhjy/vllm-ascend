@@ -137,11 +137,100 @@ def _print_m4_stage_table(run_stats: dict[str, Any], variant: str) -> None:
     print()
 
 
+def _avg_ms(stats: dict[str, Any], key: str) -> float:
+    stat = stats.get(key, {})
+    calls = int(stat.get("calls", 0))
+    if calls <= 0:
+        return 0.0
+    return float(stat.get("total_ms", 0.0)) / calls
+
+
+def _mode_number(path: Path) -> int:
+    try:
+        return int(path.name.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return 1_000_000
+
+
+def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
+    mode_dirs = sorted(
+        (path for path in output_dir.glob("mode_*") if (path / "run_stats.json").exists()),
+        key=_mode_number,
+    )
+    if not mode_dirs:
+        return False
+
+    prefix = "turboquant_fused_kv_update_attention.decode.m4_attention"
+    rows: dict[int, dict[str, float]] = {}
+    print(f"Results: {output_dir}")
+    print("=== M4 Debug Sweep Summary ===")
+    print(
+        f"{'mode':>4s} {'gen_s':>8s} {'out_tok/s':>9s} "
+        f"{'forward':>9s} {'encode':>9s} {'m4_total':>9s} "
+        f"{'custom':>9s} {'prepare':>9s} {'out_cast':>9s} {'ref':>9s}"
+    )
+    for mode_dir in mode_dirs:
+        mode = _mode_number(mode_dir)
+        run_stats = _load_json(mode_dir / "run_stats.json")
+        fused = run_stats.get("workers", {}).get("fused", {})
+        timing = fused.get("timing", {})
+        throughput = fused.get("throughput", {})
+        stats = (
+            run_stats.get("child_processes", {})
+            .get("fused", {})
+            .get("turboquant_profile", {})
+            .get("stats", {})
+        )
+        row = {
+            "generate_s": float(timing.get("generate_seconds", 0.0)),
+            "out_tps": float(throughput.get("output_tokens_per_second", 0.0)),
+            "forward": _avg_ms(
+                stats, "turboquant_fused_kv_update_attention.forward"
+            ),
+            "encode": _avg_ms(stats, "turboquant_encode_cache_update.total"),
+            "m4_total": _avg_ms(stats, f"{prefix}.total"),
+            "custom": _avg_ms(stats, f"{prefix}.custom_op"),
+            "prepare": _avg_ms(stats, f"{prefix}.prepare_inputs"),
+            "out_cast": _avg_ms(stats, f"{prefix}.output_cast"),
+            "ref": _avg_ms(
+                stats, "turboquant_fused_kv_update_attention.reference.total"
+            ),
+        }
+        rows[mode] = row
+        print(
+            f"{mode:4d} {row['generate_s']:8.3f} {row['out_tps']:9.3f} "
+            f"{row['forward']:9.3f} {row['encode']:9.3f} "
+            f"{row['m4_total']:9.3f} {row['custom']:9.3f} "
+            f"{row['prepare']:9.3f} {row['out_cast']:9.3f} {row['ref']:9.3f}"
+        )
+
+    def delta(label: str, lhs: int, rhs: int) -> None:
+        if lhs in rows and rhs in rows:
+            value = rows[lhs]["custom"] - rows[rhs]["custom"]
+            print(f"{label:42s} {value:9.3f} ms/call")
+
+    print()
+    print("=== M4 Debug Derived Custom-Op Deltas ===")
+    delta("full - full_no_store (mode0 - mode5)", 0, 5)
+    delta("query_transform (mode7 - mode6)", 7, 6)
+    delta("zero_store_output (mode8 - mode6)", 8, 6)
+    delta("current_score+online (mode9 - mode8)", 9, 8)
+    delta("current path query delta (mode1 - mode9)", 1, 9)
+    delta("history_score floor (mode2 - mode6)", 2, 6)
+    print()
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--top", type=int, default=30)
     args = parser.parse_args()
+
+    if not (args.output_dir / "run_stats.json").exists():
+        if _print_m4_debug_sweep_summary(args.output_dir):
+            return 0
+        raise SystemExit(f"run_stats.json not found under {args.output_dir}")
 
     run_stats = _load_json(args.output_dir / "run_stats.json")
     print(f"Results: {args.output_dir}")

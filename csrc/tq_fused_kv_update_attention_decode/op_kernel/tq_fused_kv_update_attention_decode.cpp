@@ -1041,6 +1041,26 @@ public:
             oldLen = maxSeqLen_;
         }
 
+        if (debugMode_ == 6U) {
+            StoreDebugOutput(b, head, 0.0F);
+            return;
+        }
+        if (debugMode_ == 8U || debugMode_ == 9U) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                accRot_[d] = 0.0F;
+            }
+            maxScore_ = -3.4028234663852886e38F;
+            sum_ = 0.0F;
+            currentWeight_ = 0.0F;
+            initialized_ = false;
+            if (debugMode_ == 9U) {
+                float curScore = CurrentScore(b, head, kvHead);
+                OnlineAccumulateCurrent(curScore);
+            }
+            StoreOutput(b, head, kvHead);
+            return;
+        }
+
         BuildQueryTransforms(b, head);
         for (uint32_t d = 0; d < headDim_; ++d) {
             accRot_[d] = 0.0F;
@@ -1050,6 +1070,10 @@ public:
         currentWeight_ = 0.0F;
         initialized_ = false;
 
+        if (debugMode_ == 7U) {
+            StoreDebugOutput(b, head, (qRot_[0] + qQjl_[0]) * 1.0e-6F);
+            return;
+        }
         if (debugMode_ == 1U) {
             float curScore = CurrentScore(b, head, kvHead);
             OnlineAccumulateCurrent(curScore);

@@ -10,7 +10,7 @@ Required:
 
 Optional:
   OUT_ROOT=/tmp/tq_m4_debug_sweep_YYYYmmdd_HHMMSS
-  MODES="0 1 2 3 4 5"
+  MODES="0 1 2 3 4 5 6 7 8 9"
   MAX_MODEL_LEN=32768
   MAX_TOKENS=8
   TP_SIZE=1
@@ -27,6 +27,10 @@ Debug modes:
   3 history score + online softmax only
   4 history score + softmax + V accumulate, no StoreOutput/current
   5 full history + current, no StoreOutput
+  6 minimal kernel overhead + debug write
+  7 BuildQueryTransforms only + debug write
+  8 zero accumulator StoreOutput only, no BuildQueryTransforms/current
+  9 current score + StoreOutput, no BuildQueryTransforms
 EOF
 }
 
@@ -45,7 +49,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 OUT_ROOT="${OUT_ROOT:-/tmp/tq_m4_debug_sweep_$(date +%Y%m%d_%H%M%S)}"
-MODES="${MODES:-0 1 2 3 4 5}"
+MODES="${MODES:-0 1 2 3 4 5 6 7 8 9}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_TOKENS="${MAX_TOKENS:-8}"
 TP_SIZE="${TP_SIZE:-1}"
@@ -120,3 +124,4 @@ done
 
 echo
 echo "Sweep results: ${OUT_ROOT}"
+python benchmarks/scripts/analyze_turboquant_profile.py "${OUT_ROOT}" --top 20

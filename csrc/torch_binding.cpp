@@ -1441,8 +1441,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "grouped_q must be 0 or 1");
     TORCH_CHECK(skip_cache_update == 0 || skip_cache_update == 1,
                 "skip_cache_update must be 0 or 1");
-    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 5,
-                "debug_mode must be in [0, 5]");
+    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 9,
+                "debug_mode must be in [0, 9]");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},

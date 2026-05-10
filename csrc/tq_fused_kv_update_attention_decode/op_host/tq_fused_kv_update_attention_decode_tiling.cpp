@@ -62,8 +62,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     int64_t debugModeAttr = debugModePtr != nullptr ? *debugModePtr : 0;
     uint32_t debugMode =
         debugModeAttr > 0 ? static_cast<uint32_t>(debugModeAttr) : 0U;
-    if (debugMode > 5U) {
-        debugMode = 5U;
+    if (debugMode > 9U) {
+        debugMode = 9U;
     }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {

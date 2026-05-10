@@ -136,14 +136,16 @@ def fused_decode_attention_m4_debug_mode() -> int:
 
     0 = full path, 1 = current-only, 2 = history score only,
     3 = history score + online softmax, 4 = history attention without output
-    store, 5 = full attention without output store.
+    store, 5 = full attention without output store, 6 = minimal debug write,
+    7 = query transform only, 8 = zero accumulator output store,
+    9 = current score + output store without query transform.
     """
 
     try:
         mode = int(os.getenv("VLLM_ASCEND_TQ_M4_DEBUG_MODE", "0"))
     except ValueError:
         mode = 0
-    return min(5, max(0, mode))
+    return min(9, max(0, mode))
 
 
 def compressed_decode_current_custom_k_score_enabled() -> bool:
