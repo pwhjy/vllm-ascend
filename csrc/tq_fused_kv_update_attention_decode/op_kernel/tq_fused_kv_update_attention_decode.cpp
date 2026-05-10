@@ -945,6 +945,79 @@ public:
         }
     }
 
+    __aicore__ inline float ProcessHistoryScoreOnlyGroup(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t oldLen)
+    {
+        float sink = 0.0F;
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                HistoryScoresGroupByCacheIndex(cacheIndex);
+                sink +=
+                    (scoreGroup_[0] + scoreGroup_[1] + scoreGroup_[2]
+                     + scoreGroup_[3])
+                    * 1.0e-6F;
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
+        }
+        return sink;
+    }
+
+    __aicore__ inline float ProcessHistoryScoreOnlineOnlyGroup(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t oldLen)
+    {
+        float sink = 0.0F;
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                HistoryScoresGroupByCacheIndex(cacheIndex);
+                OnlineWeightsGroup();
+                sink +=
+                    (weightGroup_[0] + weightGroup_[1] + weightGroup_[2]
+                     + weightGroup_[3])
+                    * 1.0e-6F;
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
+        }
+        return sink
+            + (sumGroup_[0] + sumGroup_[1] + sumGroup_[2] + sumGroup_[3])
+            * 1.0e-6F;
+    }
+
     __aicore__ inline void CurrentScoresGroup(uint32_t b, uint32_t kvHead)
     {
         uint32_t qHeadBase = kvHead * qPerKv_;
@@ -998,6 +1071,17 @@ public:
         }
     }
 
+    __aicore__ inline void StoreDebugOutputGroup(
+        uint32_t b,
+        uint32_t kvHead,
+        float value)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        for (uint32_t q = 0; q < 4U; ++q) {
+            StoreDebugOutput(b, qHeadBase + q, value);
+        }
+    }
+
     __aicore__ inline void StoreOutputGroup(uint32_t b, uint32_t kvHead)
     {
         uint32_t qHeadBase = kvHead * qPerKv_;
@@ -1044,6 +1128,22 @@ public:
                 outBase + q2Base + outDim, qRotGroup_[q2Base + outDim]);
             outGm_.SetValue(
                 outBase + q3Base + outDim, qRotGroup_[q3Base + outDim]);
+        }
+    }
+
+    __aicore__ inline void ResetGroupedAttentionState()
+    {
+        for (uint32_t q = 0; q < 4U; ++q) {
+            uint32_t base = q * headDim_;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                accRotGroup_[base + d] = 0.0F;
+            }
+            maxScoreGroup_[q] = -3.4028234663852886e38F;
+            sumGroup_[q] = 0.0F;
+            currentWeightGroup_[q] = 0.0F;
+            initializedGroup_[q] = false;
+            weightGroup_[q] = 0.0F;
+            scoreGroup_[q] = 0.0F;
         }
     }
 
@@ -1179,23 +1279,68 @@ public:
             oldLen = maxSeqLen_;
         }
 
-        BuildGroupedQueryTransforms(b, kvHead);
-        for (uint32_t q = 0; q < 4U; ++q) {
-            uint32_t base = q * headDim_;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                accRotGroup_[base + d] = 0.0F;
+        if (debugMode_ == 6U) {
+            StoreDebugOutputGroup(b, kvHead, 0.0F);
+            return;
+        }
+        if (debugMode_ == 8U || debugMode_ == 9U) {
+            ResetGroupedAttentionState();
+            if (debugMode_ == 9U) {
+                CurrentScoresGroup(b, kvHead);
+                OnlineAccumulateCurrentGroup();
             }
-            maxScoreGroup_[q] = -3.4028234663852886e38F;
-            sumGroup_[q] = 0.0F;
-            currentWeightGroup_[q] = 0.0F;
-            initializedGroup_[q] = false;
-            weightGroup_[q] = 0.0F;
-            scoreGroup_[q] = 0.0F;
+            StoreOutputGroup(b, kvHead);
+            return;
+        }
+        BuildGroupedQueryTransforms(b, kvHead);
+        ResetGroupedAttentionState();
+
+        if (debugMode_ == 7U) {
+            StoreDebugOutputGroup(
+                b, kvHead, (qRotGroup_[0] + qQjlGroup_[0]) * 1.0e-6F);
+            return;
+        }
+        if (debugMode_ == 1U) {
+            CurrentScoresGroup(b, kvHead);
+            OnlineAccumulateCurrentGroup();
+            StoreOutputGroup(b, kvHead);
+            return;
+        }
+        if (debugMode_ == 2U) {
+            float sink = ProcessHistoryScoreOnlyGroup(b, kvHead, oldLen);
+            StoreDebugOutputGroup(b, kvHead, sink);
+            return;
+        }
+        if (debugMode_ == 3U) {
+            float sink = ProcessHistoryScoreOnlineOnlyGroup(b, kvHead, oldLen);
+            StoreDebugOutputGroup(b, kvHead, sink);
+            return;
         }
 
         ProcessHistoryGroup(b, kvHead, oldLen);
+
+        if (debugMode_ == 4U) {
+            StoreDebugOutputGroup(
+                b,
+                kvHead,
+                (sumGroup_[0] + sumGroup_[1] + sumGroup_[2] + sumGroup_[3])
+                    * 1.0e-6F
+                    + accRotGroup_[0] * 1.0e-6F);
+            return;
+        }
         CurrentScoresGroup(b, kvHead);
         OnlineAccumulateCurrentGroup();
+        if (debugMode_ == 5U) {
+            StoreDebugOutputGroup(
+                b,
+                kvHead,
+                (sumGroup_[0] + sumGroup_[1] + sumGroup_[2] + sumGroup_[3])
+                    * 1.0e-6F
+                    + (currentWeightGroup_[0] + currentWeightGroup_[1]
+                       + currentWeightGroup_[2] + currentWeightGroup_[3])
+                        * 1.0e-6F);
+            return;
+        }
         StoreOutputGroup(b, kvHead);
     }
 
