@@ -23,6 +23,7 @@ Optional:
   PROFILE_TQ=1
   PROFILE_SYNC=1
   PROFILE_M4_STAGES=1
+  ALLOW_MISMATCH=1
 
 Extra arguments are forwarded to check_turboquant_llama_correctness.py.
 Example:
@@ -57,6 +58,7 @@ PLAIN_QUANTIZATION="${PLAIN_QUANTIZATION:-none}"
 PROFILE_TQ="${PROFILE_TQ:-1}"
 PROFILE_SYNC="${PROFILE_SYNC:-1}"
 PROFILE_M4_STAGES="${PROFILE_M4_STAGES:-1}"
+ALLOW_MISMATCH="${ALLOW_MISMATCH:-1}"
 
 cmd=(
   python benchmarks/scripts/check_turboquant_llama_correctness.py
@@ -108,7 +110,19 @@ printf 'Cmd: '
 printf '%q ' "${cmd[@]}"
 printf '\n\n'
 
+set +e
 "${cmd[@]}"
+driver_rc=$?
+set -e
+if [[ "${driver_rc}" -ne 0 ]]; then
+  echo
+  echo "Benchmark driver exited with code ${driver_rc}."
+  if [[ "${ALLOW_MISMATCH}" == "1" ]]; then
+    echo "ALLOW_MISMATCH=1, continuing to print performance summary."
+  else
+    exit "${driver_rc}"
+  fi
+fi
 
 OUT_DIR="${OUT}" python - <<'PY'
 import json
