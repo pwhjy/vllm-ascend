@@ -35,6 +35,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(2);
     const float* scalePtr = attr->GetAttrPointer<float>(3);
     const int64_t* maxSeqLenPtr = attr->GetAttrPointer<int64_t>(4);
+    const int64_t* scoreTileLenPtr = attr->GetAttrPointer<int64_t>(5);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -45,6 +46,13 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     float scale = scalePtr != nullptr ? *scalePtr : 1.0F;
     uint32_t maxSeqLen = static_cast<uint32_t>(
         maxSeqLenPtr != nullptr ? *maxSeqLenPtr : 0);
+    int64_t scoreTileLenAttr =
+        scoreTileLenPtr != nullptr ? *scoreTileLenPtr : 0;
+    uint32_t scoreTileLen =
+        scoreTileLenAttr > 0 ? static_cast<uint32_t>(scoreTileLenAttr) : 0U;
+    if (scoreTileLen > 64U) {
+        scoreTileLen = 64U;
+    }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
@@ -72,6 +80,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_blockSize(blockSize);
     tiling.set_maxBlocksPerSeq(maxBlocksPerSeq);
     tiling.set_maxSeqLen(maxSeqLen);
+    tiling.set_scoreTileLen(scoreTileLen);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);

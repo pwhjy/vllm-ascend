@@ -98,6 +98,27 @@ def fused_decode_attention_m4_shadow_profile_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_PROFILE_M4_SHADOW", "0") == "1"
 
 
+def fused_decode_attention_m4_stage_profile_enabled() -> bool:
+    """Record synchronized sub-stage timings around the M4 custom op."""
+
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_M4_STAGES", "0") == "1"
+
+
+def fused_decode_attention_m4_score_tile_len() -> int:
+    """History-score tile length for the M4 decode custom op.
+
+    Set ``VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN=0`` to use the scalar online path.
+    """
+
+    try:
+        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "16"))
+    except ValueError:
+        tile_len = 16
+    if tile_len <= 0:
+        return 0
+    return min(64, max(1, tile_len))
+
+
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
@@ -1218,6 +1239,10 @@ def tq_fused_decode_history_current_attention(
             "torch.ops._C_ascend.tq_fused_kv_update_attention_decode is unavailable"
         )
 
+    stage_profile = (
+        profile_prefix is not None
+        and fused_decode_attention_m4_stage_profile_enabled()
+    )
     if profile_prefix is not None:
         _maybe_sync_for_profile(*tensors)
         t_total = time.perf_counter()
@@ -1236,7 +1261,7 @@ def tq_fused_decode_history_current_attention(
     v_boundary_f = v_boundary.to(torch.float32).contiguous()
     k_codebook_f = k_codebook.to(torch.float32).contiguous()
     v_codebook_f = v_codebook.to(torch.float32).contiguous()
-    if profile_prefix is not None:
+    if stage_profile:
         _maybe_sync_for_profile(
             query_f,
             key_f,
@@ -1286,8 +1311,9 @@ def tq_fused_decode_history_current_attention(
         int(head_dim),
         float(scale),
         int(max_seq),
+        fused_decode_attention_m4_score_tile_len(),
     )
-    if profile_prefix is not None:
+    if stage_profile:
         _maybe_sync_for_profile(out)
         _record_tq_profile(
             f"{profile_prefix}.custom_op",
@@ -1297,7 +1323,7 @@ def tq_fused_decode_history_current_attention(
         t_stage = time.perf_counter()
     if output_dtype is not None:
         out = out.to(output_dtype)
-        if profile_prefix is not None:
+        if stage_profile:
             _maybe_sync_for_profile(out)
             _record_tq_profile(
                 f"{profile_prefix}.output_cast",
@@ -1306,6 +1332,8 @@ def tq_fused_decode_history_current_attention(
             )
             t_stage = time.perf_counter()
     if profile_prefix is not None:
+        if not stage_profile:
+            _maybe_sync_for_profile(out)
         _record_tq_profile(
             f"{profile_prefix}.total",
             (time.perf_counter() - t_total) * 1000.0,
@@ -1768,6 +1796,8 @@ __all__ = [
     "encode_cache_update_custom_enabled",
     "encode_cache_update_stage_profile_enabled",
     "fused_decode_attention_m4_enabled",
+    "fused_decode_attention_m4_score_tile_len",
+    "fused_decode_attention_m4_stage_profile_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
     "old_seq_lens_from_total",

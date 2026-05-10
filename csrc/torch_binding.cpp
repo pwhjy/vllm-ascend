@@ -1338,7 +1338,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     int64_t v_bits,
     int64_t head_dim,
     double scale,
-    int64_t max_seq_len)
+    int64_t max_seq_len,
+    int64_t score_tile_len)
 {
     TORCH_CHECK(query.scalar_type() == at::kFloat, "query must be fp32");
     TORCH_CHECK(key.scalar_type() == at::kFloat, "key must be fp32");
@@ -1431,6 +1432,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     TORCH_CHECK(head_dim > 0 && head_dim <= 256,
                 "head_dim must be in (0, 256]");
     TORCH_CHECK(max_seq_len >= 0, "max_seq_len must be non-negative");
+    TORCH_CHECK(score_tile_len >= 0 && score_tile_len <= 64,
+                "score_tile_len must be in [0, 64]");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
@@ -1443,7 +1446,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
         v_packed_idx, v_norm, block_table, old_seq_lens,
         k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
         v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
-        k_total_bits, v_bits, head_dim, scale, max_seq_len, out);
+        k_total_bits, v_bits, head_dim, scale, max_seq_len,
+        score_tile_len, out);
 
     return out;
 }
@@ -1853,7 +1857,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor v_rotation, Tensor v_rotation_t, Tensor v_boundary, "
         "Tensor k_codebook, Tensor v_codebook, "
         "int k_total_bits, int v_bits, int head_dim, "
-        "float scale, int max_seq_len) -> Tensor"
+        "float scale, int max_seq_len, int score_tile_len) -> Tensor"
     );
     ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
              &vllm_ascend::tq_fused_kv_update_attention_decode);
