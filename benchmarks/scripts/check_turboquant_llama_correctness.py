@@ -54,6 +54,18 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_PROFILE_DIR",
     "VLLM_ASCEND_TQ_PROFILE_FLUSH_EVERY",
     "VLLM_ASCEND_TQ_PROFILE_SYNC",
+    "VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION",
+    "VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION",
+    "VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE",
+    "VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA",
+    "VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4",
+    "VLLM_ASCEND_TQ_M4_GROUPED_Q",
+    "VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN",
+    "VLLM_ASCEND_TQ_PROFILE_M4_STAGES",
+    "VLLM_ASCEND_TQ_PROFILE_M4_SHADOW",
+    "VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT",
+    "VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE",
+    "VLLM_ASCEND_TQ_USE_DECODE_COMPRESSED_FULL_CACHE",
 )
 
 DEBUG_COMPARE_ENV_KEYS = (
@@ -116,6 +128,16 @@ def _parse_extra_env(values: list[str] | None) -> dict[str, str]:
             raise ValueError(f"--env expects KEY=VALUE, got: {item!r}")
         env[key] = value
     return env
+
+
+def _variant_extra_env(args: argparse.Namespace, variant: str) -> dict[str, str]:
+    if variant == "plain":
+        return _parse_extra_env(args.env_plain)
+    if variant == "baseline":
+        return _parse_extra_env(args.env_baseline)
+    if variant == "fused":
+        return _parse_extra_env(args.env_fused)
+    return {}
 
 
 def _debug_compare_requested(
@@ -770,6 +792,7 @@ def _run_child(
     start = time.perf_counter()
     log_lines: list[str] = []
     child_env = env.copy()
+    child_env.update(_variant_extra_env(args, variant))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     profile_dir: Path | None = None
     if args.profile_turboquant:
@@ -1117,6 +1140,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--env",
         action="append",
         help="Extra child-process environment variable, in KEY=VALUE form.",
+    )
+    parser.add_argument(
+        "--env-plain",
+        action="append",
+        help="Extra environment variable for only the plain worker.",
+    )
+    parser.add_argument(
+        "--env-baseline",
+        action="append",
+        help="Extra environment variable for only the TurboQuant baseline worker.",
+    )
+    parser.add_argument(
+        "--env-fused",
+        action="append",
+        help="Extra environment variable for only the fused worker.",
     )
     parser.add_argument("--timeout-sec", type=int, default=0)
     parser.add_argument("--no-tqdm", action="store_true", default=True)
