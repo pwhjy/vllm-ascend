@@ -111,12 +111,18 @@ def fused_decode_attention_m4_score_tile_len() -> int:
     """
 
     try:
-        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "16"))
+        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "0"))
     except ValueError:
-        tile_len = 16
+        tile_len = 0
     if tile_len <= 0:
         return 0
     return min(64, max(1, tile_len))
+
+
+def fused_decode_attention_m4_grouped_q_enabled() -> bool:
+    """Process all Q heads that share a KV head in one M4 decode task."""
+
+    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "1") == "1"
 
 
 def compressed_decode_current_custom_k_score_enabled() -> bool:
@@ -1312,6 +1318,7 @@ def tq_fused_decode_history_current_attention(
         float(scale),
         int(max_seq),
         fused_decode_attention_m4_score_tile_len(),
+        1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -1796,6 +1803,7 @@ __all__ = [
     "encode_cache_update_custom_enabled",
     "encode_cache_update_stage_profile_enabled",
     "fused_decode_attention_m4_enabled",
+    "fused_decode_attention_m4_grouped_q_enabled",
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_stage_profile_enabled",
     "fused_kv_update_attention_custom_enabled",

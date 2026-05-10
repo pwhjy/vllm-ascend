@@ -873,7 +873,8 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     int64_t head_dim,
     double scale,
     int64_t max_seq_len,
-    int64_t score_tile_len)
+    int64_t score_tile_len,
+    int64_t grouped_q)
 {
     (void)key;
     (void)value;
@@ -900,6 +901,7 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     (void)scale;
     (void)max_seq_len;
     (void)score_tile_len;
+    (void)grouped_q;
 
     return at::empty(
         {query.size(0), query.size(1), head_dim},

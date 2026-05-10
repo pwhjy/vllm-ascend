@@ -21,6 +21,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t maxBlocksPerSeq;
     uint32_t maxSeqLen;
     uint32_t scoreTileLen;
+    uint32_t groupedQ;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -92,6 +93,7 @@ public:
         maxBlocksPerSeq_ = tiling->maxBlocksPerSeq;
         maxSeqLen_ = tiling->maxSeqLen;
         scoreTileLen_ = tiling->scoreTileLen;
+        groupedQ_ = tiling->groupedQ;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -497,6 +499,32 @@ public:
         }
     }
 
+    __aicore__ inline void BuildGroupedQueryTransforms(
+        uint32_t b,
+        uint32_t kvHead)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        for (uint32_t q = 0; q < 4U; ++q) {
+            uint64_t qBase =
+                (static_cast<uint64_t>(b) * numHeads_ + qHeadBase + q)
+                * headDim_;
+            uint32_t groupBase = q * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                float qRot = 0.0F;
+                float qQjl = 0.0F;
+                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                    float query = queryGm_.GetValue(qBase + inDim);
+                    uint64_t matrixIndex =
+                        static_cast<uint64_t>(inDim) * headDim_ + outDim;
+                    qRot += query * kRotationGm_.GetValue(matrixIndex);
+                    qQjl += query * kQjlQueryMatrixGm_.GetValue(matrixIndex);
+                }
+                qRotGroup_[groupBase + outDim] = qRot;
+                qQjlGroup_[groupBase + outDim] = qQjl;
+            }
+        }
+    }
+
     __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
@@ -515,6 +543,45 @@ public:
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
     }
 
+    __aicore__ inline void HistoryScoresGroupByCacheIndex(uint64_t cacheIndex)
+    {
+        uint64_t idxBase = cacheIndex * kPackedCols_;
+        uint64_t qjlBase = cacheIndex * kQjlCols_;
+        float gamma = kGammaGm_.GetValue(cacheIndex);
+        float norm = kNormGm_.GetValue(cacheIndex);
+        float mseAcc0 = 0.0F;
+        float mseAcc1 = 0.0F;
+        float mseAcc2 = 0.0F;
+        float mseAcc3 = 0.0F;
+        float qjlAcc0 = 0.0F;
+        float qjlAcc1 = 0.0F;
+        float qjlAcc2 = 0.0F;
+        float qjlAcc3 = 0.0F;
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
+            uint32_t qjl = ExtractBits(kPackedQjlGm_, qjlBase, d, 1U);
+            float code = kCodebook_[idx];
+            float sign = qjl != 0U ? 1.0F : -1.0F;
+            mseAcc0 += qRotGroup_[d] * code;
+            mseAcc1 += qRotGroup_[q1Base + d] * code;
+            mseAcc2 += qRotGroup_[q2Base + d] * code;
+            mseAcc3 += qRotGroup_[q3Base + d] * code;
+            qjlAcc0 += qQjlGroup_[d] * sign;
+            qjlAcc1 += qQjlGroup_[q1Base + d] * sign;
+            qjlAcc2 += qQjlGroup_[q2Base + d] * sign;
+            qjlAcc3 += qQjlGroup_[q3Base + d] * sign;
+        }
+        float qjlScale = correction_ * gamma;
+        float outScale = norm * scale_;
+        scoreGroup_[0] = (mseAcc0 + qjlScale * qjlAcc0) * outScale;
+        scoreGroup_[1] = (mseAcc1 + qjlScale * qjlAcc1) * outScale;
+        scoreGroup_[2] = (mseAcc2 + qjlScale * qjlAcc2) * outScale;
+        scoreGroup_[3] = (mseAcc3 + qjlScale * qjlAcc3) * outScale;
+    }
+
     __aicore__ inline void AccumulateHistoryVByCacheIndex(
         uint64_t cacheIndex,
         float weight)
@@ -524,6 +591,23 @@ public:
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(vPackedIdxGm_, vBase, d, vBits_);
             accRot_[d] += scaledNorm * vCodebook_[idx];
+        }
+    }
+
+    __aicore__ inline void AccumulateHistoryVGroupByCacheIndex(uint64_t cacheIndex)
+    {
+        uint64_t vBase = cacheIndex * vPackedCols_;
+        float norm = vNormGm_.GetValue(cacheIndex);
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBits(vPackedIdxGm_, vBase, d, vBits_);
+            float v = vCodebook_[idx] * norm;
+            accRotGroup_[d] += weightGroup_[0] * v;
+            accRotGroup_[q1Base + d] += weightGroup_[1] * v;
+            accRotGroup_[q2Base + d] += weightGroup_[2] * v;
+            accRotGroup_[q3Base + d] += weightGroup_[3] * v;
         }
     }
 
@@ -574,6 +658,57 @@ public:
             accRot_[d] *= scale;
         }
         currentWeight_ *= scale;
+    }
+
+    __aicore__ inline void ScaleGroupedAccumulatorRow(
+        uint32_t q,
+        float scale)
+    {
+        uint32_t base = q * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            accRotGroup_[base + d] *= scale;
+        }
+        currentWeightGroup_[q] *= scale;
+    }
+
+    __aicore__ inline void OnlineWeightsGroup()
+    {
+        for (uint32_t q = 0; q < 4U; ++q) {
+            float score = scoreGroup_[q];
+            if (!initializedGroup_[q]) {
+                maxScoreGroup_[q] = score;
+                sumGroup_[q] = 1.0F;
+                weightGroup_[q] = 1.0F;
+                initializedGroup_[q] = true;
+                continue;
+            }
+
+            if (score > maxScoreGroup_[q]) {
+                float oldScale = ExpScalar(maxScoreGroup_[q] - score);
+                ScaleGroupedAccumulatorRow(q, oldScale);
+                sumGroup_[q] = sumGroup_[q] * oldScale + 1.0F;
+                maxScoreGroup_[q] = score;
+                weightGroup_[q] = 1.0F;
+            } else {
+                float weight = ExpScalar(score - maxScoreGroup_[q]);
+                sumGroup_[q] += weight;
+                weightGroup_[q] = weight;
+            }
+        }
+    }
+
+    __aicore__ inline void OnlineAccumulateHistoryGroup(uint64_t cacheIndex)
+    {
+        OnlineWeightsGroup();
+        AccumulateHistoryVGroupByCacheIndex(cacheIndex);
+    }
+
+    __aicore__ inline void OnlineAccumulateCurrentGroup()
+    {
+        OnlineWeightsGroup();
+        for (uint32_t q = 0; q < 4U; ++q) {
+            currentWeightGroup_[q] += weightGroup_[q];
+        }
     }
 
     __aicore__ inline void AccumulateHistoryTile(
@@ -685,6 +820,53 @@ public:
         }
     }
 
+    __aicore__ inline void ProcessHistoryGroup(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t oldLen)
+    {
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                HistoryScoresGroupByCacheIndex(cacheIndex);
+                OnlineAccumulateHistoryGroup(cacheIndex);
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
+        }
+    }
+
+    __aicore__ inline void CurrentScoresGroup(uint32_t b, uint32_t kvHead)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        uint64_t kBase =
+            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
+        for (uint32_t q = 0; q < 4U; ++q) {
+            uint64_t qBase =
+                (static_cast<uint64_t>(b) * numHeads_ + qHeadBase + q)
+                * headDim_;
+            float acc = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                acc += queryGm_.GetValue(qBase + d) * keyGm_.GetValue(kBase + d);
+            }
+            scoreGroup_[q] = acc * scale_;
+        }
+    }
+
     __aicore__ inline void StoreOutput(uint32_t b, uint32_t head, uint32_t kvHead)
     {
         uint64_t outBase =
@@ -702,6 +884,31 @@ public:
             // history needs inverse rotation.
             acc += currentWeight_ * invSum * valueGm_.GetValue(valueBase + outDim);
             outGm_.SetValue(outBase + outDim, acc);
+        }
+    }
+
+    __aicore__ inline void StoreOutputGroup(uint32_t b, uint32_t kvHead)
+    {
+        uint32_t qHeadBase = kvHead * qPerKv_;
+        uint64_t outBase =
+            (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
+        uint64_t valueBase =
+            (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
+        for (uint32_t q = 0; q < 4U; ++q) {
+            float invSum = sumGroup_[q] > 0.0F ? 1.0F / sumGroup_[q] : 0.0F;
+            uint32_t accBase = q * headDim_;
+            uint64_t outHeadBase = outBase + static_cast<uint64_t>(q) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                float acc = 0.0F;
+                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                    acc += (accRotGroup_[accBase + inDim] * invSum)
+                        * vRotationTGm_.GetValue(
+                            static_cast<uint64_t>(inDim) * headDim_ + outDim);
+                }
+                acc += currentWeightGroup_[q] * invSum
+                    * valueGm_.GetValue(valueBase + outDim);
+                outGm_.SetValue(outHeadBase + outDim, acc);
+            }
         }
     }
 
@@ -762,10 +969,56 @@ public:
         StoreOutput(b, head, kvHead);
     }
 
+    __aicore__ inline void ProcessGroupedKvHead(uint32_t b, uint32_t kvHead)
+    {
+        if (headDim_ == 0U || headDim_ > 256U || numKvHeads_ == 0U
+            || qPerKv_ != 4U || kStage1Bits_ == 0U
+            || kStage1Bits_ > 4U || vBits_ == 0U
+            || vBits_ > 4U || blockSize_ == 0U
+            || maxBlocksPerSeq_ == 0U || kvHead >= numKvHeads_
+            || kvHead * qPerKv_ + 3U >= numHeads_) {
+            return;
+        }
+
+        int64_t slot = slotMappingGm_.GetValue(b);
+        if (slot >= 0) {
+            uint64_t slotHead =
+                static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
+            EncodeCurrentK(b, kvHead, slotHead);
+            EncodeCurrentV(b, kvHead, slotHead);
+        }
+
+        int32_t oldLenRaw = oldSeqLensGm_.GetValue(b);
+        uint32_t oldLen = oldLenRaw > 0 ? static_cast<uint32_t>(oldLenRaw) : 0U;
+        if (oldLen > maxSeqLen_) {
+            oldLen = maxSeqLen_;
+        }
+
+        BuildGroupedQueryTransforms(b, kvHead);
+        for (uint32_t q = 0; q < 4U; ++q) {
+            uint32_t base = q * headDim_;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                accRotGroup_[base + d] = 0.0F;
+            }
+            maxScoreGroup_[q] = -3.4028234663852886e38F;
+            sumGroup_[q] = 0.0F;
+            currentWeightGroup_[q] = 0.0F;
+            initializedGroup_[q] = false;
+            weightGroup_[q] = 0.0F;
+            scoreGroup_[q] = 0.0F;
+        }
+
+        ProcessHistoryGroup(b, kvHead, oldLen);
+        CurrentScoresGroup(b, kvHead);
+        OnlineAccumulateCurrentGroup();
+        StoreOutputGroup(b, kvHead);
+    }
+
     __aicore__ inline void Process()
     {
-        uint64_t totalTasks =
-            static_cast<uint64_t>(batch_) * static_cast<uint64_t>(numHeads_);
+        bool useGrouped = groupedQ_ != 0U && qPerKv_ == 4U;
+        uint64_t totalTasks = static_cast<uint64_t>(batch_)
+            * static_cast<uint64_t>(useGrouped ? numKvHeads_ : numHeads_);
         if (totalTasks == 0U) {
             return;
         }
@@ -777,9 +1030,15 @@ public:
             end = totalTasks;
         }
         for (uint64_t task = start; task < end; ++task) {
-            ProcessOne(
-                static_cast<uint32_t>(task / numHeads_),
-                static_cast<uint32_t>(task % numHeads_));
+            if (useGrouped) {
+                ProcessGroupedKvHead(
+                    static_cast<uint32_t>(task / numKvHeads_),
+                    static_cast<uint32_t>(task % numKvHeads_));
+            } else {
+                ProcessOne(
+                    static_cast<uint32_t>(task / numHeads_),
+                    static_cast<uint32_t>(task % numHeads_));
+            }
         }
     }
 
@@ -818,6 +1077,7 @@ private:
     uint32_t maxBlocksPerSeq_{0};
     uint32_t maxSeqLen_{0};
     uint32_t scoreTileLen_{0};
+    uint32_t groupedQ_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};
@@ -832,6 +1092,14 @@ private:
     float qQjl_[256];
     float accRot_[256];
     float scoreTile_[64];
+    float qRotGroup_[1024];
+    float qQjlGroup_[1024];
+    float accRotGroup_[1024];
+    float scoreGroup_[4];
+    float weightGroup_[4];
+    float maxScoreGroup_[4];
+    float sumGroup_[4];
+    float currentWeightGroup_[4];
     float currentVec_[256];
     float kResidual_[256];
     float kCodebook_[16];
@@ -842,6 +1110,7 @@ private:
     float sum_{0.0F};
     float currentWeight_{0.0F};
     bool initialized_{false};
+    bool initializedGroup_[4];
 };
 
 extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(

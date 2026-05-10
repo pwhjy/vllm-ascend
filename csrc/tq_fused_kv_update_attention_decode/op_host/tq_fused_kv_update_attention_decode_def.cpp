@@ -62,6 +62,7 @@ public:
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);
         this->Attr("maxSeqLen").AttrType(REQUIRED).Int(0);
         this->Attr("scoreTileLen").AttrType(REQUIRED).Int(0);
+        this->Attr("groupedQ").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

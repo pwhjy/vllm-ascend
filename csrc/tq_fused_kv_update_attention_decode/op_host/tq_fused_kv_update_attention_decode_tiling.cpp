@@ -36,6 +36,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const float* scalePtr = attr->GetAttrPointer<float>(3);
     const int64_t* maxSeqLenPtr = attr->GetAttrPointer<int64_t>(4);
     const int64_t* scoreTileLenPtr = attr->GetAttrPointer<int64_t>(5);
+    const int64_t* groupedQPtr = attr->GetAttrPointer<int64_t>(6);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -53,18 +54,20 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     if (scoreTileLen > 64U) {
         scoreTileLen = 64U;
     }
+    bool groupedQAttr = groupedQPtr == nullptr || *groupedQPtr != 0;
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
     }
+    bool groupedQ = groupedQAttr && qPerKv == 4U;
     uint32_t kStage1Bits = kTotalBits > 0 ? kTotalBits - 1U : 0U;
     float correction = headDim == 0U ? 0.0F : 1.2533141373155001F / headDim;
 
     auto platformInfo = platform_ascendc::PlatformAscendC(
         context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
-    uint64_t usefulCore =
-        static_cast<uint64_t>(batch) * static_cast<uint64_t>(numHeads);
+    uint64_t usefulCore = static_cast<uint64_t>(batch)
+        * static_cast<uint64_t>(groupedQ ? numKvHeads : numHeads);
     if (usefulCore > 0U && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);
     }
@@ -81,6 +84,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_maxBlocksPerSeq(maxBlocksPerSeq);
     tiling.set_maxSeqLen(maxSeqLen);
     tiling.set_scoreTileLen(scoreTileLen);
+    tiling.set_groupedQ(groupedQ ? 1U : 0U);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);
