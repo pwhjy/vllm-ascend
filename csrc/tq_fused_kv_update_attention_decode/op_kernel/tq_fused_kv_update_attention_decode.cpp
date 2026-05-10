@@ -488,18 +488,18 @@ public:
     {
         uint64_t qBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
-        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-            float qRot = 0.0F;
-            float qQjl = 0.0F;
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                float q = queryGm_.GetValue(qBase + inDim);
-                uint64_t matrixIndex =
-                    static_cast<uint64_t>(inDim) * headDim_ + outDim;
-                qRot += q * kRotationGm_.GetValue(matrixIndex);
-                qQjl += q * kQjlQueryMatrixGm_.GetValue(matrixIndex);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            qRot_[d] = 0.0F;
+            qQjl_[d] = 0.0F;
+        }
+        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+            float q = queryGm_.GetValue(qBase + inDim);
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                qRot_[outDim] += q * kRotationGm_.GetValue(matrixBase + outDim);
+                qQjl_[outDim] +=
+                    q * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
             }
-            qRot_[outDim] = qRot;
-            qQjl_[outDim] = qQjl;
         }
     }
 
@@ -513,18 +513,19 @@ public:
                 (static_cast<uint64_t>(b) * numHeads_ + qHeadBase + q)
                 * headDim_;
             uint32_t groupBase = q * headDim_;
-            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                float qRot = 0.0F;
-                float qQjl = 0.0F;
-                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                    float query = queryGm_.GetValue(qBase + inDim);
-                    uint64_t matrixIndex =
-                        static_cast<uint64_t>(inDim) * headDim_ + outDim;
-                    qRot += query * kRotationGm_.GetValue(matrixIndex);
-                    qQjl += query * kQjlQueryMatrixGm_.GetValue(matrixIndex);
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                qRotGroup_[groupBase + d] = 0.0F;
+                qQjlGroup_[groupBase + d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float query = queryGm_.GetValue(qBase + inDim);
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    qRotGroup_[groupBase + outDim] +=
+                        query * kRotationGm_.GetValue(matrixBase + outDim);
+                    qQjlGroup_[groupBase + outDim] += query
+                        * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
                 }
-                qRotGroup_[groupBase + outDim] = qRot;
-                qQjlGroup_[groupBase + outDim] = qQjl;
             }
         }
     }
@@ -953,16 +954,23 @@ public:
         uint64_t valueBase =
             (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
         float invSum = sum_ > 0.0F ? 1.0F / sum_ : 0.0F;
-        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-            float acc = 0.0F;
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                acc += (accRot_[inDim] * invSum) * vRotationTGm_.GetValue(
-                    static_cast<uint64_t>(inDim) * headDim_ + outDim);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            currentVec_[d] = 0.0F;
+        }
+        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+            float acc = accRot_[inDim] * invSum;
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                currentVec_[outDim] +=
+                    acc * vRotationTGm_.GetValue(matrixBase + outDim);
             }
+        }
+        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
             // Current dense V is combined in original space; only compressed
             // history needs inverse rotation.
-            acc += currentWeight_ * invSum * valueGm_.GetValue(valueBase + outDim);
-            outGm_.SetValue(outBase + outDim, acc);
+            currentVec_[outDim] +=
+                currentWeight_ * invSum * valueGm_.GetValue(valueBase + outDim);
+            outGm_.SetValue(outBase + outDim, currentVec_[outDim]);
         }
     }
 
@@ -986,16 +994,21 @@ public:
             float invSum = sumGroup_[q] > 0.0F ? 1.0F / sumGroup_[q] : 0.0F;
             uint32_t accBase = q * headDim_;
             uint64_t outHeadBase = outBase + static_cast<uint64_t>(q) * headDim_;
-            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                float acc = 0.0F;
-                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                    acc += (accRotGroup_[accBase + inDim] * invSum)
-                        * vRotationTGm_.GetValue(
-                            static_cast<uint64_t>(inDim) * headDim_ + outDim);
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                currentVec_[d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float acc = accRotGroup_[accBase + inDim] * invSum;
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    currentVec_[outDim] +=
+                        acc * vRotationTGm_.GetValue(matrixBase + outDim);
                 }
-                acc += currentWeightGroup_[q] * invSum
+            }
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                currentVec_[outDim] += currentWeightGroup_[q] * invSum
                     * valueGm_.GetValue(valueBase + outDim);
-                outGm_.SetValue(outHeadBase + outDim, acc);
+                outGm_.SetValue(outHeadBase + outDim, currentVec_[outDim]);
             }
         }
     }
