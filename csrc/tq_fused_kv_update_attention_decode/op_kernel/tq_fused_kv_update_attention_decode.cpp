@@ -508,25 +508,40 @@ public:
         uint32_t kvHead)
     {
         uint32_t qHeadBase = kvHead * qPerKv_;
-        for (uint32_t q = 0; q < 4U; ++q) {
-            uint64_t qBase =
-                (static_cast<uint64_t>(b) * numHeads_ + qHeadBase + q)
-                * headDim_;
-            uint32_t groupBase = q * headDim_;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                qRotGroup_[groupBase + d] = 0.0F;
-                qQjlGroup_[groupBase + d] = 0.0F;
+        uint64_t qBase =
+            (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+            qRotGroup_[d] = 0.0F;
+            qQjlGroup_[d] = 0.0F;
+        }
+        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+            float query0 = queryGm_.GetValue(qBase + inDim);
+            float query1 = queryGm_.GetValue(qBase + q1Base + inDim);
+            float query2 = queryGm_.GetValue(qBase + q2Base + inDim);
+            float query3 = queryGm_.GetValue(qBase + q3Base + inDim);
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                float rot = kRotationGm_.GetValue(matrixBase + outDim);
+                float qjl = kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                qRotGroup_[outDim] += query0 * rot;
+                qRotGroup_[q1Base + outDim] += query1 * rot;
+                qRotGroup_[q2Base + outDim] += query2 * rot;
+                qRotGroup_[q3Base + outDim] += query3 * rot;
+                qQjlGroup_[outDim] += query0 * qjl;
+                qQjlGroup_[q1Base + outDim] += query1 * qjl;
+                qQjlGroup_[q2Base + outDim] += query2 * qjl;
+                qQjlGroup_[q3Base + outDim] += query3 * qjl;
             }
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                float query = queryGm_.GetValue(qBase + inDim);
-                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
-                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                    qRotGroup_[groupBase + outDim] +=
-                        query * kRotationGm_.GetValue(matrixBase + outDim);
-                    qQjlGroup_[groupBase + outDim] += query
-                        * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
-                }
-            }
+        }
+    }
+
+    __aicore__ inline void ZeroGroupedScratch()
+    {
+        for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+            qRotGroup_[d] = 0.0F;
         }
     }
 
@@ -990,26 +1005,45 @@ public:
             (static_cast<uint64_t>(b) * numHeads_ + qHeadBase) * headDim_;
         uint64_t valueBase =
             (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
-        for (uint32_t q = 0; q < 4U; ++q) {
-            float invSum = sumGroup_[q] > 0.0F ? 1.0F / sumGroup_[q] : 0.0F;
-            uint32_t accBase = q * headDim_;
-            uint64_t outHeadBase = outBase + static_cast<uint64_t>(q) * headDim_;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                currentVec_[d] = 0.0F;
-            }
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                float acc = accRotGroup_[accBase + inDim] * invSum;
-                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
-                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                    currentVec_[outDim] +=
-                        acc * vRotationTGm_.GetValue(matrixBase + outDim);
-                }
-            }
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        float invSum0 = sumGroup_[0] > 0.0F ? 1.0F / sumGroup_[0] : 0.0F;
+        float invSum1 = sumGroup_[1] > 0.0F ? 1.0F / sumGroup_[1] : 0.0F;
+        float invSum2 = sumGroup_[2] > 0.0F ? 1.0F / sumGroup_[2] : 0.0F;
+        float invSum3 = sumGroup_[3] > 0.0F ? 1.0F / sumGroup_[3] : 0.0F;
+
+        ZeroGroupedScratch();
+        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+            float acc0 = accRotGroup_[inDim] * invSum0;
+            float acc1 = accRotGroup_[q1Base + inDim] * invSum1;
+            float acc2 = accRotGroup_[q2Base + inDim] * invSum2;
+            float acc3 = accRotGroup_[q3Base + inDim] * invSum3;
+            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
             for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                currentVec_[outDim] += currentWeightGroup_[q] * invSum
-                    * valueGm_.GetValue(valueBase + outDim);
-                outGm_.SetValue(outHeadBase + outDim, currentVec_[outDim]);
+                float rot = vRotationTGm_.GetValue(matrixBase + outDim);
+                qRotGroup_[outDim] += acc0 * rot;
+                qRotGroup_[q1Base + outDim] += acc1 * rot;
+                qRotGroup_[q2Base + outDim] += acc2 * rot;
+                qRotGroup_[q3Base + outDim] += acc3 * rot;
             }
+        }
+        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+            float value = valueGm_.GetValue(valueBase + outDim);
+            qRotGroup_[outDim] += currentWeightGroup_[0] * invSum0 * value;
+            qRotGroup_[q1Base + outDim] +=
+                currentWeightGroup_[1] * invSum1 * value;
+            qRotGroup_[q2Base + outDim] +=
+                currentWeightGroup_[2] * invSum2 * value;
+            qRotGroup_[q3Base + outDim] +=
+                currentWeightGroup_[3] * invSum3 * value;
+            outGm_.SetValue(outBase + outDim, qRotGroup_[outDim]);
+            outGm_.SetValue(
+                outBase + q1Base + outDim, qRotGroup_[q1Base + outDim]);
+            outGm_.SetValue(
+                outBase + q2Base + outDim, qRotGroup_[q2Base + outDim]);
+            outGm_.SetValue(
+                outBase + q3Base + outDim, qRotGroup_[q3Base + outDim]);
         }
     }
 
