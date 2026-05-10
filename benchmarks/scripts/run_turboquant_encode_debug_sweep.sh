@@ -3,37 +3,28 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run fused-only TurboQuant M4 diagnostic modes and print profile breakdowns.
+Run fused-only TurboQuant encode-cache diagnostic modes.
 
 Required:
   TQ_MODEL=/path/to/turboquant_model
 
 Optional:
-  OUT_ROOT=/tmp/tq_m4_debug_sweep_YYYYmmdd_HHMMSS
-  MODES="0 1 2 3 4 5 6 7 8 9"
+  OUT_ROOT=/tmp/tq_encode_debug_sweep_YYYYmmdd_HHMMSS
+  ENCODE_MODES="0 1 2 6"
   MAX_MODEL_LEN=32768
   MAX_TOKENS=8
   TP_SIZE=1
   GPU_MEMORY_UTILIZATION=0.80
   DTYPE=auto
   TQ_QUANTIZATION=ascend
-  M4_SPLIT_CACHE_UPDATE=1
   M4_GROUPED_Q=1
-  M4_PRETRANSFORM_QUERY=1
   PROFILE_SYNC=1
-  PROFILE_ENCODE_STAGES=1
 
-Debug modes:
-  0 full path
-  1 current-only + StoreOutput
-  2 history score only
-  3 history score + online softmax only
-  4 history score + softmax + V accumulate, no StoreOutput/current
-  5 full history + current, no StoreOutput
-  6 minimal kernel overhead + debug write
-  7 BuildQueryTransforms only + debug write
-  8 zero accumulator StoreOutput only, no BuildQueryTransforms/current
-  9 current score + StoreOutput, no BuildQueryTransforms
+Encode debug modes:
+  0 full K+V encode
+  1 K encode only
+  2 V encode only
+  6 minimal slot/task overhead
 EOF
 }
 
@@ -51,19 +42,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-OUT_ROOT="${OUT_ROOT:-/tmp/tq_m4_debug_sweep_$(date +%Y%m%d_%H%M%S)}"
-MODES="${MODES:-0 1 2 3 4 5 6 7 8 9}"
+OUT_ROOT="${OUT_ROOT:-/tmp/tq_encode_debug_sweep_$(date +%Y%m%d_%H%M%S)}"
+ENCODE_MODES="${ENCODE_MODES:-0 1 2 6}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_TOKENS="${MAX_TOKENS:-8}"
 TP_SIZE="${TP_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.80}"
 DTYPE="${DTYPE:-auto}"
 TQ_QUANTIZATION="${TQ_QUANTIZATION:-ascend}"
-M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE:-1}"
 M4_GROUPED_Q="${M4_GROUPED_Q:-1}"
-M4_PRETRANSFORM_QUERY="${M4_PRETRANSFORM_QUERY:-1}"
 PROFILE_SYNC="${PROFILE_SYNC:-1}"
-PROFILE_ENCODE_STAGES="${PROFILE_ENCODE_STAGES:-1}"
 
 unset VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION
 unset VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION
@@ -89,10 +77,10 @@ echo "Repo: ${REPO_ROOT}"
 echo "Git:  $(git rev-parse --short HEAD)"
 echo "Out:  ${OUT_ROOT}"
 
-for mode in ${MODES}; do
-  out="${OUT_ROOT}/mode_${mode}"
+for mode in ${ENCODE_MODES}; do
+  out="${OUT_ROOT}/encode_mode_${mode}"
   echo
-  echo "=== Running M4 debug mode ${mode} -> ${out} ==="
+  echo "=== Running encode debug mode ${mode} -> ${out} ==="
   cmd=(
     python benchmarks/scripts/check_turboquant_llama_correctness.py
     --fused-only
@@ -112,13 +100,14 @@ for mode in ${MODES}; do
     --env-fused VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA=1
     --env-fused VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4=1
     --env-fused VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA=1
+    --env-fused VLLM_ASCEND_TQ_ENCODE_DEBUG_MODE="${mode}"
     --env-fused VLLM_ASCEND_TQ_M4_GROUPED_Q="${M4_GROUPED_Q}"
     --env-fused VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN=0
-    --env-fused VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE}"
-    --env-fused VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY="${M4_PRETRANSFORM_QUERY}"
-    --env-fused VLLM_ASCEND_TQ_M4_DEBUG_MODE="${mode}"
+    --env-fused VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE=1
+    --env-fused VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY=0
+    --env-fused VLLM_ASCEND_TQ_M4_DEBUG_MODE=6
     --env-fused VLLM_ASCEND_TQ_PROFILE_M4_STAGES=1
-    --env-fused VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES="${PROFILE_ENCODE_STAGES}"
+    --env-fused VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES=1
     --env-fused VLLM_ASCEND_TQ_PROFILE_M4_SHADOW=0
     --env-fused VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT=0
     --env-fused VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE=0

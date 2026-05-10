@@ -22,6 +22,7 @@ struct TqEncodeKvToPagedCacheTilingData {
     uint32_t stage1Bits;
     uint32_t vBits;
     uint32_t headDim;
+    uint32_t debugMode;
     uint32_t numCore;
 };
 
@@ -73,6 +74,7 @@ public:
         stage1Bits_ = tiling->stage1Bits;
         vBits_ = tiling->vBits;
         headDim_ = tiling->headDim;
+        debugMode_ = tiling->debugMode;
         numCore_ = tiling->numCore;
         LoadSmallParams();
     }
@@ -337,6 +339,23 @@ public:
         }
 
         uint64_t slotHead = static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
+        if (debugMode_ == 6U) {
+            return;
+        }
+        if (debugMode_ == 1U) {
+            if (partition == 0U) {
+                EncodeK(token, kvHead, slotHead);
+            }
+            return;
+        }
+        if (debugMode_ == 2U) {
+            if (CanPartitionEncode()) {
+                EncodeVPartition(token, kvHead, slotHead, partition);
+            } else if (partition == 0U) {
+                EncodeV(token, kvHead, slotHead);
+            }
+            return;
+        }
         if (CanPartitionEncode()) {
             if (partition == 0U) {
                 EncodeK(token, kvHead, slotHead);
@@ -400,6 +419,7 @@ private:
     uint32_t stage1Bits_{0};
     uint32_t vBits_{0};
     uint32_t headDim_{0};
+    uint32_t debugMode_{0};
     uint32_t numCore_{0};
     float currentVec_[256];
     float kResidual_[256];

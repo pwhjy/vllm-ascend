@@ -726,7 +726,8 @@ void tq_encode_kv_to_paged_cache_meta(
     int64_t total_bits,
     int64_t stage1_bits,
     int64_t v_bits,
-    int64_t head_dim)
+    int64_t head_dim,
+    int64_t debug_mode)
 {
     (void)key;
     (void)value;
@@ -747,6 +748,7 @@ void tq_encode_kv_to_paged_cache_meta(
     (void)stage1_bits;
     (void)v_bits;
     (void)head_dim;
+    (void)debug_mode;
     return;
 }
 

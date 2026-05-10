@@ -168,6 +168,126 @@ def _mode_number(path: Path) -> int:
         return 1_000_000
 
 
+def _print_encode_debug_sweep_summary(output_dir: Path) -> bool:
+    mode_dirs = sorted(
+        (
+            path
+            for path in output_dir.glob("encode_mode_*")
+            if (path / "run_stats.json").exists()
+        ),
+        key=_mode_number,
+    )
+    if not mode_dirs:
+        return False
+
+    rows: dict[int, dict[str, float]] = {}
+    mode_stats: dict[int, dict[str, Any]] = {}
+    print(f"Results: {output_dir}")
+    print("=== Encode Debug Sweep Summary ===")
+    print(
+        f"{'mode':>4s} {'gen_s':>8s} {'out_tok/s':>9s} "
+        f"{'forward':>9s} {'encode':>9s} {'enc_op':>9s} "
+        f"{'enc_prep':>9s} {'m4_total':>9s} {'m4_custom':>9s}"
+    )
+    for mode_dir in mode_dirs:
+        mode = _mode_number(mode_dir)
+        run_stats = _load_json(mode_dir / "run_stats.json")
+        mode_stats[mode] = run_stats
+        fused = run_stats.get("workers", {}).get("fused", {})
+        timing = fused.get("timing", {})
+        throughput = fused.get("throughput", {})
+        stats = (
+            run_stats.get("child_processes", {})
+            .get("fused", {})
+            .get("turboquant_profile", {})
+            .get("stats", {})
+        )
+        row = {
+            "generate_s": float(timing.get("generate_seconds", 0.0)),
+            "out_tps": float(throughput.get("output_tokens_per_second", 0.0)),
+            "forward": _avg_ms(
+                stats, "turboquant_fused_kv_update_attention.forward"
+            ),
+            "encode": _avg_ms(stats, "turboquant_encode_cache_update.total"),
+            "encode_op": _avg_ms(
+                stats, "turboquant_encode_cache_update.custom.op"
+            ),
+            "encode_prepare": _avg_ms(
+                stats, "turboquant_encode_cache_update.custom.prepare_inputs"
+            ),
+            "m4_total": _avg_ms(
+                stats,
+                "turboquant_fused_kv_update_attention.decode.m4_attention.total",
+            ),
+            "m4_custom": _avg_ms(
+                stats,
+                "turboquant_fused_kv_update_attention.decode.m4_attention.custom_op",
+            ),
+        }
+        rows[mode] = row
+        print(
+            f"{mode:4d} {row['generate_s']:8.3f} {row['out_tps']:9.3f} "
+            f"{row['forward']:9.3f} {row['encode']:9.3f} "
+            f"{row['encode_op']:9.3f} {row['encode_prepare']:9.3f} "
+            f"{row['m4_total']:9.3f} {row['m4_custom']:9.3f}"
+        )
+
+    def delta(label: str, lhs: int, rhs: int) -> float | None:
+        if lhs in rows and rhs in rows:
+            value = rows[lhs]["encode_op"] - rows[rhs]["encode_op"]
+            print(f"{label:34s} {value:9.3f} ms/call")
+            return value
+        return None
+
+    print()
+    print("=== Encode Debug Derived Custom-Op Deltas ===")
+    floor = rows.get(6, {}).get("encode_op")
+    if floor is not None:
+        print(f"{'encode_floor (mode6)':34s} {floor:9.3f} ms/call")
+    delta("k_encode (mode1 - mode6)", 1, 6)
+    delta("v_encode (mode2 - mode6)", 2, 6)
+    if all(mode in rows for mode in (0, 1, 2, 6)):
+        interaction = (
+            rows[0]["encode_op"]
+            - rows[1]["encode_op"]
+            - rows[2]["encode_op"]
+            + rows[6]["encode_op"]
+        )
+        print(f"{'full - k - v + floor':34s} {interaction:9.3f} ms/call")
+    print()
+
+    if 0 in rows and 0 in mode_stats:
+        stats0 = (
+            mode_stats[0]
+            .get("child_processes", {})
+            .get("fused", {})
+            .get("turboquant_profile", {})
+            .get("stats", {})
+        )
+        calls = _calls(stats0, "turboquant_encode_cache_update.custom.op")
+        generate_ms = _worker_generate_ms(mode_stats[0], "fused")
+        print("=== Encode Debug Cost Model (mode0 call-count estimate) ===")
+        print(f"{'component':24s} {'avg_ms':>9s} {'est_total_ms':>12s} {'pct_gen':>8s}")
+        components: list[tuple[str, float]] = []
+        if floor is not None:
+            components.append(("encode_floor", floor))
+        for name, lhs, rhs in (
+            ("k_encode", 1, 6),
+            ("v_encode", 2, 6),
+        ):
+            if lhs in rows and rhs in rows:
+                components.append((name, rows[lhs]["encode_op"] - rows[rhs]["encode_op"]))
+        if all(mode in rows for mode in (0, 1, 2, 6)):
+            components.append(("interaction", interaction))
+        for name, avg in components:
+            total = avg * calls
+            pct_gen = total / generate_ms * 100.0 if generate_ms > 0 else 0.0
+            print(f"{name:24s} {avg:9.3f} {total:12.3f} {pct_gen:8.2f}")
+        print()
+
+    return True
+
+
 def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
     mode_dirs = sorted(
         (path for path in output_dir.glob("mode_*") if (path / "run_stats.json").exists()),
@@ -361,6 +481,8 @@ def main() -> int:
     args = parser.parse_args()
 
     if not (args.output_dir / "run_stats.json").exists():
+        if _print_encode_debug_sweep_summary(args.output_dir):
+            return 0
         if _print_m4_debug_sweep_summary(args.output_dir):
             return 0
         raise SystemExit(f"run_stats.json not found under {args.output_dir}")

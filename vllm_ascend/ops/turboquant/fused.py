@@ -134,7 +134,17 @@ def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
 def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     """Precompute M4 query transforms with NPU matmul before the custom op."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "0") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
+
+
+def encode_cache_update_debug_mode() -> int:
+    """Diagnostic mode for decomposing the fused K/V encode custom op."""
+
+    try:
+        mode = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_DEBUG_MODE", "0"))
+    except ValueError:
+        mode = 0
+    return min(6, max(0, mode))
 
 
 def fused_decode_attention_m4_debug_mode() -> int:
@@ -784,6 +794,7 @@ def tq_encode_kv_to_paged_cache(
                     int(k_stage1_bits),
                     int(v_bits),
                     int(key.shape[-1]),
+                    encode_cache_update_debug_mode(),
                 )
                 stage_t0 = _custom_stage_record(
                     "custom.op",
@@ -1881,6 +1892,7 @@ __all__ = [
     "compressed_decode_current_enabled",
     "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
+    "encode_cache_update_debug_mode",
     "encode_cache_update_stage_profile_enabled",
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",

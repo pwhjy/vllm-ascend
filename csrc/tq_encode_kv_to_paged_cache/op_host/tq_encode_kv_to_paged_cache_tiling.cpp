@@ -29,6 +29,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     const int64_t* stage1BitsPtr = attr->GetAttrPointer<int64_t>(1);
     const int64_t* vBitsPtr = attr->GetAttrPointer<int64_t>(2);
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(3);
+    const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(4);
 
     uint32_t totalBits = static_cast<uint32_t>(
         totalBitsPtr != nullptr ? *totalBitsPtr : 0);
@@ -38,6 +39,12 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
         vBitsPtr != nullptr ? *vBitsPtr : 0);
     uint32_t headDim = static_cast<uint32_t>(
         headDimPtr != nullptr ? *headDimPtr : 0);
+    int64_t debugModeAttr = debugModePtr != nullptr ? *debugModePtr : 0;
+    uint32_t debugMode =
+        debugModeAttr > 0 ? static_cast<uint32_t>(debugModeAttr) : 0U;
+    if (debugMode > 6U) {
+        debugMode = 6U;
+    }
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
@@ -64,6 +71,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     tiling.set_stage1Bits(stage1Bits);
     tiling.set_vBits(vBits);
     tiling.set_headDim(headDim);
+    tiling.set_debugMode(debugMode);
     tiling.set_numCore(coreNum);
 
     context->SetBlockDim(coreNum);

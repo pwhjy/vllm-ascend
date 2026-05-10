@@ -46,6 +46,7 @@ public:
         this->Attr("stage1Bits").AttrType(REQUIRED).Int(0);
         this->Attr("vBits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
+        this->Attr("debugMode").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
