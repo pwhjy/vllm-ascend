@@ -876,7 +876,8 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     int64_t score_tile_len,
     int64_t grouped_q,
     int64_t skip_cache_update,
-    int64_t debug_mode)
+    int64_t debug_mode,
+    int64_t pretransformed_query)
 {
     (void)key;
     (void)value;
@@ -906,6 +907,7 @@ at::Tensor tq_fused_kv_update_attention_decode_meta(
     (void)grouped_q;
     (void)skip_cache_update;
     (void)debug_mode;
+    (void)pretransformed_query;
 
     return at::empty(
         {query.size(0), query.size(1), head_dim},

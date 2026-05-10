@@ -123,7 +123,13 @@ def _print_m4_stage_table(run_stats: dict[str, Any], variant: str) -> None:
         return
     total_ms = float(total.get("total_ms", 0.0))
     print(f"=== M4 Stage Breakdown: {variant} ===")
-    for suffix in ("prepare_inputs", "custom_op", "output_cast", "total"):
+    for suffix in (
+        "prepare_inputs",
+        "pretransform_query",
+        "custom_op",
+        "output_cast",
+        "total",
+    ):
         key = f"{prefix}.{suffix}"
         stat = stats.get(key)
         if not stat:
@@ -145,6 +151,14 @@ def _avg_ms(stats: dict[str, Any], key: str) -> float:
     if calls <= 0:
         return 0.0
     return float(stat.get("total_ms", 0.0)) / calls
+
+
+def _total_ms(stats: dict[str, Any], key: str) -> float:
+    return float(stats.get(key, {}).get("total_ms", 0.0))
+
+
+def _calls(stats: dict[str, Any], key: str) -> int:
+    return int(stats.get(key, {}).get("calls", 0))
 
 
 def _mode_number(path: Path) -> int:
@@ -170,11 +184,14 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
         f"{'mode':>4s} {'gen_s':>8s} {'out_tok/s':>9s} "
         f"{'forward':>9s} {'encode':>9s} {'enc_op':>9s} "
         f"{'m4_total':>9s} "
-        f"{'custom':>9s} {'prepare':>9s} {'out_cast':>9s} {'ref':>9s}"
+        f"{'custom':>9s} {'prepare':>9s} {'pre_xform':>9s} "
+        f"{'out_cast':>9s} {'ref':>9s}"
     )
+    mode_stats: dict[int, dict[str, Any]] = {}
     for mode_dir in mode_dirs:
         mode = _mode_number(mode_dir)
         run_stats = _load_json(mode_dir / "run_stats.json")
+        mode_stats[mode] = run_stats
         fused = run_stats.get("workers", {}).get("fused", {})
         timing = fused.get("timing", {})
         throughput = fused.get("throughput", {})
@@ -197,6 +214,7 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
             "m4_total": _avg_ms(stats, f"{prefix}.total"),
             "custom": _avg_ms(stats, f"{prefix}.custom_op"),
             "prepare": _avg_ms(stats, f"{prefix}.prepare_inputs"),
+            "pretransform": _avg_ms(stats, f"{prefix}.pretransform_query"),
             "out_cast": _avg_ms(stats, f"{prefix}.output_cast"),
             "ref": _avg_ms(
                 stats, "turboquant_fused_kv_update_attention.reference.total"
@@ -208,7 +226,8 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
             f"{row['forward']:9.3f} {row['encode']:9.3f} "
             f"{row['encode_op']:9.3f} "
             f"{row['m4_total']:9.3f} {row['custom']:9.3f} "
-            f"{row['prepare']:9.3f} {row['out_cast']:9.3f} {row['ref']:9.3f}"
+            f"{row['prepare']:9.3f} {row['pretransform']:9.3f} "
+            f"{row['out_cast']:9.3f} {row['ref']:9.3f}"
         )
 
     def delta(label: str, lhs: int, rhs: int) -> None:
@@ -227,7 +246,112 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
     delta("history+softmax+v no_store (mode5 - mode7)", 5, 7)
     delta("query+history score (mode2 - mode6)", 2, 6)
     print()
+
+    _print_m4_debug_cost_model(rows, mode_stats, prefix)
     return True
+
+
+def _print_m4_debug_cost_model(
+    rows: dict[int, dict[str, float]],
+    mode_stats: dict[int, dict[str, Any]],
+    prefix: str,
+) -> None:
+    if 0 not in rows or 0 not in mode_stats:
+        return
+
+    stats0 = (
+        mode_stats[0]
+        .get("child_processes", {})
+        .get("fused", {})
+        .get("turboquant_profile", {})
+        .get("stats", {})
+    )
+    m4_calls = _calls(stats0, f"{prefix}.custom_op")
+    generate_ms = _worker_generate_ms(mode_stats[0], "fused")
+    full_custom = rows[0]["custom"]
+    if m4_calls <= 0 or full_custom <= 0.0:
+        return
+
+    def row_delta(lhs: int, rhs: int) -> float | None:
+        if lhs not in rows or rhs not in rows:
+            return None
+        return rows[lhs]["custom"] - rows[rhs]["custom"]
+
+    components: list[tuple[str, float, str]] = []
+    if 6 in rows:
+        components.append(("m4_kernel_floor", rows[6]["custom"], "mode6 custom"))
+    for name, lhs, rhs, note in (
+        ("query_transform", 7, 6, "mode7 - mode6"),
+        ("history_score", 2, 7, "mode2 - mode7"),
+        ("history_online_v", 5, 7, "mode5 - mode7"),
+        ("output_store", 0, 5, "mode0 - mode5"),
+        ("zero_store_floor", 8, 6, "mode8 - mode6"),
+        ("current_score_online", 9, 8, "mode9 - mode8"),
+    ):
+        value = row_delta(lhs, rhs)
+        if value is not None:
+            components.append((name, value, note))
+
+    direct_components = (
+        ("m4_prepare_inputs", rows[0]["prepare"], "mode0 stage"),
+        ("m4_pretransform_query", rows[0]["pretransform"], "mode0 stage"),
+        ("m4_output_cast", rows[0]["out_cast"], "mode0 stage"),
+        ("encode_custom_op", rows[0]["encode_op"], "mode0 avg"),
+    )
+
+    print("=== M4 Debug Cost Model (mode0 call-count estimate) ===")
+    print(
+        f"{'component':24s} {'avg_ms':>9s} {'est_total_ms':>12s} "
+        f"{'pct_m4_custom':>14s} {'pct_gen':>8s}  source"
+    )
+    for name, avg, note in components:
+        total = avg * m4_calls
+        pct_custom = avg / full_custom * 100.0 if full_custom else 0.0
+        pct_gen = total / generate_ms * 100.0 if generate_ms > 0 else 0.0
+        print(
+            f"{name:24s} {avg:9.3f} {total:12.3f} "
+            f"{pct_custom:14.2f} {pct_gen:8.2f}  {note}"
+        )
+
+    print()
+    print("=== Adjacent Module Averages (mode0) ===")
+    print(f"{'module':24s} {'avg_ms':>9s} {'total_ms':>12s} {'pct_gen':>8s}")
+    for name, avg, note in direct_components:
+        if name == "encode_custom_op":
+            total = _total_ms(stats0, "turboquant_encode_cache_update.custom.op")
+        elif name == "m4_prepare_inputs":
+            total = _total_ms(stats0, f"{prefix}.prepare_inputs")
+        elif name == "m4_pretransform_query":
+            total = _total_ms(stats0, f"{prefix}.pretransform_query")
+        else:
+            total = _total_ms(stats0, f"{prefix}.output_cast")
+        pct_gen = total / generate_ms * 100.0 if generate_ms > 0 else 0.0
+        print(f"{name:24s} {avg:9.3f} {total:12.3f} {pct_gen:8.2f}  {note}")
+    print()
+
+    candidates: list[tuple[float, str]] = []
+    for name, avg, _ in components:
+        if avg > 0:
+            candidates.append((avg * m4_calls, name))
+    encode_total = _total_ms(stats0, "turboquant_encode_cache_update.custom.op")
+    if encode_total > 0:
+        candidates.append((encode_total, "encode_custom_op"))
+    pretransform_total = _total_ms(stats0, f"{prefix}.pretransform_query")
+    if pretransform_total > 0:
+        candidates.append((pretransform_total, "m4_pretransform_query"))
+    prepare_total = _total_ms(stats0, f"{prefix}.prepare_inputs")
+    if prepare_total > 0:
+        candidates.append((prepare_total, "m4_prepare_inputs"))
+    out_cast_total = _total_ms(stats0, f"{prefix}.output_cast")
+    if out_cast_total > 0:
+        candidates.append((out_cast_total, "m4_output_cast"))
+    candidates.sort(reverse=True)
+    if candidates:
+        print("=== Suggested Optimization Order ===")
+        for total, name in candidates[:5]:
+            pct_gen = total / generate_ms * 100.0 if generate_ms > 0 else 0.0
+            print(f"{name:24s} est_total_ms={total:10.3f} pct_gen={pct_gen:7.2f}")
+        print()
 
 
 def main() -> int:

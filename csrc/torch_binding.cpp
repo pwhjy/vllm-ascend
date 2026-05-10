@@ -1342,7 +1342,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     int64_t score_tile_len,
     int64_t grouped_q,
     int64_t skip_cache_update,
-    int64_t debug_mode)
+    int64_t debug_mode,
+    int64_t pretransformed_query)
 {
     TORCH_CHECK(query.scalar_type() == at::kFloat, "query must be fp32");
     TORCH_CHECK(key.scalar_type() == at::kFloat, "key must be fp32");
@@ -1412,11 +1413,19 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "cache num_kv_heads must match key");
     TORCH_CHECK(query.size(2) == head_dim && key.size(2) == head_dim,
                 "last dim must match head_dim");
-    TORCH_CHECK(k_rotation.size(0) == head_dim && k_rotation.size(1) == head_dim,
-                "k_rotation must be [head_dim, head_dim]");
-    TORCH_CHECK(k_qjl_query_matrix.size(0) == head_dim
-                    && k_qjl_query_matrix.size(1) == head_dim,
-                "k_qjl_query_matrix must be [head_dim, head_dim]");
+    if (pretransformed_query != 0) {
+        TORCH_CHECK(k_rotation.sizes() == query.sizes(),
+                    "pretransformed q_rot must match query shape");
+        TORCH_CHECK(k_qjl_query_matrix.sizes() == query.sizes(),
+                    "pretransformed q_qjl must match query shape");
+    } else {
+        TORCH_CHECK(k_rotation.size(0) == head_dim
+                        && k_rotation.size(1) == head_dim,
+                    "k_rotation must be [head_dim, head_dim]");
+        TORCH_CHECK(k_qjl_query_matrix.size(0) == head_dim
+                        && k_qjl_query_matrix.size(1) == head_dim,
+                    "k_qjl_query_matrix must be [head_dim, head_dim]");
+    }
     TORCH_CHECK(k_qjl_proj_t.size(0) == head_dim
                     && k_qjl_proj_t.size(1) == head_dim,
                 "k_qjl_proj_t must be [head_dim, head_dim]");
@@ -1443,6 +1452,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "skip_cache_update must be 0 or 1");
     TORCH_CHECK(debug_mode >= 0 && debug_mode <= 9,
                 "debug_mode must be in [0, 9]");
+    TORCH_CHECK(pretransformed_query == 0 || pretransformed_query == 1,
+                "pretransformed_query must be 0 or 1");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
@@ -1456,7 +1467,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
         k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
         v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
         k_total_bits, v_bits, head_dim, scale, max_seq_len,
-        score_tile_len, grouped_q, skip_cache_update, debug_mode, out);
+        score_tile_len, grouped_q, skip_cache_update, debug_mode,
+        pretransformed_query, out);
 
     return out;
 }
@@ -1867,7 +1879,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor k_codebook, Tensor v_codebook, "
         "int k_total_bits, int v_bits, int head_dim, "
         "float scale, int max_seq_len, int score_tile_len, "
-        "int grouped_q, int skip_cache_update, int debug_mode) -> Tensor"
+        "int grouped_q, int skip_cache_update, int debug_mode, "
+        "int pretransformed_query) -> Tensor"
     );
     ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
              &vllm_ascend::tq_fused_kv_update_attention_decode);

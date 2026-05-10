@@ -131,6 +131,12 @@ def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "0") == "1"
 
 
+def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
+    """Precompute M4 query transforms with NPU matmul before the custom op."""
+
+    return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "0") == "1"
+
+
 def fused_decode_attention_m4_debug_mode() -> int:
     """Diagnostic mode for decomposing the M4 decode custom op.
 
@@ -1339,6 +1345,28 @@ def tq_fused_decode_history_current_attention(
             vectors=int(query.shape[0]),
         )
         t_stage = time.perf_counter()
+    debug_mode = fused_decode_attention_m4_debug_mode()
+    pretransform_query = (
+        split_cache_update
+        and fused_decode_attention_m4_pretransform_query_enabled()
+        and debug_mode not in (6, 8, 9)
+    )
+    if pretransform_query:
+        q_rot_f = torch.matmul(query_f, k_rotation_f).contiguous()
+        q_qjl_f = torch.matmul(query_f, k_qjl_query_matrix_f).contiguous()
+        if stage_profile:
+            _maybe_sync_for_profile(q_rot_f, q_qjl_f)
+            _record_tq_profile(
+                f"{profile_prefix}.pretransform_query",
+                (time.perf_counter() - t_stage) * 1000.0,
+                vectors=int(query.shape[0]),
+            )
+            t_stage = time.perf_counter()
+        k_rotation_arg = q_rot_f
+        k_qjl_query_matrix_arg = q_qjl_f
+    else:
+        k_rotation_arg = k_rotation_f
+        k_qjl_query_matrix_arg = k_qjl_query_matrix_f
     out = torch.ops._C_ascend.tq_fused_kv_update_attention_decode(
         query_f,
         key_f,
@@ -1352,8 +1380,8 @@ def tq_fused_decode_history_current_attention(
         kv_cache["v_norm"],
         block_table_i32,
         old_seq_lens_t,
-        k_rotation_f,
-        k_qjl_query_matrix_f,
+        k_rotation_arg,
+        k_qjl_query_matrix_arg,
         k_qjl_proj_t_f,
         k_boundary_f,
         v_rotation_f,
@@ -1369,7 +1397,8 @@ def tq_fused_decode_history_current_attention(
         fused_decode_attention_m4_score_tile_len(),
         1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
         1 if split_cache_update else 0,
-        fused_decode_attention_m4_debug_mode(),
+        debug_mode,
+        1 if pretransform_query else 0,
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -1856,6 +1885,7 @@ __all__ = [
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",
+    "fused_decode_attention_m4_pretransform_query_enabled",
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_split_cache_update_enabled",
     "fused_decode_attention_m4_stage_profile_enabled",

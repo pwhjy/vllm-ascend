@@ -24,6 +24,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t groupedQ;
     uint32_t skipCacheUpdate;
     uint32_t debugMode;
+    uint32_t pretransformedQuery;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -98,6 +99,7 @@ public:
         groupedQ_ = tiling->groupedQ;
         skipCacheUpdate_ = tiling->skipCacheUpdate;
         debugMode_ = tiling->debugMode;
+        pretransformedQuery_ = tiling->pretransformedQuery;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -488,6 +490,13 @@ public:
     {
         uint64_t qBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
+        if (pretransformedQuery_ != 0U) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                qRot_[d] = kRotationGm_.GetValue(qBase + d);
+                qQjl_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
         for (uint32_t d = 0; d < headDim_; ++d) {
             qRot_[d] = 0.0F;
             qQjl_[d] = 0.0F;
@@ -513,6 +522,13 @@ public:
         uint32_t q1Base = headDim_;
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
+        if (pretransformedQuery_ != 0U) {
+            for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+                qRotGroup_[d] = kRotationGm_.GetValue(qBase + d);
+                qQjlGroup_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
         for (uint32_t d = 0; d < 4U * headDim_; ++d) {
             qRotGroup_[d] = 0.0F;
             qQjlGroup_[d] = 0.0F;
@@ -1410,6 +1426,7 @@ private:
     uint32_t groupedQ_{0};
     uint32_t skipCacheUpdate_{0};
     uint32_t debugMode_{0};
+    uint32_t pretransformedQuery_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};

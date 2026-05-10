@@ -65,6 +65,7 @@ public:
         this->Attr("groupedQ").AttrType(REQUIRED).Int(1);
         this->Attr("skipCacheUpdate").AttrType(REQUIRED).Int(0);
         this->Attr("debugMode").AttrType(REQUIRED).Int(0);
+        this->Attr("pretransformedQuery").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
