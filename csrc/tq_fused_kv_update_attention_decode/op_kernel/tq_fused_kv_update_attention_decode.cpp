@@ -140,16 +140,6 @@ public:
         return sqrtLocal.GetValue(0);
     }
 
-    __aicore__ inline uint64_t CacheIndex(uint32_t b, uint32_t kvHead, uint32_t pos)
-    {
-        uint32_t blockOffset = pos / blockSize_;
-        uint32_t tokenOffset = pos - blockOffset * blockSize_;
-        int32_t blockId = blockTableGm_.GetValue(
-            static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
-        return ((static_cast<uint64_t>(blockId) * blockSize_ + tokenOffset)
-            * numKvHeads_ + kvHead);
-    }
-
     __aicore__ inline uint32_t ExtractBits(
         GlobalTensor<uint8_t>& packed,
         uint64_t packedBase,
@@ -505,9 +495,8 @@ public:
         }
     }
 
-    __aicore__ inline float HistoryScore(uint32_t b, uint32_t kvHead, uint32_t pos)
+    __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
     {
-        uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
         uint64_t idxBase = cacheIndex * kPackedCols_;
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
@@ -524,17 +513,15 @@ public:
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
     }
 
-    __aicore__ inline void LoadHistoryVRot(
-        uint32_t b,
-        uint32_t kvHead,
-        uint32_t pos)
+    __aicore__ inline void AccumulateHistoryVByCacheIndex(
+        uint64_t cacheIndex,
+        float weight)
     {
-        uint64_t cacheIndex = CacheIndex(b, kvHead, pos);
         uint64_t vBase = cacheIndex * vPackedCols_;
-        float norm = vNormGm_.GetValue(cacheIndex);
+        float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(vPackedIdxGm_, vBase, d, vBits_);
-            vTmp_[d] = vCodebook_[idx] * norm;
+            accRot_[d] += scaledNorm * vCodebook_[idx];
         }
     }
 
@@ -566,12 +553,12 @@ public:
         return weight;
     }
 
-    __aicore__ inline void OnlineAccumulateHistory(float score)
+    __aicore__ inline void OnlineAccumulateHistoryByCacheIndex(
+        float score,
+        uint64_t cacheIndex)
     {
         float weight = OnlineStep(score);
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            accRot_[d] += weight * vTmp_[d];
-        }
+        AccumulateHistoryVByCacheIndex(cacheIndex, weight);
     }
 
     __aicore__ inline void OnlineAccumulateCurrent(float score)
@@ -602,8 +589,10 @@ public:
     __aicore__ inline void ProcessOne(uint32_t b, uint32_t head)
     {
         if (headDim_ == 0U || headDim_ > 256U || numKvHeads_ == 0U
-            || kStage1Bits_ == 0U || kStage1Bits_ > 4U || vBits_ == 0U
-            || vBits_ > 4U) {
+            || qPerKv_ == 0U || kStage1Bits_ == 0U
+            || kStage1Bits_ > 4U || vBits_ == 0U
+            || vBits_ > 4U || blockSize_ == 0U
+            || maxBlocksPerSeq_ == 0U) {
             return;
         }
 
@@ -647,10 +636,28 @@ public:
         currentWeight_ = 0.0F;
         initialized_ = false;
 
-        for (uint32_t pos = 0; pos < oldLen; ++pos) {
-            float score = HistoryScore(b, kvHead, pos);
-            LoadHistoryVRot(b, kvHead, pos);
-            OnlineAccumulateHistory(score);
+        uint32_t pos = 0;
+        uint32_t blockOffset = 0;
+        while (pos < oldLen) {
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_;
+            uint32_t remaining = oldLen - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            for (uint32_t tokenOffset = 0; tokenOffset < tokensInBlock;
+                 ++tokenOffset) {
+                uint64_t cacheIndex =
+                    cacheBase + static_cast<uint64_t>(tokenOffset) * numKvHeads_;
+                float score = HistoryScoreByCacheIndex(cacheIndex);
+                OnlineAccumulateHistoryByCacheIndex(score, cacheIndex);
+            }
+            pos += tokensInBlock;
+            ++blockOffset;
         }
 
         float curScore = CurrentScore(b, head, kvHead);
@@ -726,7 +733,6 @@ private:
     float qRot_[256];
     float qQjl_[256];
     float accRot_[256];
-    float vTmp_[256];
     float currentVec_[256];
     float kResidual_[256];
     float kCodebook_[16];

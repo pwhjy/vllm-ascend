@@ -92,6 +92,12 @@ def fused_decode_attention_m4_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4", "0") == "1"
 
 
+def fused_decode_attention_m4_shadow_profile_enabled() -> bool:
+    """Run the decomposed reference path only to profile M4 decode stages."""
+
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_M4_SHADOW", "0") == "1"
+
+
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
@@ -623,6 +629,23 @@ def tq_encode_kv_to_paged_cache(
     if custom_enabled:
         _maybe_sync_for_profile(key, value, slot_mapping)
         custom_t0 = time.perf_counter()
+        stage_profile = encode_cache_update_stage_profile_enabled()
+
+        def _custom_stage_record(
+            name: str,
+            start: float,
+            *objs,
+        ) -> float:
+            if not stage_profile:
+                return time.perf_counter()
+            _maybe_sync_for_profile(*objs)
+            _record_tq_profile(
+                f"turboquant_encode_cache_update.{name}",
+                (time.perf_counter() - start) * 1000.0,
+                vectors=int(slot_mapping.numel()) * int(key.shape[1]),
+            )
+            return time.perf_counter()
+
         fallback_reasons: list[str] = []
         if k_variant != "prod":
             fallback_reasons.append(f"unsupported K variant: {k_variant}")
@@ -650,28 +673,69 @@ def tq_encode_kv_to_paged_cache(
 
         if not fallback_reasons:
             try:
+                stage_t0 = time.perf_counter()
+                key_f = key.to(torch.float32).contiguous()
+                value_f = value.to(torch.float32).contiguous()
+                slot_mapping_i64 = slot_mapping.to(torch.long).contiguous()
+                k_qjl_cache = kv_cache.get(
+                    "k_qjl",
+                    torch.empty(0, device=key.device, dtype=torch.uint8),
+                )
+                k_gamma_cache = kv_cache.get(
+                    "k_gamma",
+                    torch.empty(0, device=key.device, dtype=torch.float32),
+                )
+                k_rotation_f = k_rotation.contiguous()
+                k_boundary_c = k_boundary.contiguous()
+                k_codebook_c = k_codebook.contiguous()
+                k_qjl_proj_t_c = (
+                    k_qjl_proj_t
+                    if k_qjl_proj_t is not None
+                    else k_qjl_proj.transpose(0, 1)
+                ).contiguous()
+                v_rotation_f = v_rotation.contiguous()
+                v_boundary_c = v_boundary.contiguous()
+                stage_t0 = _custom_stage_record(
+                    "custom.prepare_inputs",
+                    stage_t0,
+                    key_f,
+                    value_f,
+                    slot_mapping_i64,
+                    k_rotation_f,
+                    k_boundary_c,
+                    k_codebook_c,
+                    k_qjl_proj_t_c,
+                    v_rotation_f,
+                    v_boundary_c,
+                )
                 torch.ops._C_ascend.tq_encode_kv_to_paged_cache(
-                    key.to(torch.float32).contiguous(),
-                    value.to(torch.float32).contiguous(),
-                    slot_mapping.to(torch.long).contiguous(),
+                    key_f,
+                    value_f,
+                    slot_mapping_i64,
                     kv_cache["k_idx"],
-                    kv_cache.get("k_qjl", torch.empty(0, device=key.device, dtype=torch.uint8)),
-                    kv_cache.get("k_gamma", torch.empty(0, device=key.device, dtype=torch.float32)),
+                    k_qjl_cache,
+                    k_gamma_cache,
                     kv_cache["k_norm"],
                     kv_cache["v_idx"],
                     kv_cache["v_norm"],
-                    k_rotation.contiguous(),
-                    k_boundary.contiguous(),
-                    k_codebook.contiguous(),
-                    (k_qjl_proj_t if k_qjl_proj_t is not None else k_qjl_proj.transpose(0, 1)).contiguous(),
-                    v_rotation.contiguous(),
-                    v_boundary.contiguous(),
+                    k_rotation_f,
+                    k_boundary_c,
+                    k_codebook_c,
+                    k_qjl_proj_t_c,
+                    v_rotation_f,
+                    v_boundary_c,
                     int(k_total_bits),
                     int(k_stage1_bits),
                     int(v_bits),
                     int(key.shape[-1]),
                 )
-                _maybe_sync_for_profile(kv_cache)
+                stage_t0 = _custom_stage_record(
+                    "custom.op",
+                    stage_t0,
+                    kv_cache,
+                )
+                if not stage_profile:
+                    _maybe_sync_for_profile(kv_cache)
                 _record_tq_profile(
                     "turboquant_encode_cache_update.total",
                     (time.perf_counter() - custom_t0) * 1000.0,
@@ -1156,42 +1220,126 @@ def tq_fused_decode_history_current_attention(
 
     if profile_prefix is not None:
         _maybe_sync_for_profile(*tensors)
-        t0 = time.perf_counter()
+        t_total = time.perf_counter()
+        t_stage = t_total
+    query_f = query.to(torch.float32).contiguous()
+    key_f = key.to(torch.float32).contiguous()
+    value_f = value.to(torch.float32).contiguous()
+    slot_mapping_i64 = slot_mapping.to(torch.long).contiguous()
+    block_table_i32 = block_table.to(torch.int32).contiguous()
+    k_rotation_f = k_rotation.to(torch.float32).contiguous()
+    k_qjl_query_matrix_f = k_qjl_query_matrix.to(torch.float32).contiguous()
+    k_qjl_proj_t_f = k_qjl_proj_t.to(torch.float32).contiguous()
+    k_boundary_f = k_boundary.to(torch.float32).contiguous()
+    v_rotation_f = v_rotation.to(torch.float32).contiguous()
+    v_rotation_t_f = v_rotation_t.to(torch.float32).contiguous()
+    v_boundary_f = v_boundary.to(torch.float32).contiguous()
+    k_codebook_f = k_codebook.to(torch.float32).contiguous()
+    v_codebook_f = v_codebook.to(torch.float32).contiguous()
+    if profile_prefix is not None:
+        _maybe_sync_for_profile(
+            query_f,
+            key_f,
+            value_f,
+            slot_mapping_i64,
+            block_table_i32,
+            k_rotation_f,
+            k_qjl_query_matrix_f,
+            k_qjl_proj_t_f,
+            k_boundary_f,
+            v_rotation_f,
+            v_rotation_t_f,
+            v_boundary_f,
+            k_codebook_f,
+            v_codebook_f,
+        )
+        _record_tq_profile(
+            f"{profile_prefix}.prepare_inputs",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(query.shape[0]),
+        )
+        t_stage = time.perf_counter()
     out = torch.ops._C_ascend.tq_fused_kv_update_attention_decode(
-        query.to(torch.float32).contiguous(),
-        key.to(torch.float32).contiguous(),
-        value.to(torch.float32).contiguous(),
-        slot_mapping.to(torch.long).contiguous(),
+        query_f,
+        key_f,
+        value_f,
+        slot_mapping_i64,
         kv_cache["k_idx"],
         kv_cache["k_qjl"],
         kv_cache["k_gamma"],
         kv_cache["k_norm"],
         kv_cache["v_idx"],
         kv_cache["v_norm"],
-        block_table.to(torch.int32).contiguous(),
+        block_table_i32,
         old_seq_lens_t,
-        k_rotation.to(torch.float32).contiguous(),
-        k_qjl_query_matrix.to(torch.float32).contiguous(),
-        k_qjl_proj_t.to(torch.float32).contiguous(),
-        k_boundary.to(torch.float32).contiguous(),
-        v_rotation.to(torch.float32).contiguous(),
-        v_rotation_t.to(torch.float32).contiguous(),
-        v_boundary.to(torch.float32).contiguous(),
-        k_codebook.to(torch.float32).contiguous(),
-        v_codebook.to(torch.float32).contiguous(),
+        k_rotation_f,
+        k_qjl_query_matrix_f,
+        k_qjl_proj_t_f,
+        k_boundary_f,
+        v_rotation_f,
+        v_rotation_t_f,
+        v_boundary_f,
+        k_codebook_f,
+        v_codebook_f,
         int(k_total_bits),
         int(v_bits),
         int(head_dim),
         float(scale),
         int(max_seq),
     )
-    if output_dtype is not None:
-        out = out.to(output_dtype)
     if profile_prefix is not None:
         _maybe_sync_for_profile(out)
         _record_tq_profile(
+            f"{profile_prefix}.custom_op",
+            (time.perf_counter() - t_stage) * 1000.0,
+            vectors=int(query.shape[0]),
+        )
+        t_stage = time.perf_counter()
+    if output_dtype is not None:
+        out = out.to(output_dtype)
+        if profile_prefix is not None:
+            _maybe_sync_for_profile(out)
+            _record_tq_profile(
+                f"{profile_prefix}.output_cast",
+                (time.perf_counter() - t_stage) * 1000.0,
+                vectors=int(query.shape[0]),
+            )
+            t_stage = time.perf_counter()
+    if profile_prefix is not None:
+        _record_tq_profile(
             f"{profile_prefix}.total",
-            (time.perf_counter() - t0) * 1000.0,
+            (time.perf_counter() - t_total) * 1000.0,
+            vectors=int(query.shape[0]),
+        )
+    if (
+        profile_prefix is not None
+        and fused_decode_attention_m4_shadow_profile_enabled()
+    ):
+        shadow_t0 = time.perf_counter()
+        shadow_out = tq_prod_mse_history_current_decode_attention(
+            query,
+            key,
+            value,
+            kv_cache,
+            block_table,
+            old_seq_lens_t,
+            k_codebook,
+            v_codebook,
+            k_rotation,
+            k_qjl_proj_t.transpose(0, 1).contiguous(),
+            v_rotation_t,
+            k_total_bits=int(k_total_bits),
+            v_bits=int(v_bits),
+            head_dim=int(head_dim),
+            scale=float(scale),
+            score_dtype=torch.float32,
+            output_dtype=output_dtype,
+            profile_prefix=f"{profile_prefix}.shadow",
+        )
+        _maybe_sync_for_profile(shadow_out)
+        _record_tq_profile(
+            f"{profile_prefix}.shadow.total",
+            (time.perf_counter() - shadow_t0) * 1000.0,
             vectors=int(query.shape[0]),
         )
     return out.contiguous()
