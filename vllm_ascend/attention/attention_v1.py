@@ -2242,11 +2242,13 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         layer._tq_k_codebook,
                         layer._tq_v_codebook,
                         k_total_bits=int(layer.tq_k_total_bits),
+                        k_variant=getattr(layer, "tq_k_variant", "prod"),
                         v_bits=int(layer.tq_v_stage1_bits),
                         head_dim=self.head_size,
                         scale=self.scale,
                         output_dtype=output.dtype,
                         max_seq_len=max(old_seq_lens_list, default=0),
+                        k_qjl_proj=layer._tq_k_qjl_proj,
                         profile_prefix=(
                             "turboquant_fused_kv_update_attention."
                             "decode.m4_attention"

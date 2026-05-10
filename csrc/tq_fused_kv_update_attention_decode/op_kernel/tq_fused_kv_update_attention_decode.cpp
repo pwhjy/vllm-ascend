@@ -22,6 +22,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t maxSeqLen;
     uint32_t scoreTileLen;
     uint32_t groupedQ;
+    uint32_t skipCacheUpdate;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -94,6 +95,7 @@ public:
         maxSeqLen_ = tiling->maxSeqLen;
         scoreTileLen_ = tiling->scoreTileLen;
         groupedQ_ = tiling->groupedQ;
+        skipCacheUpdate_ = tiling->skipCacheUpdate;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -931,7 +933,7 @@ public:
         // is required here.
         uint32_t groupHead = head - kvHead * qPerKv_;
         int64_t slot = slotMappingGm_.GetValue(b);
-        if (slot >= 0) {
+        if (slot >= 0 && skipCacheUpdate_ == 0U) {
             uint64_t slotHead =
                 static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
             if (CanPartitionCurrentKQjlEncode()) {
@@ -981,7 +983,7 @@ public:
         }
 
         int64_t slot = slotMappingGm_.GetValue(b);
-        if (slot >= 0) {
+        if (slot >= 0 && skipCacheUpdate_ == 0U) {
             uint64_t slotHead =
                 static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
             EncodeCurrentK(b, kvHead, slotHead);
@@ -1078,6 +1080,7 @@ private:
     uint32_t maxSeqLen_{0};
     uint32_t scoreTileLen_{0};
     uint32_t groupedQ_{0};
+    uint32_t skipCacheUpdate_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};

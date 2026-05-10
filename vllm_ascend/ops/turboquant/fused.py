@@ -125,6 +125,12 @@ def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0") == "1"
 
 
+def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
+    """Run decode cache update as a separate custom op before M4 attention."""
+
+    return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "0") == "1"
+
+
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
@@ -1199,12 +1205,14 @@ def tq_fused_decode_history_current_attention(
     v_codebook: torch.Tensor,
     *,
     k_total_bits: int,
+    k_variant: str = "prod",
     v_bits: int,
     head_dim: int,
     scale: float,
     output_dtype: torch.dtype | None = None,
     max_seq_len: int | None = None,
     profile_prefix: str | None = None,
+    k_qjl_proj: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """M4 decode-only custom cache update + attention."""
 
@@ -1243,6 +1251,30 @@ def tq_fused_decode_history_current_attention(
     if not _custom_op_available("tq_fused_kv_update_attention_decode", *tensors):
         raise RuntimeError(
             "torch.ops._C_ascend.tq_fused_kv_update_attention_decode is unavailable"
+        )
+
+    split_cache_update = fused_decode_attention_m4_split_cache_update_enabled()
+    if split_cache_update:
+        tq_encode_kv_to_paged_cache(
+            key,
+            value,
+            slot_mapping,
+            kv_cache,
+            k_rotation,
+            k_codebook,
+            k_boundary,
+            k_qjl_proj if k_qjl_proj is not None
+            else k_qjl_proj_t.transpose(0, 1).contiguous(),
+            v_rotation,
+            v_codebook,
+            v_boundary,
+            k_qjl_proj_t=k_qjl_proj_t,
+            k_variant=k_variant,
+            k_total_bits=int(k_total_bits),
+            k_stage1_bits=get_stage1_bits(int(k_total_bits), k_variant),
+            v_bits=int(v_bits),
+            num_kv_heads=int(key.shape[1]),
+            assume_valid_slots=True,
         )
 
     stage_profile = (
@@ -1319,6 +1351,7 @@ def tq_fused_decode_history_current_attention(
         int(max_seq),
         fused_decode_attention_m4_score_tile_len(),
         1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
+        1 if split_cache_update else 0,
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -1805,6 +1838,7 @@ __all__ = [
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_grouped_q_enabled",
     "fused_decode_attention_m4_score_tile_len",
+    "fused_decode_attention_m4_split_cache_update_enabled",
     "fused_decode_attention_m4_stage_profile_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
