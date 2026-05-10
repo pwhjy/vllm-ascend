@@ -24,6 +24,7 @@ Optional:
   PROFILE_SYNC=1
   PROFILE_M4_STAGES=1
   ALLOW_MISMATCH=1
+  PRESERVE_TQ_ENV=0
 
 Extra arguments are forwarded to check_turboquant_llama_correctness.py.
 Example:
@@ -59,6 +60,22 @@ PROFILE_TQ="${PROFILE_TQ:-1}"
 PROFILE_SYNC="${PROFILE_SYNC:-1}"
 PROFILE_M4_STAGES="${PROFILE_M4_STAGES:-1}"
 ALLOW_MISMATCH="${ALLOW_MISMATCH:-1}"
+PRESERVE_TQ_ENV="${PRESERVE_TQ_ENV:-0}"
+
+if [[ "${PRESERVE_TQ_ENV}" != "1" ]]; then
+  unset VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION
+  unset VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION
+  unset VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE
+  unset VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA
+  unset VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4
+  unset VLLM_ASCEND_TQ_M4_GROUPED_Q
+  unset VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN
+  unset VLLM_ASCEND_TQ_PROFILE_M4_STAGES
+  unset VLLM_ASCEND_TQ_PROFILE_M4_SHADOW
+  unset VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT
+  unset VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE
+  unset VLLM_ASCEND_TQ_USE_DECODE_COMPRESSED_FULL_CACHE
+fi
 
 cmd=(
   python benchmarks/scripts/check_turboquant_llama_correctness.py
@@ -189,6 +206,14 @@ if stats:
             f"avg_ms={avg:.3f} min_ms={item.get('min_ms')} "
             f"max_ms={item.get('max_ms')}"
         )
+
+baseline_profile = children.get("baseline", {}).get("turboquant_profile", {})
+baseline_stats = baseline_profile.get("stats", {})
+if any("decode.m4_attention" in key for key in baseline_stats):
+    print(
+        "\nWARNING: baseline profile contains decode.m4_attention. "
+        "This usually means inherited TurboQuant env leaked into baseline."
+    )
 
 print(f"\nResults: {root}")
 print(f"Plain comparison: {root / 'plain_comparison.json'}")
