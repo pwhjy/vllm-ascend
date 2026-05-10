@@ -26,7 +26,7 @@ from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import enable_custom_op
 
 
-def _is_missing_add_rms_norm_bias_error(error: RuntimeError) -> bool:
+def _is_missing_add_rms_norm_bias_error(error: Exception) -> bool:
     message = str(error)
     return "aclnnAddRmsNormBias" in message or "npu_add_rms_norm_bias" in message
 
@@ -506,7 +506,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
                     AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                     AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                     AddRMSNormDynamicQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                except RuntimeError as e:
+                except Exception as e:
                     if not _is_missing_add_rms_norm_bias_error(e):
                         raise
                     enable_add_rms_norm_bias_patterns = False

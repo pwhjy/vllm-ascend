@@ -23,7 +23,7 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 
 
-def _is_missing_add_rms_norm_bias_error(error: RuntimeError) -> bool:
+def _is_missing_add_rms_norm_bias_error(error: Exception) -> bool:
     message = str(error)
     return "aclnnAddRmsNormBias" in message or "npu_add_rms_norm_bias" in message
 
@@ -60,7 +60,7 @@ class GraphFusionPassManager:
 
             try:
                 self.passes.append(AddRMSNormQuantFusionPass(config))
-            except RuntimeError as e:
+            except Exception as e:
                 if not _is_missing_add_rms_norm_bias_error(e):
                     raise
                 logger.warning(
