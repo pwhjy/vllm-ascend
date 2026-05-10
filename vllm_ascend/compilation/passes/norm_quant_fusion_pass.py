@@ -26,6 +26,11 @@ from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.utils import enable_custom_op
 
 
+def _is_missing_add_rms_norm_bias_error(error: RuntimeError) -> bool:
+    message = str(error)
+    return "aclnnAddRmsNormBias" in message or "npu_add_rms_norm_bias" in message
+
+
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -489,16 +494,28 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             return
 
         common_epsilons = [1e-5, 1e-6]
+        enable_add_rms_norm_bias_patterns = enable_custom_op()
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             AddRMSNormDynamicQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if enable_custom_op():
-                AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormDynamicQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+            if enable_add_rms_norm_bias_patterns:
+                try:
+                    AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+                    AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+                    AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                    AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                    AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                    AddRMSNormDynamicQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                except RuntimeError as e:
+                    if not _is_missing_add_rms_norm_bias_error(e):
+                        raise
+                    enable_add_rms_norm_bias_patterns = False
+                    logger.warning_once(
+                        "Skipping RMSNorm quant fusion patterns that require "
+                        "npu_add_rms_norm_bias because the current CANN/libopapi "
+                        "does not provide it: %s",
+                        str(e),
+                    )
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

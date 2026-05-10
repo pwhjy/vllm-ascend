@@ -20,6 +20,12 @@ from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
+
+
+def _is_missing_add_rms_norm_bias_error(error: RuntimeError) -> bool:
+    message = str(error)
+    return "aclnnAddRmsNormBias" in message or "npu_add_rms_norm_bias" in message
 
 
 class GraphFusionPassManager:
@@ -52,7 +58,16 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
-            self.passes.append(AddRMSNormQuantFusionPass(config))
+            try:
+                self.passes.append(AddRMSNormQuantFusionPass(config))
+            except RuntimeError as e:
+                if not _is_missing_add_rms_norm_bias_error(e):
+                    raise
+                logger.warning(
+                    "Skipping AddRMSNormQuantFusionPass because npu_add_rms_norm_bias "
+                    "is unavailable in the current CANN/libopapi: %s",
+                    e,
+                )
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
