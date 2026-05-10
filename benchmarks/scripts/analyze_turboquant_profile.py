@@ -246,6 +246,12 @@ def _print_encode_debug_sweep_summary(output_dir: Path) -> bool:
         print(f"{'encode_floor (mode6)':34s} {floor:9.3f} ms/call")
     delta("k_encode (mode1 - mode6)", 1, 6)
     delta("v_encode (mode2 - mode6)", 2, 6)
+    delta("k_stage1_write (mode3 - mode6)", 3, 6)
+    delta("k_rotate_norm (mode4 - mode6)", 4, 6)
+    delta("k_stage1_no_write (mode5 - mode6)", 5, 6)
+    delta("k_stage1_pack (mode5 - mode4)", 5, 4)
+    delta("k_stage1_cache_write (mode3 - mode5)", 3, 5)
+    delta("k_qjl_project_pack_write (mode1 - mode3)", 1, 3)
     if all(mode in rows for mode in (0, 1, 2, 6)):
         interaction = (
             rows[0]["encode_op"]
@@ -274,6 +280,10 @@ def _print_encode_debug_sweep_summary(output_dir: Path) -> bool:
         for name, lhs, rhs in (
             ("k_encode", 1, 6),
             ("v_encode", 2, 6),
+            ("k_rotate_norm", 4, 6),
+            ("k_stage1_pack", 5, 4),
+            ("k_stage1_cache_write", 3, 5),
+            ("k_qjl_project_pack_write", 1, 3),
         ):
             if lhs in rows and rhs in rows:
                 components.append((name, rows[lhs]["encode_op"] - rows[rhs]["encode_op"]))

@@ -247,6 +247,59 @@ public:
         kNormCacheGm_.SetValue(slotHead, norm);
     }
 
+    __aicore__ inline void EncodeKRotateOnly(
+        uint32_t token,
+        uint32_t kvHead,
+        uint64_t slotHead)
+    {
+        LoadCurrentVector(keyGm_, token, kvHead);
+        float norm = CalcNorm();
+        float invNorm = 1.0F / norm;
+        CalcRotRange(kRotationGm_, invNorm, 0U, headDim_);
+        kNormCacheGm_.SetValue(slotHead, norm + kResidual_[0] * 1.0e-6F);
+    }
+
+    __aicore__ inline void EncodeKStage1Only(
+        uint32_t token,
+        uint32_t kvHead,
+        uint64_t slotHead,
+        bool writeCache)
+    {
+        uint8_t idxPacked[128];
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            idxPacked[col] = 0;
+        }
+
+        LoadCurrentVector(keyGm_, token, kvHead);
+        float norm = CalcNorm();
+        float invNorm = 1.0F / norm;
+        float gammaSq = 0.0F;
+        CalcRotRange(kRotationGm_, invNorm, 0U, headDim_);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float xRot = kResidual_[d];
+            uint32_t idx = KBoundaryIndex(xRot);
+            PackIndex(idxPacked, kPackedCols_, stage1Bits_, d, idx);
+            float residual = xRot - kCodebook_[idx];
+            gammaSq += residual * residual;
+        }
+
+        float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
+        if (!writeCache) {
+            kNormCacheGm_.SetValue(
+                slotHead,
+                norm + gamma * 1.0e-6F
+                    + static_cast<float>(idxPacked[0]) * 1.0e-9F);
+            return;
+        }
+
+        uint64_t idxBase = slotHead * kPackedCols_;
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
+        }
+        kGammaCacheGm_.SetValue(slotHead, gamma);
+        kNormCacheGm_.SetValue(slotHead, norm);
+    }
+
     __aicore__ inline void EncodeV(
         uint32_t token,
         uint32_t kvHead,
@@ -353,6 +406,24 @@ public:
                 EncodeVPartition(token, kvHead, slotHead, partition);
             } else if (partition == 0U) {
                 EncodeV(token, kvHead, slotHead);
+            }
+            return;
+        }
+        if (debugMode_ == 3U) {
+            if (partition == 0U) {
+                EncodeKStage1Only(token, kvHead, slotHead, true);
+            }
+            return;
+        }
+        if (debugMode_ == 4U) {
+            if (partition == 0U) {
+                EncodeKRotateOnly(token, kvHead, slotHead);
+            }
+            return;
+        }
+        if (debugMode_ == 5U) {
+            if (partition == 0U) {
+                EncodeKStage1Only(token, kvHead, slotHead, false);
             }
             return;
         }
