@@ -727,7 +727,8 @@ void tq_encode_kv_to_paged_cache_meta(
     int64_t stage1_bits,
     int64_t v_bits,
     int64_t head_dim,
-    int64_t debug_mode)
+    int64_t debug_mode,
+    int64_t v_partition_count)
 {
     (void)key;
     (void)value;
@@ -749,6 +750,7 @@ void tq_encode_kv_to_paged_cache_meta(
     (void)v_bits;
     (void)head_dim;
     (void)debug_mode;
+    (void)v_partition_count;
     return;
 }
 

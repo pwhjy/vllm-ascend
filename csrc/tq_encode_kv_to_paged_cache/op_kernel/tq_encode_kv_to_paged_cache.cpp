@@ -23,6 +23,7 @@ struct TqEncodeKvToPagedCacheTilingData {
     uint32_t vBits;
     uint32_t headDim;
     uint32_t debugMode;
+    uint32_t vPartitionCount;
     uint32_t numCore;
 };
 
@@ -75,6 +76,7 @@ public:
         vBits_ = tiling->vBits;
         headDim_ = tiling->headDim;
         debugMode_ = tiling->debugMode;
+        vPartitionCount_ = tiling->vPartitionCount;
         numCore_ = tiling->numCore;
         LoadSmallParams();
     }
@@ -406,9 +408,14 @@ public:
         vNormCacheGm_.SetValue(slotHead, norm);
     }
 
+    __aicore__ inline uint32_t VPartitionCount()
+    {
+        return vPartitionCount_ > 1U ? vPartitionCount_ : 1U;
+    }
+
     __aicore__ inline bool CanPartitionEncode()
     {
-        return (vPackedCols_ % 4U) == 0U
+        return VPartitionCount() > 1U
             && (vBits_ == 1U || vBits_ == 2U || vBits_ == 4U);
     }
 
@@ -418,8 +425,9 @@ public:
         uint64_t slotHead,
         uint32_t partition)
     {
-        uint32_t colStart = (vPackedCols_ * partition) / 4U;
-        uint32_t colEnd = (vPackedCols_ * (partition + 1U)) / 4U;
+        uint32_t partitionCount = VPartitionCount();
+        uint32_t colStart = (vPackedCols_ * partition) / partitionCount;
+        uint32_t colEnd = (vPackedCols_ * (partition + 1U)) / partitionCount;
         uint8_t packed[128];
         for (uint32_t col = colStart; col < colEnd; ++col) {
             packed[col] = 0;
@@ -539,7 +547,7 @@ public:
         if (totalPairs == 0) {
             return;
         }
-        uint64_t partitionCount = CanPartitionEncode() ? 4U : 1U;
+        uint64_t partitionCount = CanPartitionEncode() ? VPartitionCount() : 1U;
         uint64_t totalTasks = totalPairs * partitionCount;
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
         uint64_t tasksPerCore = (totalTasks + coreCount - 1) / coreCount;
@@ -585,6 +593,7 @@ private:
     uint32_t vBits_{0};
     uint32_t headDim_{0};
     uint32_t debugMode_{0};
+    uint32_t vPartitionCount_{1};
     uint32_t numCore_{0};
     float currentVec_[256];
     float kResidual_[256];

@@ -30,6 +30,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     const int64_t* vBitsPtr = attr->GetAttrPointer<int64_t>(2);
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(3);
     const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(4);
+    const int64_t* vPartitionCountPtr = attr->GetAttrPointer<int64_t>(5);
 
     uint32_t totalBits = static_cast<uint32_t>(
         totalBitsPtr != nullptr ? *totalBitsPtr : 0);
@@ -45,14 +46,23 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     if (debugMode > 9U) {
         debugMode = 9U;
     }
+    int64_t vPartitionCountAttr =
+        vPartitionCountPtr != nullptr ? *vPartitionCountPtr : 4;
+    uint32_t vPartitionCount = 4U;
+    if (vPartitionCountAttr <= 1) {
+        vPartitionCount = 1U;
+    } else if (vPartitionCountAttr <= 2) {
+        vPartitionCount = 2U;
+    }
+    if ((vBits != 1U && vBits != 2U && vBits != 4U)
+        || (vPackedCols % vPartitionCount) != 0U) {
+        vPartitionCount = 1U;
+    }
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
-    uint32_t partitionCount =
-        (vPackedCols % 4U) == 0U
-        && (vBits == 1U || vBits == 2U || vBits == 4U) ? 4U : 1U;
     uint64_t usefulCore =
-        static_cast<uint64_t>(totalTokens) * numKvHeads * partitionCount;
+        static_cast<uint64_t>(totalTokens) * numKvHeads * vPartitionCount;
     if (usefulCore > 0 && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);
     }
@@ -72,6 +82,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     tiling.set_vBits(vBits);
     tiling.set_headDim(headDim);
     tiling.set_debugMode(debugMode);
+    tiling.set_vPartitionCount(vPartitionCount);
     tiling.set_numCore(coreNum);
 
     context->SetBlockDim(coreNum);

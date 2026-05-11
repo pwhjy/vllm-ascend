@@ -147,6 +147,20 @@ def encode_cache_update_debug_mode() -> int:
     return min(9, max(0, mode))
 
 
+def encode_cache_update_v_partitions() -> int:
+    """V encode task split count for the fused K/V encode custom op."""
+
+    try:
+        partitions = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_V_PARTITIONS", "4"))
+    except ValueError:
+        partitions = 4
+    if partitions <= 1:
+        return 1
+    if partitions <= 2:
+        return 2
+    return 4
+
+
 def fused_decode_attention_m4_debug_mode() -> int:
     """Diagnostic mode for decomposing the M4 decode custom op.
 
@@ -795,6 +809,7 @@ def tq_encode_kv_to_paged_cache(
                     int(v_bits),
                     int(key.shape[-1]),
                     encode_cache_update_debug_mode(),
+                    encode_cache_update_v_partitions(),
                 )
                 stage_t0 = _custom_stage_record(
                     "custom.op",
@@ -1894,6 +1909,7 @@ __all__ = [
     "encode_cache_update_custom_enabled",
     "encode_cache_update_debug_mode",
     "encode_cache_update_stage_profile_enabled",
+    "encode_cache_update_v_partitions",
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",

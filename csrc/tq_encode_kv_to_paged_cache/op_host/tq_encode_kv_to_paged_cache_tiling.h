@@ -22,6 +22,7 @@ BEGIN_TILING_DATA_DEF(TqEncodeKvToPagedCacheTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, vBits);
     TILING_DATA_FIELD_DEF(uint32_t, headDim);
     TILING_DATA_FIELD_DEF(uint32_t, debugMode);
+    TILING_DATA_FIELD_DEF(uint32_t, vPartitionCount);
     TILING_DATA_FIELD_DEF(uint32_t, numCore);
 END_TILING_DATA_DEF;
 
