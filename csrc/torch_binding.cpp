@@ -1078,10 +1078,8 @@ void tq_encode_kv_to_paged_cache(
     check_tq_encode_common_inputs(
         value, slot_mapping, v_idx_cache, v_norm_cache, v_rotation, v_boundary,
         v_bits, head_dim);
-    TORCH_CHECK(key.scalar_type() == at::kFloat,
-                "combined encode key must be fp32");
-    TORCH_CHECK(value.scalar_type() == at::kFloat,
-                "combined encode value must be fp32");
+    TORCH_CHECK(key.scalar_type() == value.scalar_type(),
+                "combined encode key and value dtype must match");
     TORCH_CHECK(key.sizes() == value.sizes(),
                 "key and value must have identical shapes");
     TORCH_CHECK(k_qjl_cache.scalar_type() == at::kByte,

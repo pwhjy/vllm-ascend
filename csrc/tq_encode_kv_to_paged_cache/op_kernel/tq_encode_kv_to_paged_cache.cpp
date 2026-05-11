@@ -27,6 +27,7 @@ struct TqEncodeKvToPagedCacheTilingData {
     uint32_t numCore;
 };
 
+template <typename KeyT, typename ValueT>
 class KernelTqEncodeKvToPagedCache {
 public:
     __aicore__ inline KernelTqEncodeKvToPagedCache() {}
@@ -49,8 +50,8 @@ public:
         GM_ADDR vBoundary,
         const TqEncodeKvToPagedCacheTilingData* tiling)
     {
-        keyGm_.SetGlobalBuffer((__gm__ float*)key);
-        valueGm_.SetGlobalBuffer((__gm__ float*)value);
+        keyGm_.SetGlobalBuffer((__gm__ KeyT*)key);
+        valueGm_.SetGlobalBuffer((__gm__ ValueT*)value);
         slotMappingGm_.SetGlobalBuffer((__gm__ int64_t*)slotMapping);
         kIdxCacheGm_.SetGlobalBuffer((__gm__ uint8_t*)kIdxCache);
         kQjlCacheGm_.SetGlobalBuffer((__gm__ uint8_t*)kQjlCache);
@@ -81,19 +82,31 @@ public:
         LoadSmallParams();
     }
 
+    template <typename InT>
+    __aicore__ inline float InputToFloat(InT value)
+    {
+        if constexpr (IsSameType<InT, bfloat16_t>::value) {
+            return ToFloat(value);
+        } else {
+            return static_cast<float>(value);
+        }
+    }
+
+    template <typename InT>
     __aicore__ inline float ReadX(
-        GlobalTensor<float>& tensor,
+        GlobalTensor<InT>& tensor,
         uint32_t token,
         uint32_t kvHead,
         uint32_t d)
     {
         uint64_t index =
             (static_cast<uint64_t>(token) * numKvHeads_ + kvHead) * headDim_ + d;
-        return tensor.GetValue(index);
+        return InputToFloat(tensor.GetValue(index));
     }
 
+    template <typename InT>
     __aicore__ inline void LoadCurrentVector(
-        GlobalTensor<float>& tensor,
+        GlobalTensor<InT>& tensor,
         uint32_t token,
         uint32_t kvHead)
     {
@@ -566,8 +579,8 @@ public:
     }
 
 private:
-    GlobalTensor<float> keyGm_;
-    GlobalTensor<float> valueGm_;
+    GlobalTensor<KeyT> keyGm_;
+    GlobalTensor<ValueT> valueGm_;
     GlobalTensor<int64_t> slotMappingGm_;
     GlobalTensor<uint8_t> kIdxCacheGm_;
     GlobalTensor<uint8_t> kQjlCacheGm_;
@@ -625,7 +638,7 @@ extern "C" __global__ __aicore__ void tq_encode_kv_to_paged_cache(
     REGISTER_TILING_DEFAULT(TqEncodeKvToPagedCacheTilingData);
     GET_TILING_DATA_WITH_STRUCT(TqEncodeKvToPagedCacheTilingData, tilingData, tiling);
 
-    KernelTqEncodeKvToPagedCache op;
+    KernelTqEncodeKvToPagedCache<DTYPE_KEY, DTYPE_VALUE> op;
     op.Init(
         key,
         value,

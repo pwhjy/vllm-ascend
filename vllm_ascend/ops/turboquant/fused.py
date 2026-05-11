@@ -74,6 +74,12 @@ def encode_cache_update_stage_profile_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES", "0") == "1"
 
 
+def encode_cache_update_force_fp32_input() -> bool:
+    """Force legacy fp32 input materialization before the custom encode op."""
+
+    return os.getenv("VLLM_ASCEND_TQ_ENCODE_FORCE_FP32_INPUT", "0") == "1"
+
+
 def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
@@ -754,8 +760,12 @@ def tq_encode_kv_to_paged_cache(
         if not fallback_reasons:
             try:
                 stage_t0 = time.perf_counter()
-                key_f = key.to(torch.float32).contiguous()
-                value_f = value.to(torch.float32).contiguous()
+                if encode_cache_update_force_fp32_input():
+                    key_c = key.to(torch.float32).contiguous()
+                    value_c = value.to(torch.float32).contiguous()
+                else:
+                    key_c = key.contiguous()
+                    value_c = value.contiguous()
                 slot_mapping_i64 = slot_mapping.to(torch.long).contiguous()
                 k_qjl_cache = kv_cache.get(
                     "k_qjl",
@@ -778,8 +788,8 @@ def tq_encode_kv_to_paged_cache(
                 stage_t0 = _custom_stage_record(
                     "custom.prepare_inputs",
                     stage_t0,
-                    key_f,
-                    value_f,
+                    key_c,
+                    value_c,
                     slot_mapping_i64,
                     k_rotation_f,
                     k_boundary_c,
@@ -789,8 +799,8 @@ def tq_encode_kv_to_paged_cache(
                     v_boundary_c,
                 )
                 torch.ops._C_ascend.tq_encode_kv_to_paged_cache(
-                    key_f,
-                    value_f,
+                    key_c,
+                    value_c,
                     slot_mapping_i64,
                     kv_cache["k_idx"],
                     k_qjl_cache,
@@ -1908,6 +1918,7 @@ __all__ = [
     "decode_compressed_full_cache_enabled",
     "encode_cache_update_custom_enabled",
     "encode_cache_update_debug_mode",
+    "encode_cache_update_force_fp32_input",
     "encode_cache_update_stage_profile_enabled",
     "encode_cache_update_v_partitions",
     "fused_decode_attention_m4_enabled",
