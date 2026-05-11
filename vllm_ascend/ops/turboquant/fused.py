@@ -1466,11 +1466,8 @@ def tq_fused_decode_history_current_attention(
             vectors=int(query.shape[0]),
         )
         t_stage = time.perf_counter()
-    target_output_dtype = (
-        output_dtype if output_dtype is not None else torch.float32
-    )
-    if out.dtype != target_output_dtype:
-        out = out.to(target_output_dtype)
+    if output_dtype is not None:
+        out = out.to(output_dtype)
         if stage_profile:
             _maybe_sync_for_profile(out)
             _record_tq_profile(
