@@ -1470,7 +1470,7 @@ at::Tensor tq_fused_kv_update_attention_decode(
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
-        query.options().dtype(at::kFloat));
+        query.options());
 
     EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
         query, key, value,

@@ -377,6 +377,9 @@ def _print_m4_debug_sweep_summary(output_dir: Path) -> bool:
 
     print()
     print("=== M4 Debug Derived Custom-Op Deltas ===")
+    delta("full_over_floor (mode0 - mode6)", 0, 6)
+    delta("current_score+store (mode9 - mode6)", 9, 6)
+    delta("history/query beyond current (mode0 - mode9)", 0, 9)
     delta("full - full_no_store (mode0 - mode5)", 0, 5)
     delta("query_transform (mode7 - mode6)", 7, 6)
     delta("zero_store_output (mode8 - mode6)", 8, 6)

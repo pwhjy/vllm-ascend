@@ -36,7 +36,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     float correction;
 };
 
-template <typename QueryT, typename KeyT, typename ValueT>
+template <typename QueryT, typename KeyT, typename ValueT, typename OutT>
 class KernelTqFusedKvUpdateAttentionDecode {
 public:
     __aicore__ inline KernelTqFusedKvUpdateAttentionDecode() {}
@@ -87,7 +87,7 @@ public:
         vBoundaryGm_.SetGlobalBuffer((__gm__ float*)vBoundary);
         kCodebookGm_.SetGlobalBuffer((__gm__ float*)kCodebook);
         vCodebookGm_.SetGlobalBuffer((__gm__ float*)vCodebook);
-        outGm_.SetGlobalBuffer((__gm__ float*)out);
+        outGm_.SetGlobalBuffer((__gm__ OutT*)out);
 
         batch_ = tiling->batch;
         numHeads_ = tiling->numHeads;
@@ -123,6 +123,11 @@ public:
         } else {
             return static_cast<float>(value);
         }
+    }
+
+    __aicore__ inline OutT OutputFromFloat(float value)
+    {
+        return static_cast<OutT>(value);
     }
 
     __aicore__ inline void SToVSync()
@@ -1092,7 +1097,8 @@ public:
             currentVec_[outDim] +=
                 currentWeight_ * invSum
                 * InputToFloat(valueGm_.GetValue(valueBase + outDim));
-            outGm_.SetValue(outBase + outDim, currentVec_[outDim]);
+            outGm_.SetValue(
+                outBase + outDim, OutputFromFloat(currentVec_[outDim]));
         }
     }
 
@@ -1101,7 +1107,7 @@ public:
         uint64_t outBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            outGm_.SetValue(outBase + d, value);
+            outGm_.SetValue(outBase + d, OutputFromFloat(value));
         }
     }
 
@@ -1155,13 +1161,17 @@ public:
                 currentWeightGroup_[2] * invSum2 * value;
             qRotGroup_[q3Base + outDim] +=
                 currentWeightGroup_[3] * invSum3 * value;
-            outGm_.SetValue(outBase + outDim, qRotGroup_[outDim]);
             outGm_.SetValue(
-                outBase + q1Base + outDim, qRotGroup_[q1Base + outDim]);
+                outBase + outDim, OutputFromFloat(qRotGroup_[outDim]));
             outGm_.SetValue(
-                outBase + q2Base + outDim, qRotGroup_[q2Base + outDim]);
+                outBase + q1Base + outDim,
+                OutputFromFloat(qRotGroup_[q1Base + outDim]));
             outGm_.SetValue(
-                outBase + q3Base + outDim, qRotGroup_[q3Base + outDim]);
+                outBase + q2Base + outDim,
+                OutputFromFloat(qRotGroup_[q2Base + outDim]));
+            outGm_.SetValue(
+                outBase + q3Base + outDim,
+                OutputFromFloat(qRotGroup_[q3Base + outDim]));
         }
     }
 
@@ -1431,7 +1441,7 @@ private:
     GlobalTensor<float> vBoundaryGm_;
     GlobalTensor<float> kCodebookGm_;
     GlobalTensor<float> vCodebookGm_;
-    GlobalTensor<float> outGm_;
+    GlobalTensor<OutT> outGm_;
 
     uint32_t batch_{0};
     uint32_t numHeads_{0};
@@ -1511,7 +1521,8 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
     GET_TILING_DATA_WITH_STRUCT(
         TqFusedKvUpdateAttentionDecodeTilingData, tilingData, tiling);
 
-    KernelTqFusedKvUpdateAttentionDecode<DTYPE_QUERY, DTYPE_KEY, DTYPE_VALUE> op;
+    KernelTqFusedKvUpdateAttentionDecode<
+        DTYPE_QUERY, DTYPE_KEY, DTYPE_VALUE, DTYPE_OUT> op;
     op.Init(
         query,
         key,
