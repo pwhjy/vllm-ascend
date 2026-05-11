@@ -36,6 +36,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     float correction;
 };
 
+template <typename QueryT, typename KeyT, typename ValueT>
 class KernelTqFusedKvUpdateAttentionDecode {
 public:
     __aicore__ inline KernelTqFusedKvUpdateAttentionDecode() {}
@@ -65,9 +66,9 @@ public:
         GM_ADDR out,
         const TqFusedKvUpdateAttentionDecodeTilingData* tiling)
     {
-        queryGm_.SetGlobalBuffer((__gm__ float*)query);
-        keyGm_.SetGlobalBuffer((__gm__ float*)key);
-        valueGm_.SetGlobalBuffer((__gm__ float*)value);
+        queryGm_.SetGlobalBuffer((__gm__ QueryT*)query);
+        keyGm_.SetGlobalBuffer((__gm__ KeyT*)key);
+        valueGm_.SetGlobalBuffer((__gm__ ValueT*)value);
         slotMappingGm_.SetGlobalBuffer((__gm__ int64_t*)slotMapping);
         kPackedIdxGm_.SetGlobalBuffer((__gm__ uint8_t*)kPackedIdx);
         kPackedQjlGm_.SetGlobalBuffer((__gm__ uint8_t*)kPackedQjl);
@@ -112,6 +113,16 @@ public:
 
         pipe_.InitBuffer(expBuf_, 8U * sizeof(float));
         LoadSmallParams();
+    }
+
+    template <typename InT>
+    __aicore__ inline float InputToFloat(InT value)
+    {
+        if constexpr (IsSameType<InT, bfloat16_t>::value) {
+            return ToFloat(value);
+        } else {
+            return static_cast<float>(value);
+        }
     }
 
     __aicore__ inline void SToVSync()
@@ -169,15 +180,16 @@ public:
         return (value >> bitOff) & mask;
     }
 
+    template <typename InT>
     __aicore__ inline void LoadCurrentVector(
-        GlobalTensor<float>& tensor,
+        GlobalTensor<InT>& tensor,
         uint32_t b,
         uint32_t kvHead)
     {
         uint64_t base =
             (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            currentVec_[d] = tensor.GetValue(base + d);
+            currentVec_[d] = InputToFloat(tensor.GetValue(base + d));
         }
     }
 
@@ -502,7 +514,7 @@ public:
             qQjl_[d] = 0.0F;
         }
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-            float q = queryGm_.GetValue(qBase + inDim);
+            float q = InputToFloat(queryGm_.GetValue(qBase + inDim));
             uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
             for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
                 qRot_[outDim] += q * kRotationGm_.GetValue(matrixBase + outDim);
@@ -534,10 +546,13 @@ public:
             qQjlGroup_[d] = 0.0F;
         }
         for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-            float query0 = queryGm_.GetValue(qBase + inDim);
-            float query1 = queryGm_.GetValue(qBase + q1Base + inDim);
-            float query2 = queryGm_.GetValue(qBase + q2Base + inDim);
-            float query3 = queryGm_.GetValue(qBase + q3Base + inDim);
+            float query0 = InputToFloat(queryGm_.GetValue(qBase + inDim));
+            float query1 = InputToFloat(
+                queryGm_.GetValue(qBase + q1Base + inDim));
+            float query2 = InputToFloat(
+                queryGm_.GetValue(qBase + q2Base + inDim));
+            float query3 = InputToFloat(
+                queryGm_.GetValue(qBase + q3Base + inDim));
             uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
             for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
                 float rot = kRotationGm_.GetValue(matrixBase + outDim);
@@ -655,7 +670,8 @@ public:
             (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
         float acc = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            acc += queryGm_.GetValue(qBase + d) * keyGm_.GetValue(kBase + d);
+            acc += InputToFloat(queryGm_.GetValue(qBase + d))
+                * InputToFloat(keyGm_.GetValue(kBase + d));
         }
         return acc * scale_;
     }
@@ -1045,7 +1061,8 @@ public:
                 * headDim_;
             float acc = 0.0F;
             for (uint32_t d = 0; d < headDim_; ++d) {
-                acc += queryGm_.GetValue(qBase + d) * keyGm_.GetValue(kBase + d);
+                acc += InputToFloat(queryGm_.GetValue(qBase + d))
+                    * InputToFloat(keyGm_.GetValue(kBase + d));
             }
             scoreGroup_[q] = acc * scale_;
         }
@@ -1073,7 +1090,8 @@ public:
             // Current dense V is combined in original space; only compressed
             // history needs inverse rotation.
             currentVec_[outDim] +=
-                currentWeight_ * invSum * valueGm_.GetValue(valueBase + outDim);
+                currentWeight_ * invSum
+                * InputToFloat(valueGm_.GetValue(valueBase + outDim));
             outGm_.SetValue(outBase + outDim, currentVec_[outDim]);
         }
     }
@@ -1129,7 +1147,7 @@ public:
             }
         }
         for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-            float value = valueGm_.GetValue(valueBase + outDim);
+            float value = InputToFloat(valueGm_.GetValue(valueBase + outDim));
             qRotGroup_[outDim] += currentWeightGroup_[0] * invSum0 * value;
             qRotGroup_[q1Base + outDim] +=
                 currentWeightGroup_[1] * invSum1 * value;
@@ -1392,9 +1410,9 @@ private:
     TPipe pipe_;
     TBuf<TPosition::VECCALC> expBuf_;
 
-    GlobalTensor<float> queryGm_;
-    GlobalTensor<float> keyGm_;
-    GlobalTensor<float> valueGm_;
+    GlobalTensor<QueryT> queryGm_;
+    GlobalTensor<KeyT> keyGm_;
+    GlobalTensor<ValueT> valueGm_;
     GlobalTensor<int64_t> slotMappingGm_;
     GlobalTensor<uint8_t> kPackedIdxGm_;
     GlobalTensor<uint8_t> kPackedQjlGm_;
@@ -1493,7 +1511,7 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
     GET_TILING_DATA_WITH_STRUCT(
         TqFusedKvUpdateAttentionDecodeTilingData, tilingData, tiling);
 
-    KernelTqFusedKvUpdateAttentionDecode op;
+    KernelTqFusedKvUpdateAttentionDecode<DTYPE_QUERY, DTYPE_KEY, DTYPE_VALUE> op;
     op.Init(
         query,
         key,

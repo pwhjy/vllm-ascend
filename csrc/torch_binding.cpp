@@ -1351,9 +1351,16 @@ at::Tensor tq_fused_kv_update_attention_decode(
     int64_t debug_mode,
     int64_t pretransformed_query)
 {
-    TORCH_CHECK(query.scalar_type() == at::kFloat, "query must be fp32");
-    TORCH_CHECK(key.scalar_type() == at::kFloat, "key must be fp32");
-    TORCH_CHECK(value.scalar_type() == at::kFloat, "value must be fp32");
+    auto is_supported_qkv_dtype = [](at::ScalarType dtype) {
+        return dtype == at::kFloat || dtype == at::kHalf
+            || dtype == at::kBFloat16;
+    };
+    TORCH_CHECK(is_supported_qkv_dtype(query.scalar_type()),
+                "query must be fp32/fp16/bf16");
+    TORCH_CHECK(key.scalar_type() == query.scalar_type(),
+                "key must have the same dtype as query");
+    TORCH_CHECK(value.scalar_type() == query.scalar_type(),
+                "value must have the same dtype as query");
     TORCH_CHECK(slot_mapping.scalar_type() == at::kLong,
                 "slot_mapping must be int64");
     TORCH_CHECK(k_packed_idx.scalar_type() == at::kByte,

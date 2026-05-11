@@ -143,6 +143,12 @@ def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
 
 
+def fused_decode_attention_m4_force_fp32_input() -> bool:
+    """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
+
+    return os.getenv("VLLM_ASCEND_TQ_M4_FORCE_FP32_INPUT", "0") == "1"
+
+
 def encode_cache_update_debug_mode() -> int:
     """Diagnostic mode for decomposing the fused K/V encode custom op."""
 
@@ -1344,9 +1350,21 @@ def tq_fused_decode_history_current_attention(
         _maybe_sync_for_profile(*tensors)
         t_total = time.perf_counter()
         t_stage = t_total
-    query_f = query.to(torch.float32).contiguous()
-    key_f = key.to(torch.float32).contiguous()
-    value_f = value.to(torch.float32).contiguous()
+    force_fp32_input = fused_decode_attention_m4_force_fp32_input()
+    qkv_native_dtype = query.dtype
+    qkv_native_supported = (
+        qkv_native_dtype in (torch.float32, torch.float16, torch.bfloat16)
+        and key.dtype == qkv_native_dtype
+        and value.dtype == qkv_native_dtype
+    )
+    if force_fp32_input or not qkv_native_supported:
+        query_arg = query.to(torch.float32).contiguous()
+        key_arg = key.to(torch.float32).contiguous()
+        value_arg = value.to(torch.float32).contiguous()
+    else:
+        query_arg = query.contiguous()
+        key_arg = key.contiguous()
+        value_arg = value.contiguous()
     slot_mapping_i64 = slot_mapping.to(torch.long).contiguous()
     block_table_i32 = block_table.to(torch.int32).contiguous()
     k_rotation_f = k_rotation.to(torch.float32).contiguous()
@@ -1360,9 +1378,9 @@ def tq_fused_decode_history_current_attention(
     v_codebook_f = v_codebook.to(torch.float32).contiguous()
     if stage_profile:
         _maybe_sync_for_profile(
-            query_f,
-            key_f,
-            value_f,
+            query_arg,
+            key_arg,
+            value_arg,
             slot_mapping_i64,
             block_table_i32,
             k_rotation_f,
@@ -1388,8 +1406,12 @@ def tq_fused_decode_history_current_attention(
         and debug_mode not in (6, 8, 9)
     )
     if pretransform_query:
-        q_rot_f = torch.matmul(query_f, k_rotation_f).contiguous()
-        q_qjl_f = torch.matmul(query_f, k_qjl_query_matrix_f).contiguous()
+        query_transform_f = (
+            query_arg if query_arg.dtype == torch.float32
+            else query.to(torch.float32).contiguous()
+        )
+        q_rot_f = torch.matmul(query_transform_f, k_rotation_f).contiguous()
+        q_qjl_f = torch.matmul(query_transform_f, k_qjl_query_matrix_f).contiguous()
         if stage_profile:
             _maybe_sync_for_profile(q_rot_f, q_qjl_f)
             _record_tq_profile(
@@ -1404,9 +1426,9 @@ def tq_fused_decode_history_current_attention(
         k_rotation_arg = k_rotation_f
         k_qjl_query_matrix_arg = k_qjl_query_matrix_f
     out = torch.ops._C_ascend.tq_fused_kv_update_attention_decode(
-        query_f,
-        key_f,
-        value_f,
+        query_arg,
+        key_arg,
+        value_arg,
         slot_mapping_i64,
         kv_cache["k_idx"],
         kv_cache["k_qjl"],

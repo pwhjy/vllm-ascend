@@ -12,50 +12,93 @@ class TqFusedKvUpdateAttentionDecode : public OpDef {
 public:
     explicit TqFusedKvUpdateAttentionDecode(const char* name) : OpDef(name)
     {
-        this->Input("query").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("key").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("value").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("slotMapping").ParamType(REQUIRED).DataType({ge::DT_INT64})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kPackedIdx").ParamType(REQUIRED).DataType({ge::DT_UINT8})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kPackedQjl").ParamType(REQUIRED).DataType({ge::DT_UINT8})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kGamma").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kNorm").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vPackedIdx").ParamType(REQUIRED).DataType({ge::DT_UINT8})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vNorm").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("blockTable").ParamType(REQUIRED).DataType({ge::DT_INT32})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("oldSeqLens").ParamType(REQUIRED).DataType({ge::DT_INT32})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kRotation").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kQjlQueryMatrix").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kQjlProjT").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kBoundary").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vRotation").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vRotationT").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vBoundary").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("kCodebook").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("vCodebook").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND}).AutoContiguous();
-        this->Output("out").ParamType(REQUIRED).DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND});
+        this->Input("query").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("key").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("value").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("slotMapping").ParamType(REQUIRED)
+            .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kPackedIdx").ParamType(REQUIRED)
+            .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kPackedQjl").ParamType(REQUIRED)
+            .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kGamma").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kNorm").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vPackedIdx").ParamType(REQUIRED)
+            .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vNorm").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("blockTable").ParamType(REQUIRED)
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("oldSeqLens").ParamType(REQUIRED)
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kRotation").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kQjlQueryMatrix").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kQjlProjT").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kBoundary").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vRotation").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vRotationT").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vBoundary").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("kCodebook").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("vCodebook").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Output("out").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("kTotalBits").AttrType(REQUIRED).Int(0);
         this->Attr("vBits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
