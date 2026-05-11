@@ -151,9 +151,9 @@ def encode_cache_update_v_partitions() -> int:
     """V encode task split count for the fused K/V encode custom op."""
 
     try:
-        partitions = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_V_PARTITIONS", "4"))
+        partitions = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_V_PARTITIONS", "1"))
     except ValueError:
-        partitions = 4
+        partitions = 1
     if partitions <= 1:
         return 1
     if partitions <= 2:

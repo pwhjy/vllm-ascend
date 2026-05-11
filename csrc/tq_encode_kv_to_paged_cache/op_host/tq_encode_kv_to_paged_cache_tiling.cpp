@@ -47,8 +47,8 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
         debugMode = 9U;
     }
     int64_t vPartitionCountAttr =
-        vPartitionCountPtr != nullptr ? *vPartitionCountPtr : 4;
-    uint32_t vPartitionCount = 4U;
+        vPartitionCountPtr != nullptr ? *vPartitionCountPtr : 1;
+    uint32_t vPartitionCount = 1U;
     if (vPartitionCountAttr <= 1) {
         vPartitionCount = 1U;
     } else if (vPartitionCountAttr <= 2) {

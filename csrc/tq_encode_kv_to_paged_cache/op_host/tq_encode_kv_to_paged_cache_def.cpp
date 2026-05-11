@@ -47,7 +47,7 @@ public:
         this->Attr("vBits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
         this->Attr("debugMode").AttrType(REQUIRED).Int(0);
-        this->Attr("vPartitionCount").AttrType(REQUIRED).Int(4);
+        this->Attr("vPartitionCount").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
