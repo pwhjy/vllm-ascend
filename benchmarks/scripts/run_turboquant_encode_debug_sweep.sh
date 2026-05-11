@@ -10,7 +10,7 @@ Required:
 
 Optional:
   OUT_ROOT=/tmp/tq_encode_debug_sweep_YYYYmmdd_HHMMSS
-  ENCODE_MODES="0 1 2 3 4 5 6"
+  ENCODE_MODES="0 1 2 3 4 5 6 7 8 9"
   MAX_MODEL_LEN=32768
   MAX_TOKENS=8
   TP_SIZE=1
@@ -28,6 +28,9 @@ Encode debug modes:
   4 K rotation/norm only
   5 K stage1 encode without cache write
   6 minimal slot/task overhead
+  7 K load + norm only
+  8 K stage1 + QJL dense project without qjl pack/store
+  9 K stage1 + QJL dense project + pack without qjl store
 EOF
 }
 
@@ -46,7 +49,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 OUT_ROOT="${OUT_ROOT:-/tmp/tq_encode_debug_sweep_$(date +%Y%m%d_%H%M%S)}"
-ENCODE_MODES="${ENCODE_MODES:-0 1 2 3 4 5 6}"
+ENCODE_MODES="${ENCODE_MODES:-0 1 2 3 4 5 6 7 8 9}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_TOKENS="${MAX_TOKENS:-8}"
 TP_SIZE="${TP_SIZE:-1}"

@@ -42,8 +42,8 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     int64_t debugModeAttr = debugModePtr != nullptr ? *debugModePtr : 0;
     uint32_t debugMode =
         debugModeAttr > 0 ? static_cast<uint32_t>(debugModeAttr) : 0U;
-    if (debugMode > 6U) {
-        debugMode = 6U;
+    if (debugMode > 9U) {
+        debugMode = 9U;
     }
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());

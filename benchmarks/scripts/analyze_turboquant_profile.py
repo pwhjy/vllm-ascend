@@ -252,6 +252,11 @@ def _print_encode_debug_sweep_summary(output_dir: Path) -> bool:
     delta("k_stage1_pack (mode5 - mode4)", 5, 4)
     delta("k_stage1_cache_write (mode3 - mode5)", 3, 5)
     delta("k_qjl_project_pack_write (mode1 - mode3)", 1, 3)
+    delta("k_load_norm (mode7 - mode6)", 7, 6)
+    delta("k_rotation_matrix (mode4 - mode7)", 4, 7)
+    delta("k_qjl_project_no_pack (mode8 - mode3)", 8, 3)
+    delta("k_qjl_pack (mode9 - mode8)", 9, 8)
+    delta("k_qjl_cache_write (mode1 - mode9)", 1, 9)
     if all(mode in rows for mode in (0, 1, 2, 6)):
         interaction = (
             rows[0]["encode_op"]
@@ -284,6 +289,11 @@ def _print_encode_debug_sweep_summary(output_dir: Path) -> bool:
             ("k_stage1_pack", 5, 4),
             ("k_stage1_cache_write", 3, 5),
             ("k_qjl_project_pack_write", 1, 3),
+            ("k_load_norm", 7, 6),
+            ("k_rotation_matrix", 4, 7),
+            ("k_qjl_project_no_pack", 8, 3),
+            ("k_qjl_pack", 9, 8),
+            ("k_qjl_cache_write", 1, 9),
         ):
             if lhs in rows and rhs in rows:
                 components.append((name, rows[lhs]["encode_op"] - rows[rhs]["encode_op"]))

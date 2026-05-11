@@ -144,7 +144,7 @@ def encode_cache_update_debug_mode() -> int:
         mode = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_DEBUG_MODE", "0"))
     except ValueError:
         mode = 0
-    return min(6, max(0, mode))
+    return min(9, max(0, mode))
 
 
 def fused_decode_attention_m4_debug_mode() -> int:

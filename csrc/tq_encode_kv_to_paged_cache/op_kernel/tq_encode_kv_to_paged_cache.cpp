@@ -259,6 +259,16 @@ public:
         kNormCacheGm_.SetValue(slotHead, norm + kResidual_[0] * 1.0e-6F);
     }
 
+    __aicore__ inline void EncodeKLoadNormOnly(
+        uint32_t token,
+        uint32_t kvHead,
+        uint64_t slotHead)
+    {
+        LoadCurrentVector(keyGm_, token, kvHead);
+        float norm = CalcNorm();
+        kNormCacheGm_.SetValue(slotHead, norm + currentVec_[0] * 1.0e-6F);
+    }
+
     __aicore__ inline void EncodeKStage1Only(
         uint32_t token,
         uint32_t kvHead,
@@ -298,6 +308,72 @@ public:
         }
         kGammaCacheGm_.SetValue(slotHead, gamma);
         kNormCacheGm_.SetValue(slotHead, norm);
+    }
+
+    __aicore__ inline void EncodeKStage1QjlDebug(
+        uint32_t token,
+        uint32_t kvHead,
+        uint64_t slotHead,
+        bool packQjl)
+    {
+        uint8_t idxPacked[128];
+        uint8_t qjlPacked[64];
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            idxPacked[col] = 0;
+        }
+        qjlPacked[0] = 0;
+        if (packQjl) {
+            for (uint32_t col = 0; col < kQjlCols_; ++col) {
+                qjlPacked[col] = 0;
+            }
+        }
+
+        LoadCurrentVector(keyGm_, token, kvHead);
+        float norm = CalcNorm();
+        float invNorm = 1.0F / norm;
+        float gammaSq = 0.0F;
+        CalcRotRange(kRotationGm_, invNorm, 0U, headDim_);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float xRot = kResidual_[d];
+            uint32_t idx = KBoundaryIndex(xRot);
+            PackIndex(idxPacked, kPackedCols_, stage1Bits_, d, idx);
+            float residual = xRot - kCodebook_[idx];
+            kResidual_[d] = residual;
+            gammaSq += residual * residual;
+        }
+
+        for (uint32_t j = 0; j < headDim_; ++j) {
+            currentVec_[j] = 0.0F;
+        }
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float residual = kResidual_[d];
+            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                currentVec_[j] +=
+                    residual * kQjlProjTGm_.GetValue(matrixBase + j);
+            }
+        }
+        if (packQjl) {
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                PackIndex(
+                    qjlPacked,
+                    kQjlCols_,
+                    1U,
+                    j,
+                    currentVec_[j] >= 0.0F ? 1U : 0U);
+            }
+        }
+
+        uint64_t idxBase = slotHead * kPackedCols_;
+        for (uint32_t col = 0; col < kPackedCols_; ++col) {
+            kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
+        }
+        float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
+        float packedGuard = packQjl && qjlPacked[0] == 0xFFU ? 1.0e-9F : 0.0F;
+        kGammaCacheGm_.SetValue(slotHead, gamma);
+        kNormCacheGm_.SetValue(
+            slotHead,
+            norm + currentVec_[0] * 1.0e-6F + packedGuard);
     }
 
     __aicore__ inline void EncodeV(
@@ -424,6 +500,24 @@ public:
         if (debugMode_ == 5U) {
             if (partition == 0U) {
                 EncodeKStage1Only(token, kvHead, slotHead, false);
+            }
+            return;
+        }
+        if (debugMode_ == 7U) {
+            if (partition == 0U) {
+                EncodeKLoadNormOnly(token, kvHead, slotHead);
+            }
+            return;
+        }
+        if (debugMode_ == 8U) {
+            if (partition == 0U) {
+                EncodeKStage1QjlDebug(token, kvHead, slotHead, false);
+            }
+            return;
+        }
+        if (debugMode_ == 9U) {
+            if (partition == 0U) {
+                EncodeKStage1QjlDebug(token, kvHead, slotHead, true);
             }
             return;
         }

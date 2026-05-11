@@ -1114,8 +1114,8 @@ void tq_encode_kv_to_paged_cache(
                 "k_qjl_cache packed cols are too small for head_dim");
     TORCH_CHECK(qjl_cols <= 64,
                 "qjl packed cols must be <= 64 for the combined encode kernel");
-    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 6,
-                "combined encode debug_mode must be in [0, 6]");
+    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 9,
+                "combined encode debug_mode must be in [0, 9]");
 
     EXEC_NPU_CMD(aclnnTqEncodeKvToPagedCache,
         key, value, slot_mapping,
