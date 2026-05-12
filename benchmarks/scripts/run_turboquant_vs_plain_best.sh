@@ -119,6 +119,7 @@ cmd=(
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
   --baseline-mode custom
   --output-dir "${OUT}"
+  --env-baseline VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM="${STRUCTURED_TRANSFORM}"
   --env-fused VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION=1
   --env-fused VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION=0
   --env-fused VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE=1
