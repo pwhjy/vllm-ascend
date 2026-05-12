@@ -32,7 +32,7 @@ Optional:
   M4_DEBUG_MODE=0
   ENCODE_V_PARTITIONS=1
   ENCODE_FORCE_FP32_INPUT=0
-  ENCODE_STRUCTURED_FAST=0
+  ENCODE_STRUCTURED_FAST=0  # 0: structured uses reference encode; 1: experimental custom/FWHT encode
   ALLOW_MISMATCH=1
   PRESERVE_TQ_ENV=0
 

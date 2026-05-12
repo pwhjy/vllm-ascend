@@ -87,6 +87,20 @@ def encode_cache_update_structured_fast_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") == "1"
 
 
+def encode_cache_update_requires_structured_reference(transform_mode: int) -> bool:
+    """Keep structured transforms on the reference encoder unless opted in.
+
+    The custom dense-matmul cache-update kernel was validated for the dense QR
+    matrices.  Signed-Hadamard matrices change the encode math enough that both
+    the FWHT path and the generic custom-op path are still experimental.
+    """
+
+    return (
+        int(transform_mode) != TQ_TRANSFORM_DENSE
+        and not encode_cache_update_structured_fast_enabled()
+    )
+
+
 def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
@@ -748,6 +762,11 @@ def tq_encode_kv_to_paged_cache(
             return time.perf_counter()
 
         fallback_reasons: list[str] = []
+        if encode_cache_update_requires_structured_reference(transform_mode):
+            fallback_reasons.append(
+                "structured transform uses reference encode unless "
+                "VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST=1"
+            )
         if k_variant != "prod":
             fallback_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
@@ -860,6 +879,10 @@ def tq_encode_kv_to_paged_cache(
                 fallback_reasons.append("custom cache update call failed")
 
         staged_reasons: list[str] = []
+        if int(transform_mode) != TQ_TRANSFORM_DENSE:
+            staged_reasons.append(
+                "staged custom cache update does not support structured transforms"
+            )
         if k_variant != "prod":
             staged_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
@@ -970,6 +993,7 @@ def tq_encode_kv_to_paged_cache(
         k_qjl_proj_t=k_qjl_proj_t,
         kv_mse_rotation=kv_mse_rotation,
         kv_mse_shared_boundary=kv_mse_shared_boundary,
+        transform_mode=transform_mode,
     )
 
 

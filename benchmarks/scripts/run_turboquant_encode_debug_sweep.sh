@@ -22,7 +22,7 @@ Optional:
   M4_FORCE_FP32_INPUT=1
   ENCODE_V_PARTITIONS=1
   ENCODE_FORCE_FP32_INPUT=0
-  ENCODE_STRUCTURED_FAST=0
+  ENCODE_STRUCTURED_FAST=0  # 0: structured uses reference encode; 1: experimental custom/FWHT encode
   PROFILE_SYNC=1
 
 Encode debug modes:
