@@ -2298,6 +2298,53 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             )
 
             if (
+                int(getattr(layer, "tq_transform_mode", 0)) != 0
+                and os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") != "1"
+            ):
+                batch_size = len(attn_metadata.seq_lens_list)
+                dense_k, dense_v = self._dequant_paged_kv_to_dense(
+                    kv_cache,
+                    attn_metadata.block_tables,
+                    attn_metadata.seq_lens_list,
+                    query.dtype,
+                    layer,
+                    profile_label=(
+                        "turboquant_fused_kv_update_attention."
+                        "decode_full_cache"
+                    ),
+                )
+                actual_seq_lengths_q = torch.ones(
+                    batch_size,
+                    dtype=torch.int32,
+                    device=query.device,
+                ).cumsum(0).tolist()
+                actual_seq_lengths_kv = torch.tensor(
+                    attn_metadata.seq_lens_list,
+                    dtype=torch.int32,
+                    device=query.device,
+                ).cumsum(0).tolist()
+                output = self._run_dense_fia(
+                    query[:batch_size],
+                    dense_k,
+                    dense_v,
+                    actual_seq_lengths_q,
+                    actual_seq_lengths_kv,
+                    attn_metadata,
+                    output,
+                    profile_name=(
+                        "turboquant_fused_kv_update_attention."
+                        "decode_full_cache.run_dense_fia"
+                    ),
+                )
+                _maybe_sync_for_profile(output)
+                _record_tq_profile(
+                    "turboquant_fused_kv_update_attention.forward",
+                    (time.perf_counter() - t0) * 1000.0,
+                    vectors=batch_size,
+                )
+                return output
+
+            if (
                 decode_compressed_full_cache_enabled()
                 and fused_attention_custom_enabled()
                 and bool(attn_metadata.causal)
