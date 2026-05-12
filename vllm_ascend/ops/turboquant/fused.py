@@ -462,10 +462,12 @@ def _can_combine_kv_mse_encode(
     v_bits: int,
     kv_mse_rotation: torch.Tensor | None,
     kv_mse_shared_boundary: bool,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> bool:
     return (
         combined_kv_mse_encode_enabled()
         and _is_npu_tensor(key)
+        and int(transform_mode) == TQ_TRANSFORM_DENSE
         and k_variant == "prod"
         and int(k_stage1_bits) == int(v_bits)
         and kv_mse_rotation is not None
@@ -616,6 +618,7 @@ def tq_encode_kv_to_paged_cache_reference(
         v_bits=int(v_bits),
         kv_mse_rotation=kv_mse_rotation,
         kv_mse_shared_boundary=kv_mse_shared_boundary,
+        transform_mode=int(transform_mode),
     )
     if use_combined_kv_mse:
         assert kv_mse_rotation is not None
