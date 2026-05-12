@@ -741,6 +741,10 @@ def tq_encode_kv_to_paged_cache(
     """
 
     custom_enabled = encode_cache_update_custom_enabled()
+    if custom_enabled and encode_cache_update_requires_structured_reference(
+        transform_mode
+    ):
+        custom_enabled = False
     if custom_enabled:
         _maybe_sync_for_profile(key, value, slot_mapping)
         custom_t0 = time.perf_counter()
@@ -762,11 +766,6 @@ def tq_encode_kv_to_paged_cache(
             return time.perf_counter()
 
         fallback_reasons: list[str] = []
-        if encode_cache_update_requires_structured_reference(transform_mode):
-            fallback_reasons.append(
-                "structured transform uses reference encode unless "
-                "VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST=1"
-            )
         if k_variant != "prod":
             fallback_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
