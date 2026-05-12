@@ -2215,9 +2215,16 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                     current_lens_list,
                 )
             ]
+            tq_transform_mode = int(getattr(layer, "tq_transform_mode", 0))
+            structured_safe_path = (
+                tq_transform_mode != 0
+                and os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") != "1"
+                and os.getenv("VLLM_ASCEND_TQ_M4_STRUCTURED_FAST", "0") != "1"
+            )
 
             if (
                 fused_decode_attention_m4_enabled()
+                and not structured_safe_path
                 and bool(attn_metadata.causal)
                 and getattr(layer, "tq_k_variant", "prod") == "prod"
                 and "k_qjl" in kv_cache
@@ -2250,7 +2257,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         output_dtype=output.dtype,
                         max_seq_len=max(old_seq_lens_list, default=0),
                         k_qjl_proj=layer._tq_k_qjl_proj,
-                        transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
+                        transform_mode=tq_transform_mode,
                         profile_prefix=(
                             "turboquant_fused_kv_update_attention."
                             "decode.m4_attention"
@@ -2294,13 +2301,10 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 kv_mse_shared_boundary=getattr(
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
-                transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
+                transform_mode=tq_transform_mode,
             )
 
-            if (
-                int(getattr(layer, "tq_transform_mode", 0)) != 0
-                and os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") != "1"
-            ):
+            if structured_safe_path:
                 batch_size = len(attn_metadata.seq_lens_list)
                 dense_k, dense_v = self._dequant_paged_kv_to_dense(
                     kv_cache,
