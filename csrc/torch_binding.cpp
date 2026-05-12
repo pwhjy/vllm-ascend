@@ -1070,7 +1070,8 @@ void tq_encode_kv_to_paged_cache(
     int64_t v_bits,
     int64_t head_dim,
     int64_t debug_mode,
-    int64_t v_partition_count)
+    int64_t v_partition_count,
+    int64_t transform_mode)
 {
     check_tq_encode_common_inputs(
         key, slot_mapping, k_idx_cache, k_norm_cache, k_rotation, k_boundary,
@@ -1118,6 +1119,8 @@ void tq_encode_kv_to_paged_cache(
     TORCH_CHECK(v_partition_count == 1 || v_partition_count == 2
                     || v_partition_count == 4,
                 "combined encode v_partition_count must be one of 1, 2, 4");
+    TORCH_CHECK(transform_mode == 0 || transform_mode == 1,
+                "combined encode transform_mode must be one of 0 (dense), 1 (hadamard)");
 
     EXEC_NPU_CMD(aclnnTqEncodeKvToPagedCache,
         key, value, slot_mapping,
@@ -1126,7 +1129,7 @@ void tq_encode_kv_to_paged_cache(
         k_rotation, k_boundary, k_codebook, k_qjl_proj_t,
         v_rotation, v_boundary,
         total_bits, stage1_bits, v_bits, head_dim, debug_mode,
-        v_partition_count);
+        v_partition_count, transform_mode);
 }
 
 at::Tensor tq_dequant_prod_paged(
@@ -1845,7 +1848,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int total_bits, int stage1_bits, "
         "                            int v_bits, int head_dim, "
         "                            int debug_mode, "
-        "                            int v_partition_count) -> ()"
+        "                            int v_partition_count, "
+        "                            int transform_mode) -> ()"
     );
     ops.impl("tq_encode_kv_to_paged_cache", torch::kPrivateUse1,
              &vllm_ascend::tq_encode_kv_to_paged_cache);

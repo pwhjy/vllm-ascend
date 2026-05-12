@@ -15,9 +15,11 @@ import torch
 from .base import AscendAttentionScheme
 from .turboquant_layout import get_stage1_bits
 from .turboquant_runtime import (
+    TQ_TRANSFORM_DENSE,
     build_qjl_projection,
     build_rotation_matrix,
     build_turboquant_codebook,
+    turboquant_effective_transform_mode,
 )
 
 
@@ -87,6 +89,9 @@ class AscendTurboQuantKVCacheAttentionMethod(AscendAttentionScheme):
         k_rot = build_rotation_matrix(k_dim, seed, "cpu", params_dtype)
         v_rot = build_rotation_matrix(v_dim, seed + 1, "cpu", params_dtype)
         k_qjl_proj = build_qjl_projection(k_dim, seed + 2, "cpu", params_dtype)
+        transform_mode = turboquant_effective_transform_mode(k_dim)
+        if turboquant_effective_transform_mode(v_dim) != transform_mode:
+            transform_mode = TQ_TRANSFORM_DENSE
 
         layer.kv_cache_torch_dtype = torch.int8
         layer.impl.__class__ = AscendTurboQuantAttentionBackendImpl
@@ -103,6 +108,7 @@ class AscendTurboQuantKVCacheAttentionMethod(AscendAttentionScheme):
         layer.tq_scalar_dtype = self.scalar_dtype
         layer.tq_layer_id = self.layer_id
         layer.tq_head_size_v = v_dim
+        layer.tq_transform_mode = transform_mode
         layer.tq_runtime_prepared = False
 
         layer.register_buffer("k_codebook", k_codebook, persistent=False)

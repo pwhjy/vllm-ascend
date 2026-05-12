@@ -2175,6 +2175,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 kv_mse_shared_boundary=getattr(
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
+                transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
             )
             output = self._run_dense_fia(
                 query[:num_tokens],
@@ -2249,6 +2250,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         output_dtype=output.dtype,
                         max_seq_len=max(old_seq_lens_list, default=0),
                         k_qjl_proj=layer._tq_k_qjl_proj,
+                        transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
                         profile_prefix=(
                             "turboquant_fused_kv_update_attention."
                             "decode.m4_attention"
@@ -2292,6 +2294,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 kv_mse_shared_boundary=getattr(
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
+                transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
             )
 
             if (
@@ -2492,6 +2495,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 kv_mse_shared_boundary=getattr(
                     layer, "_tq_kv_mse_shared_boundary", False,
                 ),
+                transform_mode=int(getattr(layer, "tq_transform_mode", 0)),
             )
             if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 output = self._forward_turboquant_chunked_prefill(

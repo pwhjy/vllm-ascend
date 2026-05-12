@@ -32,6 +32,7 @@ from vllm_ascend.quantization.methods.turboquant_layout import get_stage1_bits
 from vllm_ascend.quantization.methods.turboquant_runtime import (
     _maybe_sync_for_profile,
     _record_tq_profile,
+    TQ_TRANSFORM_DENSE,
     apply_rotation,
 )
 
@@ -516,6 +517,7 @@ def tq_encode_kv_to_paged_cache_reference(
     k_qjl_proj_t: torch.Tensor | None = None,
     kv_mse_rotation: torch.Tensor | None = None,
     kv_mse_shared_boundary: bool = False,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> None:
     """Reference fused encode + bit-pack + paged sidecar cache write.
 
@@ -708,6 +710,7 @@ def tq_encode_kv_to_paged_cache(
     k_qjl_proj_t: torch.Tensor | None = None,
     kv_mse_rotation: torch.Tensor | None = None,
     kv_mse_shared_boundary: bool = False,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> None:
     """Dispatch Phase A: encode current K/V and update sidecar cache.
 
@@ -826,6 +829,7 @@ def tq_encode_kv_to_paged_cache(
                     int(key.shape[-1]),
                     encode_cache_update_debug_mode(),
                     encode_cache_update_v_partitions(),
+                    int(transform_mode),
                 )
                 stage_t0 = _custom_stage_record(
                     "custom.op",
@@ -1278,6 +1282,7 @@ def tq_fused_decode_history_current_attention(
     max_seq_len: int | None = None,
     profile_prefix: str | None = None,
     k_qjl_proj: torch.Tensor | None = None,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> torch.Tensor:
     """M4 decode-only custom cache update + attention."""
 
@@ -1340,6 +1345,7 @@ def tq_fused_decode_history_current_attention(
             v_bits=int(v_bits),
             num_kv_heads=int(key.shape[1]),
             assume_valid_slots=True,
+            transform_mode=transform_mode,
         )
 
     stage_profile = (
@@ -1695,6 +1701,7 @@ def tq_fused_kv_update_attention_reference(
     k_rotation_t: torch.Tensor | None = None,
     kv_mse_rotation: torch.Tensor | None = None,
     kv_mse_shared_boundary: bool = False,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> torch.Tensor:
     """Reference implementation for the final unified TurboQuant op.
 
@@ -1729,6 +1736,7 @@ def tq_fused_kv_update_attention_reference(
         k_qjl_proj_t=k_qjl_proj_t,
         kv_mse_rotation=kv_mse_rotation,
         kv_mse_shared_boundary=kv_mse_shared_boundary,
+        transform_mode=transform_mode,
     )
 
     old_seq_lens_list = _to_int_list(old_seq_lens)

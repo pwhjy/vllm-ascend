@@ -22,6 +22,11 @@ from .turboquant_layout import get_stage1_bits
 
 _CODEBOOK_CACHE: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
 _CODEBOOK_CACHE_LOCK = threading.Lock()
+_HADAMARD_CACHE: dict[int, torch.Tensor] = {}
+_HADAMARD_CACHE_LOCK = threading.Lock()
+
+TQ_TRANSFORM_DENSE = 0
+TQ_TRANSFORM_SIGNED_HADAMARD = 1
 
 # =========================
 # TurboQuant profiling
@@ -46,6 +51,31 @@ def _tq_profile_dir() -> str:
 
 def _is_npu_tensor(x) -> bool:
     return isinstance(x, torch.Tensor) and hasattr(x, "is_npu") and x.is_npu
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
+def turboquant_requested_transform_mode() -> int:
+    mode = os.getenv("VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM", "dense")
+    mode = mode.strip().lower().replace("-", "_")
+    if mode in ("1", "hadamard", "signed_hadamard", "fwht"):
+        return TQ_TRANSFORM_SIGNED_HADAMARD
+    return TQ_TRANSFORM_DENSE
+
+
+def turboquant_effective_transform_mode(head_dim: int) -> int:
+    mode = turboquant_requested_transform_mode()
+    if mode == TQ_TRANSFORM_SIGNED_HADAMARD and _is_power_of_two(head_dim):
+        return mode
+    return TQ_TRANSFORM_DENSE
+
+
+def turboquant_transform_mode_name(mode: int) -> str:
+    if mode == TQ_TRANSFORM_SIGNED_HADAMARD:
+        return "hadamard"
+    return "dense"
 
 
 def _maybe_sync_for_profile(*objs):
@@ -242,7 +272,60 @@ def build_turboquant_codebook(head_dim: int, bits: int, device, dtype) -> tuple[
     )
 
 
+def _cached_hadamard(head_dim: int) -> torch.Tensor:
+    if not _is_power_of_two(head_dim):
+        raise ValueError(f"Hadamard transform requires a power-of-two head_dim, got {head_dim}")
+    with _HADAMARD_CACHE_LOCK:
+        cached = _HADAMARD_CACHE.get(head_dim)
+        if cached is None:
+            h = torch.ones(1, 1, dtype=torch.float32, device="cpu")
+            while h.shape[0] < head_dim:
+                h = torch.cat(
+                    (
+                        torch.cat((h, h), dim=1),
+                        torch.cat((h, -h), dim=1),
+                    ),
+                    dim=0,
+                )
+            cached = h.contiguous()
+            _HADAMARD_CACHE[head_dim] = cached
+    return cached
+
+
+def _build_signed_hadamard_matrix(
+    head_dim: int,
+    seed: int,
+    device,
+    dtype,
+    *,
+    normalize: bool,
+) -> torch.Tensor:
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    signs = torch.randint(
+        0,
+        2,
+        (head_dim,),
+        generator=generator,
+        dtype=torch.int8,
+        device="cpu",
+    ).to(torch.float32)
+    signs = signs * 2.0 - 1.0
+    matrix = signs[:, None] * _cached_hadamard(head_dim)
+    if normalize:
+        matrix = matrix * (1.0 / math.sqrt(float(head_dim)))
+    return matrix.to(device=device, dtype=dtype).contiguous()
+
+
 def build_rotation_matrix(head_dim: int, seed: int, device, dtype) -> torch.Tensor:
+    if turboquant_effective_transform_mode(head_dim) == TQ_TRANSFORM_SIGNED_HADAMARD:
+        return _build_signed_hadamard_matrix(
+            head_dim,
+            seed,
+            device,
+            dtype,
+            normalize=True,
+        )
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
     random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32, device="cpu")
@@ -251,6 +334,14 @@ def build_rotation_matrix(head_dim: int, seed: int, device, dtype) -> torch.Tens
 
 
 def build_qjl_projection(head_dim: int, seed: int, device, dtype) -> torch.Tensor:
+    if turboquant_effective_transform_mode(head_dim) == TQ_TRANSFORM_SIGNED_HADAMARD:
+        return _build_signed_hadamard_matrix(
+            head_dim,
+            seed,
+            device,
+            dtype,
+            normalize=False,
+        )
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
     random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32, device="cpu")

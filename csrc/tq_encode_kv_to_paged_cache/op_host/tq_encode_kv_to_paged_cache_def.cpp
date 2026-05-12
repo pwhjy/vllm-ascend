@@ -72,6 +72,7 @@ public:
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
         this->Attr("debugMode").AttrType(REQUIRED).Int(0);
         this->Attr("vPartitionCount").AttrType(REQUIRED).Int(1);
+        this->Attr("transformMode").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

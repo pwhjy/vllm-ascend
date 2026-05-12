@@ -24,6 +24,7 @@ struct TqEncodeKvToPagedCacheTilingData {
     uint32_t headDim;
     uint32_t debugMode;
     uint32_t vPartitionCount;
+    uint32_t transformMode;
     uint32_t numCore;
 };
 
@@ -78,6 +79,7 @@ public:
         headDim_ = tiling->headDim;
         debugMode_ = tiling->debugMode;
         vPartitionCount_ = tiling->vPartitionCount;
+        transformMode_ = tiling->transformMode;
         numCore_ = tiling->numCore;
         LoadSmallParams();
     }
@@ -143,12 +145,82 @@ public:
         return sqrt(sum);
     }
 
+    __aicore__ inline bool UseHadamardTransform()
+    {
+        return transformMode_ == 1U && headDim_ > 0U && headDim_ <= 256U
+            && ((headDim_ & (headDim_ - 1U)) == 0U);
+    }
+
+    __aicore__ inline float MatrixSign(
+        GlobalTensor<float>& matrix,
+        uint32_t row,
+        uint32_t col)
+    {
+        uint64_t index = static_cast<uint64_t>(row) * headDim_ + col;
+        return matrix.GetValue(index) >= 0.0F ? 1.0F : -1.0F;
+    }
+
+    __aicore__ inline void FwhtResidual()
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = base + off;
+                    uint32_t j = i + len;
+                    float a = kResidual_[i];
+                    float b = kResidual_[j];
+                    kResidual_[i] = a + b;
+                    kResidual_[j] = a - b;
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void FwhtCurrent()
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = base + off;
+                    uint32_t j = i + len;
+                    float a = currentVec_[i];
+                    float b = currentVec_[j];
+                    currentVec_[i] = a + b;
+                    currentVec_[j] = a - b;
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void CalcHadamardRotRange(
+        GlobalTensor<float>& rotation,
+        float invNorm,
+        uint32_t dimStart,
+        uint32_t dimEnd)
+    {
+        for (uint32_t d = 0U; d < headDim_; ++d) {
+            kResidual_[d] =
+                currentVec_[d] * invNorm * MatrixSign(rotation, d, 0U);
+        }
+        FwhtResidual();
+        float scale = 1.0F / sqrt(static_cast<float>(headDim_));
+        for (uint32_t d = dimStart; d < dimEnd; ++d) {
+            kResidual_[d] *= scale;
+        }
+    }
+
     __aicore__ inline void CalcRotRange(
         GlobalTensor<float>& rotation,
         float invNorm,
         uint32_t dimStart,
         uint32_t dimEnd)
     {
+        if (UseHadamardTransform()) {
+            CalcHadamardRotRange(rotation, invNorm, dimStart, dimEnd);
+            return;
+        }
         for (uint32_t d = dimStart; d < dimEnd; ++d) {
             kResidual_[d] = 0.0F;
         }
@@ -158,6 +230,32 @@ public:
             for (uint32_t outDim = dimStart; outDim < dimEnd; ++outDim) {
                 kResidual_[outDim] +=
                     x * rotation.GetValue(matrixBase + outDim);
+            }
+        }
+    }
+
+    __aicore__ inline void CalcQjlProjection()
+    {
+        if (UseHadamardTransform()) {
+            for (uint32_t j = 0U; j < headDim_; ++j) {
+                currentVec_[j] = kResidual_[j];
+            }
+            FwhtCurrent();
+            for (uint32_t j = 0U; j < headDim_; ++j) {
+                currentVec_[j] *= MatrixSign(kQjlProjTGm_, 0U, j);
+            }
+            return;
+        }
+
+        for (uint32_t j = 0; j < headDim_; ++j) {
+            currentVec_[j] = 0.0F;
+        }
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            float residual = kResidual_[d];
+            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                currentVec_[j] +=
+                    residual * kQjlProjTGm_.GetValue(matrixBase + j);
             }
         }
     }
@@ -230,17 +328,7 @@ public:
         }
 
         float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
-        for (uint32_t j = 0; j < headDim_; ++j) {
-            currentVec_[j] = 0.0F;
-        }
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            float residual = kResidual_[d];
-            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
-            for (uint32_t j = 0; j < headDim_; ++j) {
-                currentVec_[j] +=
-                    residual * kQjlProjTGm_.GetValue(matrixBase + j);
-            }
-        }
+        CalcQjlProjection();
         for (uint32_t j = 0; j < headDim_; ++j) {
             PackIndex(
                 qjlPacked,
@@ -357,17 +445,7 @@ public:
             gammaSq += residual * residual;
         }
 
-        for (uint32_t j = 0; j < headDim_; ++j) {
-            currentVec_[j] = 0.0F;
-        }
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            float residual = kResidual_[d];
-            uint64_t matrixBase = static_cast<uint64_t>(d) * headDim_;
-            for (uint32_t j = 0; j < headDim_; ++j) {
-                currentVec_[j] +=
-                    residual * kQjlProjTGm_.GetValue(matrixBase + j);
-            }
-        }
+        CalcQjlProjection();
         if (packQjl) {
             for (uint32_t j = 0; j < headDim_; ++j) {
                 PackIndex(
@@ -607,6 +685,7 @@ private:
     uint32_t headDim_{0};
     uint32_t debugMode_{0};
     uint32_t vPartitionCount_{1};
+    uint32_t transformMode_{0};
     uint32_t numCore_{0};
     float currentVec_[256];
     float kResidual_[256];

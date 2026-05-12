@@ -31,6 +31,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     const int64_t* headDimPtr = attr->GetAttrPointer<int64_t>(3);
     const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(4);
     const int64_t* vPartitionCountPtr = attr->GetAttrPointer<int64_t>(5);
+    const int64_t* transformModePtr = attr->GetAttrPointer<int64_t>(6);
 
     uint32_t totalBits = static_cast<uint32_t>(
         totalBitsPtr != nullptr ? *totalBitsPtr : 0);
@@ -58,6 +59,15 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
         || (vPackedCols % vPartitionCount) != 0U) {
         vPartitionCount = 1U;
     }
+    int64_t transformModeAttr =
+        transformModePtr != nullptr ? *transformModePtr : 0;
+    uint32_t transformMode =
+        transformModeAttr == 1 ? 1U : 0U;
+    if (transformMode == 1U
+        && (headDim == 0U || (headDim & (headDim - 1U)) != 0U
+            || headDim > 256U)) {
+        transformMode = 0U;
+    }
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
@@ -83,6 +93,7 @@ static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* con
     tiling.set_headDim(headDim);
     tiling.set_debugMode(debugMode);
     tiling.set_vPartitionCount(vPartitionCount);
+    tiling.set_transformMode(transformMode);
     tiling.set_numCore(coreNum);
 
     context->SetBlockDim(coreNum);

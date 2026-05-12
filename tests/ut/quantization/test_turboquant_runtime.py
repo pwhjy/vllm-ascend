@@ -1,3 +1,6 @@
+import math
+import os
+
 import torch
 
 from tests.ut.base import TestBase
@@ -151,6 +154,28 @@ class TestTurboQuantRuntime(TestBase):
         proj = build_qjl_projection(32, 1234, "cpu", torch.float32)
         row_norms = proj.norm(dim=1)
         self.assertGreater(torch.max(torch.abs(row_norms - 1.0)).item(), 0.1)
+
+    def test_structured_hadamard_transform_matrices(self):
+        old_mode = os.environ.get("VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM")
+        os.environ["VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM"] = "hadamard"
+        try:
+            rot = build_rotation_matrix(8, 1234, "cpu", torch.float32)
+            proj = build_qjl_projection(8, 5678, "cpu", torch.float32)
+        finally:
+            if old_mode is None:
+                os.environ.pop("VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM", None)
+            else:
+                os.environ["VLLM_ASCEND_TQ_STRUCTURED_TRANSFORM"] = old_mode
+
+        eye = torch.eye(8, dtype=torch.float32)
+        self.assertTrue(torch.allclose(rot.T @ rot, eye, atol=1e-6))
+        self.assertTrue(torch.equal(proj.abs(), torch.ones_like(proj)))
+        self.assertTrue(
+            torch.allclose(
+                proj.norm(dim=1),
+                torch.full((8,), math.sqrt(8), dtype=torch.float32),
+            )
+        )
 
     # ========================
     # Numerical correctness tests
