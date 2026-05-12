@@ -81,6 +81,12 @@ def encode_cache_update_force_fp32_input() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_ENCODE_FORCE_FP32_INPUT", "0") == "1"
 
 
+def encode_cache_update_structured_fast_enabled() -> bool:
+    """Use the experimental FWHT encode fast path for structured transforms."""
+
+    return os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") == "1"
+
+
 def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
@@ -829,7 +835,11 @@ def tq_encode_kv_to_paged_cache(
                     int(key.shape[-1]),
                     encode_cache_update_debug_mode(),
                     encode_cache_update_v_partitions(),
-                    int(transform_mode),
+                    (
+                        int(transform_mode)
+                        if encode_cache_update_structured_fast_enabled()
+                        else TQ_TRANSFORM_DENSE
+                    ),
                 )
                 stage_t0 = _custom_stage_record(
                     "custom.op",
