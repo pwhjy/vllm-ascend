@@ -194,6 +194,35 @@ public:
         }
     }
 
+    __aicore__ inline float HadamardScale()
+    {
+        if (headDim_ == 1U) {
+            return 1.0F;
+        }
+        if (headDim_ == 2U) {
+            return 0.7071067811865475F;
+        }
+        if (headDim_ == 4U) {
+            return 0.5F;
+        }
+        if (headDim_ == 8U) {
+            return 0.3535533905932738F;
+        }
+        if (headDim_ == 16U) {
+            return 0.25F;
+        }
+        if (headDim_ == 32U) {
+            return 0.1767766952966369F;
+        }
+        if (headDim_ == 64U) {
+            return 0.125F;
+        }
+        if (headDim_ == 128U) {
+            return 0.08838834764831845F;
+        }
+        return 0.0625F;
+    }
+
     __aicore__ inline void CalcHadamardRotRange(
         GlobalTensor<float>& rotation,
         float invNorm,
@@ -205,7 +234,7 @@ public:
                 currentVec_[d] * invNorm * MatrixSign(rotation, d, 0U);
         }
         FwhtResidual();
-        float scale = 1.0F / sqrt(static_cast<float>(headDim_));
+        float scale = HadamardScale();
         for (uint32_t d = dimStart; d < dimEnd; ++d) {
             kResidual_[d] *= scale;
         }
