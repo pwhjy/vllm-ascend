@@ -49,6 +49,7 @@ TURBOQUANT_ENV_KEYS = (
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE",
     "VLLM_ASCEND_TQ_CUSTOM_STRICT",
     "VLLM_ASCEND_TQ_PROFILE",
     "VLLM_ASCEND_TQ_PROFILE_DIR",
@@ -85,6 +86,7 @@ DEBUG_COMPARE_ENV_KEYS = (
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE",
     "VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT",
+    "VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE",
 )
 
 KV_MEMORY_RE = re.compile(r"Available KV cache memory:\s*([0-9.]+)\s*GiB")
@@ -161,6 +163,7 @@ def _debug_compare_requested(
         or args.debug_compare_dequant
         or args.debug_compare_k_score
         or args.debug_compare_prod_dequant
+        or args.debug_compare_encode
         or any(key in extra_env for key in DEBUG_COMPARE_ENV_KEYS)
     )
 
@@ -174,6 +177,7 @@ def _set_turboquant_env(
     debug_compare_dequant: bool,
     debug_compare_k_score: bool,
     debug_compare_prod_dequant: bool,
+    debug_compare_encode: bool,
 ) -> None:
     if variant == "plain":
         for key in TURBOQUANT_ENV_KEYS:
@@ -223,6 +227,12 @@ def _set_turboquant_env(
         "1"
         if debug_compare_prod_dequant
         or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT", "0") == "1"
+        else "0"
+    )
+    os.environ["VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE"] = (
+        "1"
+        if debug_compare_encode
+        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0") == "1"
         else "0"
     )
     os.environ["VLLM_ASCEND_TQ_CUSTOM_STRICT"] = "1"
@@ -380,6 +390,7 @@ def _run_worker(args: argparse.Namespace) -> int:
         args.debug_compare_dequant,
         args.debug_compare_k_score,
         args.debug_compare_prod_dequant,
+        args.debug_compare_encode,
     )
     if args.modelscope:
         os.environ["VLLM_USE_MODELSCOPE"] = "True"
@@ -776,6 +787,8 @@ def _worker_command(
         cmd.append("--debug-compare-k-score")
     if args.debug_compare_prod_dequant:
         cmd.append("--debug-compare-prod-dequant")
+    if args.debug_compare_encode:
+        cmd.append("--debug-compare-encode")
     if args.profile_turboquant:
         cmd.append("--profile-turboquant")
     if args.profile_turboquant_sync:
@@ -1136,6 +1149,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--debug-compare-prod-dequant",
         action="store_true",
         help="Enable TurboQuant prod dequant debug comparisons.",
+    )
+    parser.add_argument(
+        "--debug-compare-encode",
+        action="store_true",
+        help="Enable TurboQuant encode cache-update debug comparisons.",
     )
     parser.add_argument(
         "--profile-turboquant",

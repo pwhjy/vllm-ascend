@@ -87,6 +87,12 @@ def encode_cache_update_structured_fast_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") == "1"
 
 
+def encode_cache_update_debug_compare_enabled() -> bool:
+    """Compare custom encode cache writes against the Python reference."""
+
+    return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0") == "1"
+
+
 def encode_cache_update_requires_structured_reference(transform_mode: int) -> bool:
     """Keep structured transforms on the reference encoder unless opted in.
 
@@ -99,6 +105,68 @@ def encode_cache_update_requires_structured_reference(transform_mode: int) -> bo
         int(transform_mode) != TQ_TRANSFORM_DENSE
         and not encode_cache_update_structured_fast_enabled()
     )
+
+
+def _compare_encoded_update_or_raise(
+    kv_cache: dict[str, torch.Tensor],
+    valid_slots: torch.Tensor,
+    encoded_k: dict[str, torch.Tensor],
+    encoded_v: dict[str, torch.Tensor],
+    num_kv_heads: int,
+    *,
+    prefix: str = "TurboQuant encode cache-update",
+) -> None:
+    details: list[str] = []
+    if valid_slots.numel() == 0:
+        return
+
+    def _check(cache_name: str, encoded: torch.Tensor) -> None:
+        cache = kv_cache[cache_name]
+        flat_cache = cache.view(-1, int(num_kv_heads), cache.shape[-1])
+        custom = flat_cache.index_select(0, valid_slots)
+        if custom.shape != encoded.shape:
+            details.append(
+                f"{cache_name}: shape custom={tuple(custom.shape)} "
+                f"ref={tuple(encoded.shape)}"
+            )
+            return
+        ref = (
+            encoded if encoded.dtype == custom.dtype
+            else encoded.to(custom.dtype)
+        )
+        if custom.dtype == torch.uint8 or ref.dtype == torch.uint8:
+            diff = custom != ref
+            count = int(diff.sum().item())
+            if count:
+                first = int(diff.flatten().nonzero()[0].item())
+                details.append(
+                    f"{cache_name}: byte_mismatches={count}, "
+                    f"first_flat={first}, "
+                    f"custom={int(custom.flatten()[first].item())}, "
+                    f"ref={int(ref.flatten()[first].item())}"
+                )
+        else:
+            delta = (custom.to(torch.float32) - ref.to(torch.float32)).abs()
+            max_abs = float(delta.max().item()) if delta.numel() else 0.0
+            if max_abs > 1.0e-4:
+                first = int((delta > 1.0e-4).flatten().nonzero()[0].item())
+                details.append(
+                    f"{cache_name}: max_abs={max_abs:.6g}, "
+                    f"first_flat={first}, "
+                    f"custom={float(custom.flatten()[first].item()):.6g}, "
+                    f"ref={float(ref.flatten()[first].item()):.6g}"
+                )
+
+    _check("k_idx", encoded_k["idx"])
+    _check("k_norm", encoded_k["norm"])
+    _check("v_idx", encoded_v["idx"])
+    _check("v_norm", encoded_v["norm"])
+    if "qjl" in encoded_k and "k_qjl" in kv_cache:
+        _check("k_qjl", encoded_k["qjl"])
+    if "gamma" in encoded_k and "k_gamma" in kv_cache:
+        _check("k_gamma", encoded_k["gamma"])
+    if details:
+        raise RuntimeError(prefix + " mismatch: " + "; ".join(details))
 
 
 def combined_kv_mse_encode_enabled() -> bool:
@@ -867,6 +935,87 @@ def tq_encode_kv_to_paged_cache(
                     stage_t0,
                     kv_cache,
                 )
+                if encode_cache_update_debug_compare_enabled():
+                    slots = slot_mapping_i64.reshape(-1)
+                    num_tokens = int(slots.numel())
+                    num_kv_heads_i = int(
+                        num_kv_heads if num_kv_heads is not None
+                        else key.shape[1]
+                    )
+                    if assume_valid_slots:
+                        valid_slots = slots
+                        actual_key = key[:num_tokens].to(torch.float32)
+                        actual_value = value[:num_tokens].to(torch.float32)
+                    else:
+                        valid = slots >= 0
+                        valid_slots = slots[valid]
+                        actual_key = key[:num_tokens][valid].to(torch.float32)
+                        actual_value = value[:num_tokens][valid].to(torch.float32)
+                    use_combined_kv_mse = _can_combine_kv_mse_encode(
+                        actual_key,
+                        actual_value,
+                        k_boundary,
+                        k_codebook,
+                        v_boundary,
+                        v_codebook,
+                        k_variant=k_variant,
+                        k_stage1_bits=int(k_stage1_bits),
+                        v_bits=int(v_bits),
+                        kv_mse_rotation=kv_mse_rotation,
+                        kv_mse_shared_boundary=kv_mse_shared_boundary,
+                        transform_mode=int(transform_mode),
+                    )
+                    if use_combined_kv_mse:
+                        assert kv_mse_rotation is not None
+                        encoded_k, encoded_v = _encode_prod_k_mse_v_cache_no_profile(
+                            actual_key,
+                            actual_value,
+                            kv_mse_rotation,
+                            k_codebook,
+                            k_boundary,
+                            k_qjl_proj,
+                            int(k_total_bits),
+                            qjl_proj_t=k_qjl_proj_t_c,
+                        )
+                    else:
+                        if k_variant == "prod":
+                            encoded_k = _encode_prod_cache_no_profile(
+                                actual_key,
+                                k_rotation,
+                                k_codebook,
+                                k_boundary,
+                                k_qjl_proj,
+                                int(k_total_bits),
+                                qjl_proj_t=k_qjl_proj_t_c,
+                            )
+                        elif k_variant == "mse":
+                            encoded_k = _encode_mse_cache_no_profile(
+                                actual_key,
+                                k_rotation,
+                                k_codebook,
+                                k_boundary,
+                                int(k_stage1_bits),
+                                return_rot_and_dequant=False,
+                            )
+                        else:
+                            raise ValueError(
+                                f"Unsupported TurboQuant K variant: {k_variant}"
+                            )
+                        encoded_v = _encode_mse_cache_no_profile(
+                            actual_value,
+                            v_rotation,
+                            v_codebook,
+                            v_boundary,
+                            int(v_bits),
+                            return_rot_and_dequant=False,
+                        )
+                    _compare_encoded_update_or_raise(
+                        kv_cache,
+                        valid_slots,
+                        encoded_k,
+                        encoded_v,
+                        num_kv_heads_i,
+                    )
                 if not stage_profile:
                     _maybe_sync_for_profile(kv_cache)
                 _record_tq_profile(
@@ -876,7 +1025,10 @@ def tq_encode_kv_to_paged_cache(
                 )
                 return
             except Exception:
-                if custom_strict_enabled():
+                if (
+                    custom_strict_enabled()
+                    or encode_cache_update_debug_compare_enabled()
+                ):
                     raise
                 fallback_reasons.append("custom cache update call failed")
 
