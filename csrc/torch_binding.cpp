@@ -1819,7 +1819,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "tq_encode_mse_paged_cache(Tensor x, Tensor slot_mapping, "
-        "                          Tensor idx_cache, Tensor norm_cache, "
+        "                          Tensor(a!) idx_cache, "
+        "                          Tensor(b!) norm_cache, "
         "                          Tensor rotation, Tensor boundary, "
         "                          int bits, int head_dim) -> ()"
     );
@@ -1827,8 +1828,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::tq_encode_mse_paged_cache);
     ops.def(
         "tq_encode_prod_paged_cache(Tensor x, Tensor slot_mapping, "
-        "                           Tensor idx_cache, Tensor qjl_cache, "
-        "                           Tensor gamma_cache, Tensor norm_cache, "
+        "                           Tensor(a!) idx_cache, "
+        "                           Tensor(b!) qjl_cache, "
+        "                           Tensor(c!) gamma_cache, "
+        "                           Tensor(d!) norm_cache, "
         "                           Tensor rotation, Tensor boundary, "
         "                           Tensor codebook, Tensor qjl_proj_t, "
         "                           int total_bits, int stage1_bits, "
@@ -1839,9 +1842,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "tq_encode_kv_to_paged_cache(Tensor key, Tensor value, "
         "                            Tensor slot_mapping, "
-        "                            Tensor k_idx_cache, Tensor k_qjl_cache, "
-        "                            Tensor k_gamma_cache, Tensor k_norm_cache, "
-        "                            Tensor v_idx_cache, Tensor v_norm_cache, "
+        "                            Tensor(a!) k_idx_cache, "
+        "                            Tensor(b!) k_qjl_cache, "
+        "                            Tensor(c!) k_gamma_cache, "
+        "                            Tensor(d!) k_norm_cache, "
+        "                            Tensor(e!) v_idx_cache, "
+        "                            Tensor(f!) v_norm_cache, "
         "                            Tensor k_rotation, Tensor k_boundary, "
         "                            Tensor k_codebook, Tensor k_qjl_proj_t, "
         "                            Tensor v_rotation, Tensor v_boundary, "
@@ -1888,9 +1894,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "tq_fused_kv_update_attention_decode("
         "Tensor query, Tensor key, Tensor value, "
         "Tensor slot_mapping, "
-        "Tensor k_packed_idx, Tensor k_packed_qjl, "
-        "Tensor k_gamma, Tensor k_norm, "
-        "Tensor v_packed_idx, Tensor v_norm, "
+        "Tensor(a!) k_packed_idx, Tensor(b!) k_packed_qjl, "
+        "Tensor(c!) k_gamma, Tensor(d!) k_norm, "
+        "Tensor(e!) v_packed_idx, Tensor(f!) v_norm, "
         "Tensor block_table, Tensor old_seq_lens, "
         "Tensor k_rotation, Tensor k_qjl_query_matrix, "
         "Tensor k_qjl_proj_t, Tensor k_boundary, "

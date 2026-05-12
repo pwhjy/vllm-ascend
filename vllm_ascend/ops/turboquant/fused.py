@@ -93,6 +93,29 @@ def encode_cache_update_debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0") == "1"
 
 
+def _sync_npu_tensors_for_debug(*objs) -> None:
+    def _walk(obj):
+        if isinstance(obj, torch.Tensor):
+            return [obj]
+        if isinstance(obj, (list, tuple)):
+            out = []
+            for item in obj:
+                out.extend(_walk(item))
+            return out
+        if isinstance(obj, dict):
+            out = []
+            for item in obj.values():
+                out.extend(_walk(item))
+            return out
+        return []
+
+    for obj in objs:
+        for tensor in _walk(obj):
+            if hasattr(tensor, "is_npu") and tensor.is_npu:
+                torch.npu.synchronize(tensor.device)
+                return
+
+
 def encode_cache_update_requires_structured_reference(transform_mode: int) -> bool:
     """Keep structured transforms on the reference encoder unless opted in.
 
@@ -936,6 +959,7 @@ def tq_encode_kv_to_paged_cache(
                     kv_cache,
                 )
                 if encode_cache_update_debug_compare_enabled():
+                    _sync_npu_tensors_for_debug(kv_cache)
                     slots = slot_mapping_i64.reshape(-1)
                     num_tokens = int(slots.numel())
                     num_kv_heads_i = int(
@@ -1009,6 +1033,7 @@ def tq_encode_kv_to_paged_cache(
                             int(v_bits),
                             return_rot_and_dequant=False,
                         )
+                    _sync_npu_tensors_for_debug(encoded_k, encoded_v, kv_cache)
                     _compare_encoded_update_or_raise(
                         kv_cache,
                         valid_slots,
