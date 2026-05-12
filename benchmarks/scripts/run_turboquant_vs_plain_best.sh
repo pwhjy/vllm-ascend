@@ -29,12 +29,12 @@ Optional:
   M4_GROUPED_Q=1
   M4_PRETRANSFORM_QUERY=1
   M4_FORCE_FP32_INPUT=1
-  M4_STRUCTURED_FAST=0
+  M4_STRUCTURED_FAST=1
   M4_DEBUG_MODE=0
   ENCODE_V_PARTITIONS=1
   ENCODE_FORCE_FP32_INPUT=0
   ENCODE_STRUCTURED_FAST=0  # 0: structured uses reference encode; 1: experimental custom/FWHT encode
-  ALLOW_MISMATCH=1
+  ALLOW_MISMATCH=1  # 1 accepts generated text/token differences from lossy TurboQuant
   PRESERVE_TQ_ENV=0
 
 Extra arguments are forwarded to check_turboquant_llama_correctness.py.
@@ -76,7 +76,7 @@ M4_SPLIT_CACHE_UPDATE="${M4_SPLIT_CACHE_UPDATE:-1}"
 M4_GROUPED_Q="${M4_GROUPED_Q:-1}"
 M4_PRETRANSFORM_QUERY="${M4_PRETRANSFORM_QUERY:-1}"
 M4_FORCE_FP32_INPUT="${M4_FORCE_FP32_INPUT:-1}"
-M4_STRUCTURED_FAST="${M4_STRUCTURED_FAST:-0}"
+M4_STRUCTURED_FAST="${M4_STRUCTURED_FAST:-1}"
 M4_DEBUG_MODE="${M4_DEBUG_MODE:-0}"
 ENCODE_V_PARTITIONS="${ENCODE_V_PARTITIONS:-1}"
 ENCODE_FORCE_FP32_INPUT="${ENCODE_FORCE_FP32_INPUT:-0}"
@@ -163,6 +163,9 @@ if [[ "${PROFILE_TQ}" == "1" ]]; then
   if [[ "${PROFILE_SYNC}" == "1" ]]; then
     cmd+=(--profile-turboquant-sync)
   fi
+fi
+if [[ "${ALLOW_MISMATCH}" == "1" ]]; then
+  cmd+=(--accept-generated-mismatch)
 fi
 cmd+=("$@")
 

@@ -968,8 +968,11 @@ def _run_compare(args: argparse.Namespace) -> int:
         "fused": _summarize_worker_stats(fused),
     }
     comparison = _compare_outputs(baseline, fused)
+    accepted = bool(comparison["passed"] or args.accept_generated_mismatch)
     comparison.update(
         {
+            "accepted": accepted,
+            "accept_generated_mismatch": bool(args.accept_generated_mismatch),
             "baseline_json": str(baseline_json),
             "fused_json": str(fused_json),
             "baseline_mode": args.baseline_mode,
@@ -1022,6 +1025,14 @@ def _run_compare(args: argparse.Namespace) -> int:
             f"\nPASS: fused PR5 attention matched baseline for "
             f"{comparison['num_prompts']} prompt(s)."
         )
+    elif args.accept_generated_mismatch:
+        print(
+            f"\nWARN: found {len(comparison['mismatches'])} generated-output "
+            f"mismatch(es), accepted by --accept-generated-mismatch. "
+            f"See {comparison_json}"
+        )
+        for mismatch in comparison["mismatches"][:3]:
+            print(json.dumps(mismatch, ensure_ascii=False, indent=2))
     else:
         print(
             f"\nFAIL: found {len(comparison['mismatches'])} mismatch(es). "
@@ -1033,7 +1044,7 @@ def _run_compare(args: argparse.Namespace) -> int:
     if args.include_plain_baseline:
         print(f"Plain comparison: {plain_comparison_json}")
     _print_run_stats_summary(run_stats)
-    return 0 if comparison["passed"] else 1
+    return 0 if accepted else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1147,6 +1158,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-plain-baseline",
         action="store_true",
         help="Also run a non-TurboQuant/plain model baseline for context.",
+    )
+    parser.add_argument(
+        "--accept-generated-mismatch",
+        action="store_true",
+        help=(
+            "Return success even when generated text/token IDs differ. Use this "
+            "for lossy TurboQuant quality/performance runs; strict debug runs "
+            "should leave it disabled."
+        ),
     )
     parser.add_argument(
         "--plain-only",
