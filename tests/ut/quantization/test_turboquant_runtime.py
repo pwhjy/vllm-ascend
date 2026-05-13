@@ -1,4 +1,3 @@
-import math
 import os
 
 import torch
@@ -169,13 +168,10 @@ class TestTurboQuantRuntime(TestBase):
 
         eye = torch.eye(8, dtype=torch.float32)
         self.assertTrue(torch.allclose(rot.T @ rot, eye, atol=1e-6))
-        self.assertTrue(torch.equal(proj.abs(), torch.ones_like(proj)))
-        self.assertTrue(
-            torch.allclose(
-                proj.norm(dim=1),
-                torch.full((8,), math.sqrt(8), dtype=torch.float32),
-            )
-        )
+        self.assertFalse(torch.equal(proj.abs(), torch.ones_like(proj)))
+        query_qjl_matrix = rot @ proj.transpose(0, 1)
+        off_diag = query_qjl_matrix - torch.diag(torch.diag(query_qjl_matrix))
+        self.assertGreater(off_diag.abs().max().item(), 1e-3)
 
     # ========================
     # Numerical correctness tests

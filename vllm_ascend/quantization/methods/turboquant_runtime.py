@@ -334,14 +334,9 @@ def build_rotation_matrix(head_dim: int, seed: int, device, dtype) -> torch.Tens
 
 
 def build_qjl_projection(head_dim: int, seed: int, device, dtype) -> torch.Tensor:
-    if turboquant_effective_transform_mode(head_dim) == TQ_TRANSFORM_SIGNED_HADAMARD:
-        return _build_signed_hadamard_matrix(
-            head_dim,
-            seed,
-            device,
-            dtype,
-            normalize=False,
-        )
+    # Keep the QJL projection independent from the structured rotation.  Using
+    # the same Hadamard basis for both makes k_rot @ qjl_proj.T collapse to a
+    # diagonal signed scale, so the QJL correction no longer mixes dimensions.
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)
     random_matrix = torch.randn(head_dim, head_dim, generator=generator, dtype=torch.float32, device="cpu")

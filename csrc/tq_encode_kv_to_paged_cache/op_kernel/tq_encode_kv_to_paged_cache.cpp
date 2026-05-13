@@ -177,23 +177,6 @@ public:
         }
     }
 
-    __aicore__ inline void FwhtCurrent()
-    {
-        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
-            uint32_t step = len << 1U;
-            for (uint32_t base = 0U; base < headDim_; base += step) {
-                for (uint32_t off = 0U; off < len; ++off) {
-                    uint32_t i = base + off;
-                    uint32_t j = i + len;
-                    float a = currentVec_[i];
-                    float b = currentVec_[j];
-                    currentVec_[i] = a + b;
-                    currentVec_[j] = a - b;
-                }
-            }
-        }
-    }
-
     __aicore__ inline float HadamardScale()
     {
         if (headDim_ == 1U) {
@@ -265,17 +248,8 @@ public:
 
     __aicore__ inline void CalcQjlProjection()
     {
-        if (UseHadamardTransform()) {
-            for (uint32_t j = 0U; j < headDim_; ++j) {
-                currentVec_[j] = kResidual_[j];
-            }
-            FwhtCurrent();
-            for (uint32_t j = 0U; j < headDim_; ++j) {
-                currentVec_[j] *= MatrixSign(kQjlProjTGm_, 0U, j);
-            }
-            return;
-        }
-
+        // QJL must stay independent from the Hadamard rotation; use the
+        // provided projection matrix even when the stage-1 rotation uses FWHT.
         for (uint32_t j = 0; j < headDim_; ++j) {
             currentVec_[j] = 0.0F;
         }
