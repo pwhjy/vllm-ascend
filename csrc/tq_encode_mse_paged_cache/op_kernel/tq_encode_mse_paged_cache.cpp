@@ -50,6 +50,7 @@ public:
         headDim_ = tiling->headDim;
         numCore_ = tiling->numCore;
         pipe_.InitBuffer(sqrtBuf_, 8U * sizeof(float));
+        pipe_.InitBuffer(scalarBuf_, 8U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -152,17 +153,11 @@ public:
         }
     }
 
-    __aicore__ inline void ProcessOne(uint32_t token, uint32_t kvHead)
+    __aicore__ inline float ProcessOne(
+        uint32_t token,
+        uint32_t kvHead,
+        int64_t slot)
     {
-        int64_t slot = slotMappingGm_.GetValue(token);
-        if (slot < 0) {
-            return;
-        }
-
-        if (headDim_ > 256U || bits_ == 0U || bits_ > 4U) {
-            return;
-        }
-
         uint8_t packed[128];
         for (uint32_t col = 0; col < packedCols_; ++col) {
             packed[col] = 0;
@@ -182,7 +177,36 @@ public:
         for (uint32_t col = 0; col < packedCols_; ++col) {
             idxCacheGm_.SetValue(packedBase + col, packed[col]);
         }
-        normCacheGm_.SetValue(slotHead, norm);
+        return norm;
+    }
+
+    __aicore__ inline void ProcessToken(uint32_t token)
+    {
+        int64_t slot = slotMappingGm_.GetValue(token);
+        if (slot < 0) {
+            return;
+        }
+        if (headDim_ > 256U || bits_ == 0U || bits_ > 4U) {
+            return;
+        }
+        uint64_t slotBase = static_cast<uint64_t>(slot) * numKvHeads_;
+        if (numKvHeads_ == 8U) {
+            LocalTensor<float> normLocal = scalarBuf_.Get<float>();
+            for (uint32_t kvHead = 0; kvHead < 8U; ++kvHead) {
+                normLocal.SetValue(
+                    kvHead,
+                    ProcessOne(token, kvHead, slot));
+            }
+            pipe_barrier(PIPE_ALL);
+            DataCopy(normCacheGm_[slotBase], normLocal, 8U);
+            pipe_barrier(PIPE_ALL);
+            return;
+        }
+        for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
+            normCacheGm_.SetValue(
+                slotBase + kvHead,
+                ProcessOne(token, kvHead, slot));
+        }
     }
 
     __aicore__ inline void Process()
@@ -199,15 +223,14 @@ public:
             endToken = totalTasks;
         }
         for (uint64_t token = startToken; token < endToken; ++token) {
-            for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
-                ProcessOne(static_cast<uint32_t>(token), kvHead);
-            }
+            ProcessToken(static_cast<uint32_t>(token));
         }
     }
 
 private:
     TPipe pipe_;
     TBuf<TPosition::VECCALC> sqrtBuf_;
+    TBuf<TPosition::VECCALC> scalarBuf_;
 
     GlobalTensor<InT> xGm_;
     GlobalTensor<int64_t> slotMappingGm_;

@@ -62,6 +62,7 @@ public:
         headDim_ = tiling->headDim;
         numCore_ = tiling->numCore;
         pipe_.InitBuffer(sqrtBuf_, 8U * sizeof(float));
+        pipe_.InitBuffer(scalarBuf_, 16U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -173,17 +174,11 @@ public:
         }
     }
 
-    __aicore__ inline void ProcessOne(uint32_t token, uint32_t kvHead)
+    __aicore__ inline void ProcessOne(
+        uint32_t token,
+        uint32_t kvHead,
+        int64_t slot)
     {
-        int64_t slot = slotMappingGm_.GetValue(token);
-        if (slot < 0) {
-            return;
-        }
-
-        if (headDim_ > 256U || stage1Bits_ == 0U || stage1Bits_ > 4U) {
-            return;
-        }
-
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
 
@@ -241,8 +236,38 @@ public:
         for (uint32_t col = 0; col < qjlPackedCols_; ++col) {
             qjlCacheGm_.SetValue(qjlBase + col, qjlPacked[col]);
         }
-        gammaCacheGm_.SetValue(slotHead, gamma);
-        normCacheGm_.SetValue(slotHead, norm);
+        lastGamma_ = gamma;
+        lastNorm_ = norm;
+    }
+
+    __aicore__ inline void ProcessToken(uint32_t token)
+    {
+        int64_t slot = slotMappingGm_.GetValue(token);
+        if (slot < 0) {
+            return;
+        }
+        if (headDim_ > 256U || stage1Bits_ == 0U || stage1Bits_ > 4U) {
+            return;
+        }
+        uint64_t slotBase = static_cast<uint64_t>(slot) * numKvHeads_;
+        if (numKvHeads_ == 8U) {
+            LocalTensor<float> scalarLocal = scalarBuf_.Get<float>();
+            for (uint32_t kvHead = 0; kvHead < 8U; ++kvHead) {
+                ProcessOne(token, kvHead, slot);
+                scalarLocal.SetValue(kvHead, lastGamma_);
+                scalarLocal.SetValue(kvHead + 8U, lastNorm_);
+            }
+            pipe_barrier(PIPE_ALL);
+            DataCopy(gammaCacheGm_[slotBase], scalarLocal, 8U);
+            DataCopy(normCacheGm_[slotBase], scalarLocal[8U], 8U);
+            pipe_barrier(PIPE_ALL);
+            return;
+        }
+        for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
+            ProcessOne(token, kvHead, slot);
+            gammaCacheGm_.SetValue(slotBase + kvHead, lastGamma_);
+            normCacheGm_.SetValue(slotBase + kvHead, lastNorm_);
+        }
     }
 
     __aicore__ inline void Process()
@@ -259,15 +284,14 @@ public:
             endToken = totalTasks;
         }
         for (uint64_t token = startToken; token < endToken; ++token) {
-            for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
-                ProcessOne(static_cast<uint32_t>(token), kvHead);
-            }
+            ProcessToken(static_cast<uint32_t>(token));
         }
     }
 
 private:
     TPipe pipe_;
     TBuf<TPosition::VECCALC> sqrtBuf_;
+    TBuf<TPosition::VECCALC> scalarBuf_;
 
     GlobalTensor<InT> xGm_;
     GlobalTensor<int64_t> slotMappingGm_;
@@ -293,6 +317,8 @@ private:
     float residual_[256];
     float codebook_[16];
     float boundary_[16];
+    float lastGamma_{0.0F};
+    float lastNorm_{0.0F};
 };
 
 extern "C" __global__ __aicore__ void tq_encode_prod_paged_cache(
