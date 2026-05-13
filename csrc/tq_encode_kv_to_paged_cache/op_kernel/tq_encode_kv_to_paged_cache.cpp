@@ -81,6 +81,7 @@ public:
         vPartitionCount_ = tiling->vPartitionCount;
         transformMode_ = tiling->transformMode;
         numCore_ = tiling->numCore;
+        pipe_.InitBuffer(sqrtBuf_, 8U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -132,6 +133,32 @@ public:
         }
     }
 
+    __aicore__ inline void SToVSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventId);
+        WaitFlag<HardEvent::S_V>(eventId);
+    }
+
+    __aicore__ inline void VToSSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventId);
+        WaitFlag<HardEvent::V_S>(eventId);
+    }
+
+    __aicore__ inline float SqrtScalar(float value)
+    {
+        LocalTensor<float> sqrtLocal = sqrtBuf_.Get<float>();
+        sqrtLocal.SetValue(0, value);
+        SToVSync();
+        Sqrt(sqrtLocal, sqrtLocal, 1U);
+        VToSSync();
+        return sqrtLocal.GetValue(0);
+    }
+
     __aicore__ inline float CalcNorm()
     {
         float sum = 0.0F;
@@ -142,7 +169,7 @@ public:
         if (sum < 1.0e-12F) {
             sum = 1.0e-12F;
         }
-        return sqrt(sum);
+        return SqrtScalar(sum);
     }
 
     __aicore__ inline bool UseHadamardTransform()
@@ -330,7 +357,7 @@ public:
             gammaSq += residual * residual;
         }
 
-        float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
+        float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
         CalcQjlProjection();
         for (uint32_t j = 0; j < headDim_; ++j) {
             PackIndex(
@@ -399,7 +426,7 @@ public:
             gammaSq += residual * residual;
         }
 
-        float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
+        float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
         if (!writeCache) {
             float packedGuard = idxPacked[0] == 0xFFU ? 1.0e-9F : 0.0F;
             kNormCacheGm_.SetValue(
@@ -464,7 +491,7 @@ public:
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
         }
-        float gamma = gammaSq > 0.0F ? sqrt(gammaSq) : 0.0F;
+        float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
         float packedGuard = packQjl && qjlPacked[0] == 0xFFU ? 1.0e-9F : 0.0F;
         kGammaCacheGm_.SetValue(slotHead, gamma);
         kNormCacheGm_.SetValue(
@@ -660,6 +687,9 @@ public:
     }
 
 private:
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> sqrtBuf_;
+
     GlobalTensor<KeyT> keyGm_;
     GlobalTensor<ValueT> valueGm_;
     GlobalTensor<int64_t> slotMappingGm_;

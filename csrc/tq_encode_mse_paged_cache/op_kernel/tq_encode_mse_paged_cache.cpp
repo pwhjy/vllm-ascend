@@ -49,6 +49,7 @@ public:
         bits_ = tiling->bits;
         headDim_ = tiling->headDim;
         numCore_ = tiling->numCore;
+        pipe_.InitBuffer(sqrtBuf_, 8U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -74,6 +75,32 @@ public:
         }
     }
 
+    __aicore__ inline void SToVSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventId);
+        WaitFlag<HardEvent::S_V>(eventId);
+    }
+
+    __aicore__ inline void VToSSync()
+    {
+        event_t eventId = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventId);
+        WaitFlag<HardEvent::V_S>(eventId);
+    }
+
+    __aicore__ inline float SqrtScalar(float value)
+    {
+        LocalTensor<float> sqrtLocal = sqrtBuf_.Get<float>();
+        sqrtLocal.SetValue(0, value);
+        SToVSync();
+        Sqrt(sqrtLocal, sqrtLocal, 1U);
+        VToSSync();
+        return sqrtLocal.GetValue(0);
+    }
+
     __aicore__ inline float CalcNorm()
     {
         float sum = 0.0F;
@@ -84,7 +111,7 @@ public:
         if (sum < 1.0e-12F) {
             sum = 1.0e-12F;
         }
-        return sqrt(sum);
+        return SqrtScalar(sum);
     }
 
     __aicore__ inline void CalcRot(float invNorm)
@@ -180,6 +207,9 @@ public:
     }
 
 private:
+    TPipe pipe_;
+    TBuf<TPosition::VECCALC> sqrtBuf_;
+
     GlobalTensor<InT> xGm_;
     GlobalTensor<int64_t> slotMappingGm_;
     GlobalTensor<uint8_t> idxCacheGm_;
