@@ -13,9 +13,9 @@ namespace optiling {
 static ge::graphStatus TqEncodeKvToPagedCacheTilingFunc(gert::TilingContext* context)
 {
     auto keyShape = context->GetInputShape(0)->GetStorageShape();
-    auto kIdxCacheShape = context->GetOutputShape(0)->GetStorageShape();
-    auto kQjlCacheShape = context->GetOutputShape(1)->GetStorageShape();
-    auto vIdxCacheShape = context->GetOutputShape(4)->GetStorageShape();
+    auto kIdxCacheShape = context->GetInputShape(9)->GetStorageShape();
+    auto kQjlCacheShape = context->GetInputShape(10)->GetStorageShape();
+    auto vIdxCacheShape = context->GetInputShape(13)->GetStorageShape();
 
     uint32_t totalTokens = static_cast<uint32_t>(keyShape.GetDim(0));
     uint32_t numKvHeads = static_cast<uint32_t>(keyShape.GetDim(1));

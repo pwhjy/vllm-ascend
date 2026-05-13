@@ -48,22 +48,22 @@ public:
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
-        this->Output("kIdxCache").ParamType(REQUIRED)
+        this->Input("kIdxCache").ParamType(REQUIRED)
             .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("kQjlCache").ParamType(REQUIRED)
+        this->Input("kQjlCache").ParamType(REQUIRED)
             .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("kGammaCache").ParamType(REQUIRED)
+        this->Input("kGammaCache").ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("kNormCache").ParamType(REQUIRED)
+        this->Input("kNormCache").ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("vIdxCache").ParamType(REQUIRED)
+        this->Input("vIdxCache").ParamType(REQUIRED)
             .DataType({ge::DT_UINT8, ge::DT_UINT8, ge::DT_UINT8})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
-        this->Output("vNormCache").ParamType(REQUIRED)
+        this->Input("vNormCache").ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("totalBits").AttrType(REQUIRED).Int(0);

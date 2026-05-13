@@ -32,11 +32,11 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
-        this->Output("idxCache")
+        this->Input("idxCache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_UINT8})
             .Format({ge::FORMAT_ND});
-        this->Output("normCache")
+        this->Input("normCache")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND});

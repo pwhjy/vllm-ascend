@@ -991,8 +991,8 @@ void tq_encode_mse_paged_cache(
         bits, head_dim);
 
     EXEC_NPU_CMD(aclnnTqEncodeMsePagedCache,
-        x, slot_mapping, rotation, boundary, bits, head_dim,
-        idx_cache, norm_cache);
+        x, slot_mapping, rotation, boundary, idx_cache, norm_cache,
+        bits, head_dim);
 }
 
 void tq_encode_prod_paged_cache(
@@ -1045,8 +1045,8 @@ void tq_encode_prod_paged_cache(
 
     EXEC_NPU_CMD(aclnnTqEncodeProdPagedCache,
         x, slot_mapping, rotation, boundary, codebook, qjl_proj_t,
-        total_bits, stage1_bits, head_dim,
-        idx_cache, qjl_cache, gamma_cache, norm_cache);
+        idx_cache, qjl_cache, gamma_cache, norm_cache,
+        total_bits, stage1_bits, head_dim);
 }
 
 void tq_encode_kv_to_paged_cache(
@@ -1126,10 +1126,10 @@ void tq_encode_kv_to_paged_cache(
         key, value, slot_mapping,
         k_rotation, k_boundary, k_codebook, k_qjl_proj_t,
         v_rotation, v_boundary,
-        total_bits, stage1_bits, v_bits, head_dim, debug_mode,
-        v_partition_count, transform_mode,
         k_idx_cache, k_qjl_cache, k_gamma_cache, k_norm_cache,
-        v_idx_cache, v_norm_cache);
+        v_idx_cache, v_norm_cache,
+        total_bits, stage1_bits, v_bits, head_dim, debug_mode,
+        v_partition_count, transform_mode);
 }
 
 at::Tensor tq_dequant_prod_paged(
