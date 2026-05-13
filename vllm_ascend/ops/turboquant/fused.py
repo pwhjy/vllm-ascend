@@ -1053,10 +1053,6 @@ def tq_encode_kv_to_paged_cache(
             fallback_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
             fallback_reasons.append("custom cache update requires valid slots")
-        if int(transform_mode) != TQ_TRANSFORM_DENSE:
-            fallback_reasons.append(
-                "combined custom cache update does not support structured transforms"
-            )
         tensors = (
             key,
             value,
