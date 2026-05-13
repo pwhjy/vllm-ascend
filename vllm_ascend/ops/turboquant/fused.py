@@ -93,6 +93,12 @@ def encode_cache_update_debug_compare_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0") == "1"
 
 
+def encode_cache_update_debug_dump_enabled() -> bool:
+    """Dump custom encode cache-write summaries before the reference compare."""
+
+    return os.getenv("VLLM_ASCEND_TQ_DEBUG_DUMP_ENCODE_CACHE", "0") == "1"
+
+
 def _sync_npu_tensors_for_debug(*objs) -> None:
     def _walk(obj):
         if isinstance(obj, torch.Tensor):
@@ -190,6 +196,79 @@ def _compare_encoded_update_or_raise(
         _check("k_gamma", encoded_k["gamma"])
     if details:
         raise RuntimeError(prefix + " mismatch: " + "; ".join(details))
+
+
+def _debug_dump_encode_cache_update_or_raise(
+    kv_cache: dict[str, torch.Tensor],
+    valid_slots: torch.Tensor,
+    num_kv_heads: int,
+    *,
+    prefix: str = "TurboQuant encode cache-update",
+) -> None:
+    _sync_npu_tensors_for_debug(kv_cache)
+    if valid_slots.numel() == 0:
+        raise RuntimeError(prefix + " dump: no valid slots")
+
+    details: list[str] = []
+
+    def _sample(tensor: torch.Tensor, limit: int = 8) -> str:
+        flat = tensor.reshape(-1)
+        if flat.numel() == 0:
+            return "[]"
+        values = flat[: min(limit, int(flat.numel()))].detach().cpu().tolist()
+        return "[" + ", ".join(str(v) for v in values) + "]"
+
+    def _summarize(cache_name: str) -> None:
+        cache = kv_cache.get(cache_name)
+        if cache is None:
+            details.append(f"{cache_name}: missing")
+            return
+        flat_cache = cache.view(-1, int(num_kv_heads), cache.shape[-1])
+        selected = flat_cache.index_select(0, valid_slots)
+        selected_f = selected.reshape(-1)
+        full_f = cache.reshape(-1)
+        if selected_f.numel() == 0:
+            selected_nonzero = 0
+            selected_max = 0.0
+        elif selected.dtype == torch.uint8:
+            selected_nonzero = int((selected_f != 0).sum().item())
+            selected_max = int(selected_f.max().item())
+        else:
+            selected_abs = selected_f.to(torch.float32).abs()
+            selected_nonzero = int((selected_abs > 0).sum().item())
+            selected_max = float(selected_abs.max().item())
+
+        if full_f.numel() == 0:
+            full_nonzero = 0
+            full_max = 0.0
+        elif cache.dtype == torch.uint8:
+            full_nonzero = int((full_f != 0).sum().item())
+            full_max = int(full_f.max().item())
+        else:
+            full_abs = full_f.to(torch.float32).abs()
+            full_nonzero = int((full_abs > 0).sum().item())
+            full_max = float(full_abs.max().item())
+
+        details.append(
+            f"{cache_name}: shape={tuple(cache.shape)} dtype={cache.dtype} "
+            f"stride={tuple(cache.stride())} "
+            f"selected_nonzero={selected_nonzero}/{int(selected_f.numel())} "
+            f"selected_max={selected_max:.6g} "
+            f"full_nonzero={full_nonzero}/{int(full_f.numel())} "
+            f"full_max={full_max:.6g} sample={_sample(selected)}"
+        )
+
+    for name in ("k_idx", "k_qjl", "k_gamma", "k_norm", "v_idx", "v_norm"):
+        _summarize(name)
+    raise RuntimeError(prefix + " dump: " + "; ".join(details))
+
+
+def _valid_slots_from_mapping(
+    slot_mapping: torch.Tensor,
+    assume_valid_slots: bool,
+) -> torch.Tensor:
+    slots = slot_mapping.reshape(-1)
+    return slots if assume_valid_slots else slots[slots >= 0]
 
 
 def _debug_compare_encode_cache_update(
@@ -1072,6 +1151,19 @@ def tq_encode_kv_to_paged_cache(
                     stage_t0,
                     kv_cache,
                 )
+                if encode_cache_update_debug_dump_enabled():
+                    _debug_dump_encode_cache_update_or_raise(
+                        kv_cache,
+                        _valid_slots_from_mapping(
+                            slot_mapping_i64,
+                            assume_valid_slots,
+                        ),
+                        int(
+                            num_kv_heads
+                            if num_kv_heads is not None
+                            else key.shape[1]
+                        ),
+                    )
                 if encode_cache_update_debug_compare_enabled():
                     _debug_compare_encode_cache_update(
                         key,
@@ -1108,6 +1200,7 @@ def tq_encode_kv_to_paged_cache(
                 if (
                     custom_strict_enabled()
                     or encode_cache_update_debug_compare_enabled()
+                    or encode_cache_update_debug_dump_enabled()
                 ):
                     raise
                 fallback_reasons.append("custom cache update call failed")
@@ -1182,6 +1275,19 @@ def tq_encode_kv_to_paged_cache(
                     int(v_bits),
                     int(value.shape[-1]),
                 )
+                if encode_cache_update_debug_dump_enabled():
+                    _debug_dump_encode_cache_update_or_raise(
+                        kv_cache,
+                        _valid_slots_from_mapping(
+                            slot_mapping_i64,
+                            assume_valid_slots,
+                        ),
+                        int(
+                            num_kv_heads
+                            if num_kv_heads is not None
+                            else key.shape[1]
+                        ),
+                    )
                 if encode_cache_update_debug_compare_enabled():
                     _debug_compare_encode_cache_update(
                         key,
@@ -1214,7 +1320,11 @@ def tq_encode_kv_to_paged_cache(
                 )
                 return
             except Exception:
-                if custom_strict_enabled():
+                if (
+                    custom_strict_enabled()
+                    or encode_cache_update_debug_compare_enabled()
+                    or encode_cache_update_debug_dump_enabled()
+                ):
                     raise
                 staged_reasons.append("staged custom cache update call failed")
 
