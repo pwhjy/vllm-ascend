@@ -202,10 +202,10 @@ private:
 extern "C" __global__ __aicore__ void tq_encode_mse_paged_cache(
     GM_ADDR x,
     GM_ADDR slotMapping,
-    GM_ADDR idxCache,
-    GM_ADDR normCache,
     GM_ADDR rotation,
     GM_ADDR boundary,
+    GM_ADDR idxCache,
+    GM_ADDR normCache,
     GM_ADDR workspace,
     GM_ADDR tiling)
 {

@@ -22,14 +22,6 @@ public:
             .DataType({ge::DT_INT64})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
-        this->Input("idxCache")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_UINT8})
-            .Format({ge::FORMAT_ND});
-        this->Input("normCache")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND});
         this->Input("rotation")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
@@ -40,6 +32,14 @@ public:
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})
             .AutoContiguous();
+        this->Output("idxCache")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_UINT8})
+            .Format({ge::FORMAT_ND});
+        this->Output("normCache")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND});
         this->Attr("bits").AttrType(REQUIRED).Int(0);
         this->Attr("headDim").AttrType(REQUIRED).Int(0);
 

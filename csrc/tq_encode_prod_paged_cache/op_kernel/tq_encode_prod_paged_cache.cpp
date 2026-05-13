@@ -269,14 +269,14 @@ private:
 extern "C" __global__ __aicore__ void tq_encode_prod_paged_cache(
     GM_ADDR x,
     GM_ADDR slotMapping,
-    GM_ADDR idxCache,
-    GM_ADDR qjlCache,
-    GM_ADDR gammaCache,
-    GM_ADDR normCache,
     GM_ADDR rotation,
     GM_ADDR boundary,
     GM_ADDR codebook,
     GM_ADDR qjlProjT,
+    GM_ADDR idxCache,
+    GM_ADDR qjlCache,
+    GM_ADDR gammaCache,
+    GM_ADDR normCache,
     GM_ADDR workspace,
     GM_ADDR tiling)
 {
