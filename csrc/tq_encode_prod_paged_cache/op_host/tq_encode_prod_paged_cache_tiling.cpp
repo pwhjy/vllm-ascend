@@ -36,7 +36,7 @@ static ge::graphStatus TqEncodeProdPagedCacheTilingFunc(gert::TilingContext* con
 
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
-    uint32_t usefulCore = totalTokens * numKvHeads;
+    uint32_t usefulCore = totalTokens;
     if (usefulCore > 0 && usefulCore < coreNum) {
         coreNum = usefulCore;
     }

@@ -247,22 +247,21 @@ public:
 
     __aicore__ inline void Process()
     {
-        uint64_t totalPairs =
-            static_cast<uint64_t>(totalTokens_) * static_cast<uint64_t>(numKvHeads_);
-        if (totalPairs == 0) {
+        uint64_t totalTasks = static_cast<uint64_t>(totalTokens_);
+        if (totalTasks == 0) {
             return;
         }
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
-        uint64_t pairsPerCore = (totalPairs + coreCount - 1) / coreCount;
-        uint64_t startPair = static_cast<uint64_t>(GetBlockIdx()) * pairsPerCore;
-        uint64_t endPair = startPair + pairsPerCore;
-        if (endPair > totalPairs) {
-            endPair = totalPairs;
+        uint64_t tasksPerCore = (totalTasks + coreCount - 1) / coreCount;
+        uint64_t startToken = static_cast<uint64_t>(GetBlockIdx()) * tasksPerCore;
+        uint64_t endToken = startToken + tasksPerCore;
+        if (endToken > totalTasks) {
+            endToken = totalTasks;
         }
-        for (uint64_t pair = startPair; pair < endPair; ++pair) {
-            ProcessOne(
-                static_cast<uint32_t>(pair / numKvHeads_),
-                static_cast<uint32_t>(pair % numKvHeads_));
+        for (uint64_t token = startToken; token < endToken; ++token) {
+            for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
+                ProcessOne(static_cast<uint32_t>(token), kvHead);
+            }
         }
     }
 

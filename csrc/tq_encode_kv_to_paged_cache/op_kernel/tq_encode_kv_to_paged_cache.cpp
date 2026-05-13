@@ -663,26 +663,27 @@ public:
 
     __aicore__ inline void Process()
     {
-        uint64_t totalPairs =
-            static_cast<uint64_t>(totalTokens_) * static_cast<uint64_t>(numKvHeads_);
-        if (totalPairs == 0) {
+        uint64_t totalTasks = static_cast<uint64_t>(totalTokens_);
+        if (totalTasks == 0) {
             return;
         }
         uint64_t partitionCount = CanPartitionEncode() ? VPartitionCount() : 1U;
-        uint64_t totalTasks = totalPairs * partitionCount;
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
         uint64_t tasksPerCore = (totalTasks + coreCount - 1) / coreCount;
-        uint64_t startTask = static_cast<uint64_t>(GetBlockIdx()) * tasksPerCore;
-        uint64_t endTask = startTask + tasksPerCore;
-        if (endTask > totalTasks) {
-            endTask = totalTasks;
+        uint64_t startToken = static_cast<uint64_t>(GetBlockIdx()) * tasksPerCore;
+        uint64_t endToken = startToken + tasksPerCore;
+        if (endToken > totalTasks) {
+            endToken = totalTasks;
         }
-        for (uint64_t task = startTask; task < endTask; ++task) {
-            uint64_t pair = task / partitionCount;
-            ProcessOne(
-                static_cast<uint32_t>(pair / numKvHeads_),
-                static_cast<uint32_t>(pair % numKvHeads_),
-                static_cast<uint32_t>(task - pair * partitionCount));
+        for (uint64_t token = startToken; token < endToken; ++token) {
+            for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
+                for (uint32_t partition = 0; partition < partitionCount; ++partition) {
+                    ProcessOne(
+                        static_cast<uint32_t>(token),
+                        kvHead,
+                        partition);
+                }
+            }
         }
     }
 
