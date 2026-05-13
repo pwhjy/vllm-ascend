@@ -82,7 +82,7 @@ def encode_cache_update_force_fp32_input() -> bool:
 
 
 def encode_cache_update_structured_fast_enabled() -> bool:
-    """Use the experimental FWHT encode fast path for structured transforms."""
+    """Use custom encode ops for structured transforms."""
 
     return os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") == "1"
 
@@ -190,6 +190,116 @@ def _compare_encoded_update_or_raise(
         _check("k_gamma", encoded_k["gamma"])
     if details:
         raise RuntimeError(prefix + " mismatch: " + "; ".join(details))
+
+
+def _debug_compare_encode_cache_update(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: dict[str, torch.Tensor],
+    k_rotation: torch.Tensor,
+    k_codebook: torch.Tensor,
+    k_boundary: torch.Tensor,
+    k_qjl_proj: torch.Tensor,
+    v_rotation: torch.Tensor,
+    v_codebook: torch.Tensor,
+    v_boundary: torch.Tensor,
+    *,
+    k_variant: str,
+    k_total_bits: int,
+    k_stage1_bits: int,
+    v_bits: int,
+    num_kv_heads: int | None,
+    assume_valid_slots: bool,
+    k_qjl_proj_t: torch.Tensor | None = None,
+    kv_mse_rotation: torch.Tensor | None = None,
+    kv_mse_shared_boundary: bool = False,
+    transform_mode: int = TQ_TRANSFORM_DENSE,
+) -> None:
+    _sync_npu_tensors_for_debug(kv_cache)
+    slots = slot_mapping.to(torch.long).contiguous().reshape(-1)
+    num_tokens = int(slots.numel())
+    num_kv_heads_i = int(
+        num_kv_heads if num_kv_heads is not None else key.shape[1]
+    )
+    if assume_valid_slots:
+        valid_slots = slots
+        actual_key = key[:num_tokens].to(torch.float32)
+        actual_value = value[:num_tokens].to(torch.float32)
+    else:
+        valid = slots >= 0
+        valid_slots = slots[valid]
+        actual_key = key[:num_tokens][valid].to(torch.float32)
+        actual_value = value[:num_tokens][valid].to(torch.float32)
+    qjl_proj_t = (
+        k_qjl_proj_t
+        if k_qjl_proj_t is not None
+        else k_qjl_proj.transpose(0, 1)
+    ).contiguous()
+    use_combined_kv_mse = _can_combine_kv_mse_encode(
+        actual_key,
+        actual_value,
+        k_boundary,
+        k_codebook,
+        v_boundary,
+        v_codebook,
+        k_variant=k_variant,
+        k_stage1_bits=int(k_stage1_bits),
+        v_bits=int(v_bits),
+        kv_mse_rotation=kv_mse_rotation,
+        kv_mse_shared_boundary=kv_mse_shared_boundary,
+        transform_mode=int(transform_mode),
+    )
+    if use_combined_kv_mse:
+        assert kv_mse_rotation is not None
+        encoded_k, encoded_v = _encode_prod_k_mse_v_cache_no_profile(
+            actual_key,
+            actual_value,
+            kv_mse_rotation,
+            k_codebook,
+            k_boundary,
+            k_qjl_proj,
+            int(k_total_bits),
+            qjl_proj_t=qjl_proj_t,
+        )
+    else:
+        if k_variant == "prod":
+            encoded_k = _encode_prod_cache_no_profile(
+                actual_key,
+                k_rotation,
+                k_codebook,
+                k_boundary,
+                k_qjl_proj,
+                int(k_total_bits),
+                qjl_proj_t=qjl_proj_t,
+            )
+        elif k_variant == "mse":
+            encoded_k = _encode_mse_cache_no_profile(
+                actual_key,
+                k_rotation,
+                k_codebook,
+                k_boundary,
+                int(k_stage1_bits),
+                return_rot_and_dequant=False,
+            )
+        else:
+            raise ValueError(f"Unsupported TurboQuant K variant: {k_variant}")
+        encoded_v = _encode_mse_cache_no_profile(
+            actual_value,
+            v_rotation,
+            v_codebook,
+            v_boundary,
+            int(v_bits),
+            return_rot_and_dequant=False,
+        )
+    _sync_npu_tensors_for_debug(encoded_k, encoded_v, kv_cache)
+    _compare_encoded_update_or_raise(
+        kv_cache,
+        valid_slots,
+        encoded_k,
+        encoded_v,
+        num_kv_heads_i,
+    )
 
 
 def combined_kv_mse_encode_enabled() -> bool:
@@ -864,6 +974,10 @@ def tq_encode_kv_to_paged_cache(
             fallback_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
             fallback_reasons.append("custom cache update requires valid slots")
+        if int(transform_mode) != TQ_TRANSFORM_DENSE:
+            fallback_reasons.append(
+                "combined custom cache update does not support structured transforms"
+            )
         tensors = (
             key,
             value,
@@ -959,87 +1073,28 @@ def tq_encode_kv_to_paged_cache(
                     kv_cache,
                 )
                 if encode_cache_update_debug_compare_enabled():
-                    _sync_npu_tensors_for_debug(kv_cache)
-                    slots = slot_mapping_i64.reshape(-1)
-                    num_tokens = int(slots.numel())
-                    num_kv_heads_i = int(
-                        num_kv_heads if num_kv_heads is not None
-                        else key.shape[1]
-                    )
-                    if assume_valid_slots:
-                        valid_slots = slots
-                        actual_key = key[:num_tokens].to(torch.float32)
-                        actual_value = value[:num_tokens].to(torch.float32)
-                    else:
-                        valid = slots >= 0
-                        valid_slots = slots[valid]
-                        actual_key = key[:num_tokens][valid].to(torch.float32)
-                        actual_value = value[:num_tokens][valid].to(torch.float32)
-                    use_combined_kv_mse = _can_combine_kv_mse_encode(
-                        actual_key,
-                        actual_value,
-                        k_boundary,
+                    _debug_compare_encode_cache_update(
+                        key,
+                        value,
+                        slot_mapping_i64,
+                        kv_cache,
+                        k_rotation,
                         k_codebook,
-                        v_boundary,
+                        k_boundary,
+                        k_qjl_proj,
+                        v_rotation,
                         v_codebook,
+                        v_boundary,
                         k_variant=k_variant,
+                        k_total_bits=int(k_total_bits),
                         k_stage1_bits=int(k_stage1_bits),
                         v_bits=int(v_bits),
+                        num_kv_heads=num_kv_heads,
+                        assume_valid_slots=assume_valid_slots,
+                        k_qjl_proj_t=k_qjl_proj_t_c,
                         kv_mse_rotation=kv_mse_rotation,
                         kv_mse_shared_boundary=kv_mse_shared_boundary,
                         transform_mode=int(transform_mode),
-                    )
-                    if use_combined_kv_mse:
-                        assert kv_mse_rotation is not None
-                        encoded_k, encoded_v = _encode_prod_k_mse_v_cache_no_profile(
-                            actual_key,
-                            actual_value,
-                            kv_mse_rotation,
-                            k_codebook,
-                            k_boundary,
-                            k_qjl_proj,
-                            int(k_total_bits),
-                            qjl_proj_t=k_qjl_proj_t_c,
-                        )
-                    else:
-                        if k_variant == "prod":
-                            encoded_k = _encode_prod_cache_no_profile(
-                                actual_key,
-                                k_rotation,
-                                k_codebook,
-                                k_boundary,
-                                k_qjl_proj,
-                                int(k_total_bits),
-                                qjl_proj_t=k_qjl_proj_t_c,
-                            )
-                        elif k_variant == "mse":
-                            encoded_k = _encode_mse_cache_no_profile(
-                                actual_key,
-                                k_rotation,
-                                k_codebook,
-                                k_boundary,
-                                int(k_stage1_bits),
-                                return_rot_and_dequant=False,
-                            )
-                        else:
-                            raise ValueError(
-                                f"Unsupported TurboQuant K variant: {k_variant}"
-                            )
-                        encoded_v = _encode_mse_cache_no_profile(
-                            actual_value,
-                            v_rotation,
-                            v_codebook,
-                            v_boundary,
-                            int(v_bits),
-                            return_rot_and_dequant=False,
-                        )
-                    _sync_npu_tensors_for_debug(encoded_k, encoded_v, kv_cache)
-                    _compare_encoded_update_or_raise(
-                        kv_cache,
-                        valid_slots,
-                        encoded_k,
-                        encoded_v,
-                        num_kv_heads_i,
                     )
                 if not stage_profile:
                     _maybe_sync_for_profile(kv_cache)
@@ -1058,10 +1113,6 @@ def tq_encode_kv_to_paged_cache(
                 fallback_reasons.append("custom cache update call failed")
 
         staged_reasons: list[str] = []
-        if int(transform_mode) != TQ_TRANSFORM_DENSE:
-            staged_reasons.append(
-                "staged custom cache update does not support structured transforms"
-            )
         if k_variant != "prod":
             staged_reasons.append(f"unsupported K variant: {k_variant}")
         if not assume_valid_slots:
@@ -1131,6 +1182,30 @@ def tq_encode_kv_to_paged_cache(
                     int(v_bits),
                     int(value.shape[-1]),
                 )
+                if encode_cache_update_debug_compare_enabled():
+                    _debug_compare_encode_cache_update(
+                        key,
+                        value,
+                        slot_mapping_i64,
+                        kv_cache,
+                        k_rotation,
+                        k_codebook,
+                        k_boundary,
+                        k_qjl_proj,
+                        v_rotation,
+                        v_codebook,
+                        v_boundary,
+                        k_variant=k_variant,
+                        k_total_bits=int(k_total_bits),
+                        k_stage1_bits=int(k_stage1_bits),
+                        v_bits=int(v_bits),
+                        num_kv_heads=num_kv_heads,
+                        assume_valid_slots=assume_valid_slots,
+                        k_qjl_proj_t=qjl_proj_t,
+                        kv_mse_rotation=kv_mse_rotation,
+                        kv_mse_shared_boundary=kv_mse_shared_boundary,
+                        transform_mode=int(transform_mode),
+                    )
                 _maybe_sync_for_profile(kv_cache)
                 _record_tq_profile(
                     "turboquant_encode_cache_update.total",
