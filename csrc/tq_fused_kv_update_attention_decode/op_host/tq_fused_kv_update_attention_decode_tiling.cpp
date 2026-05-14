@@ -75,8 +75,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     uint32_t historyPartitions = historyPartitionsAttr > 1
         ? static_cast<uint32_t>(historyPartitionsAttr)
         : 1U;
-    if (historyPartitions > 16U) {
-        historyPartitions = 16U;
+    if (historyPartitions > 2U) {
+        historyPartitions = 2U;
     }
     int64_t historyPartitionPhaseAttr =
         historyPartitionPhasePtr != nullptr ? *historyPartitionPhasePtr : 0;

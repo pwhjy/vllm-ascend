@@ -436,7 +436,7 @@ def fused_decode_attention_m4_history_partitions() -> int:
         partitions = 1
     if partitions <= 1:
         return 1
-    return min(16, partitions)
+    return min(2, partitions)
 
 
 def fused_decode_attention_m4_grouped_q_enabled() -> bool:

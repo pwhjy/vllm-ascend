@@ -1477,12 +1477,14 @@ at::Tensor tq_fused_kv_update_attention_decode(
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
         query.options().dtype(at::kFloat));
-    const bool use_history_partitions = history_partitions > 1
+    const int64_t capped_history_partitions =
+        history_partitions > 2 ? 2 : history_partitions;
+    const bool use_history_partitions = capped_history_partitions > 1
         && grouped_q == 0
         && skip_cache_update != 0
         && debug_mode == 0;
     const int64_t kernel_history_partitions =
-        use_history_partitions ? history_partitions : 1;
+        use_history_partitions ? capped_history_partitions : 1;
     int64_t history_partition_phase_none = 0;
     int64_t history_partition_phase_partial = 1;
     int64_t history_partition_phase_reduce = 2;
