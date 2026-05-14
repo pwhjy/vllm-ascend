@@ -82,6 +82,7 @@ public:
         transformMode_ = tiling->transformMode;
         numCore_ = tiling->numCore;
         pipe_.InitBuffer(sqrtBuf_, 8U * sizeof(float));
+        pipe_.InitBuffer(scalarBuf_, 24U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -332,7 +333,8 @@ public:
     __aicore__ inline void EncodeK(
         uint32_t token,
         uint32_t kvHead,
-        uint64_t slotHead)
+        uint64_t slotHead,
+        bool deferScalarWrite)
     {
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
@@ -439,8 +441,12 @@ public:
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
         }
-        kGammaCacheGm_.SetValue(slotHead, gamma);
-        kNormCacheGm_.SetValue(slotHead, norm);
+        lastKGamma_ = gamma;
+        lastKNorm_ = norm;
+        if (!deferScalarWrite) {
+            kGammaCacheGm_.SetValue(slotHead, gamma);
+            kNormCacheGm_.SetValue(slotHead, norm);
+        }
     }
 
     __aicore__ inline void EncodeKStage1QjlDebug(
@@ -502,7 +508,8 @@ public:
     __aicore__ inline void EncodeV(
         uint32_t token,
         uint32_t kvHead,
-        uint64_t slotHead)
+        uint64_t slotHead,
+        bool deferScalarWrite)
     {
         uint8_t packed[128];
         for (uint32_t col = 0; col < vPackedCols_; ++col) {
@@ -526,7 +533,10 @@ public:
         for (uint32_t col = 0; col < vPackedCols_; ++col) {
             vIdxCacheGm_.SetValue(packedBase + col, packed[col]);
         }
-        vNormCacheGm_.SetValue(slotHead, norm);
+        lastVNorm_ = norm;
+        if (!deferScalarWrite) {
+            vNormCacheGm_.SetValue(slotHead, norm);
+        }
     }
 
     __aicore__ inline uint32_t VPartitionCount()
@@ -544,7 +554,8 @@ public:
         uint32_t token,
         uint32_t kvHead,
         uint64_t slotHead,
-        uint32_t partition)
+        uint32_t partition,
+        bool deferScalarWrite)
     {
         uint32_t partitionCount = VPartitionCount();
         uint32_t colStart = (vPackedCols_ * partition) / partitionCount;
@@ -577,9 +588,56 @@ public:
         for (uint32_t col = colStart; col < colEnd; ++col) {
             vIdxCacheGm_.SetValue(packedBase + col, packed[col]);
         }
-        if (partition == 0U) {
+        lastVNorm_ = norm;
+        if (partition == 0U && !deferScalarWrite) {
             vNormCacheGm_.SetValue(slotHead, norm);
         }
+    }
+
+    __aicore__ inline bool CanUseAlignedScalarWrites()
+    {
+        return numKvHeads_ == 8U && debugMode_ == 0U;
+    }
+
+    __aicore__ inline void ProcessTokenAlignedScalars(uint32_t token)
+    {
+        int64_t slot = slotMappingGm_.GetValue(token);
+        if (slot < 0) {
+            return;
+        }
+        if (headDim_ > 256U || stage1Bits_ == 0U || stage1Bits_ > 4U
+            || vBits_ == 0U || vBits_ > 4U) {
+            return;
+        }
+
+        uint64_t slotBase = static_cast<uint64_t>(slot) * numKvHeads_;
+        uint32_t partitionCount = CanPartitionEncode() ? VPartitionCount() : 1U;
+        LocalTensor<float> scalarLocal = scalarBuf_.Get<float>();
+        for (uint32_t kvHead = 0; kvHead < 8U; ++kvHead) {
+            uint64_t slotHead = slotBase + kvHead;
+            EncodeK(token, kvHead, slotHead, true);
+            if (CanPartitionEncode()) {
+                for (uint32_t partition = 0; partition < partitionCount;
+                     ++partition) {
+                    EncodeVPartition(
+                        token,
+                        kvHead,
+                        slotHead,
+                        partition,
+                        true);
+                }
+            } else {
+                EncodeV(token, kvHead, slotHead, true);
+            }
+            scalarLocal.SetValue(kvHead, lastKGamma_);
+            scalarLocal.SetValue(kvHead + 8U, lastKNorm_);
+            scalarLocal.SetValue(kvHead + 16U, lastVNorm_);
+        }
+        pipe_barrier(PIPE_ALL);
+        DataCopy(kGammaCacheGm_[slotBase], scalarLocal, 8U);
+        DataCopy(kNormCacheGm_[slotBase], scalarLocal[8U], 8U);
+        DataCopy(vNormCacheGm_[slotBase], scalarLocal[16U], 8U);
+        pipe_barrier(PIPE_ALL);
     }
 
     __aicore__ inline void ProcessOne(
@@ -602,15 +660,15 @@ public:
         }
         if (debugMode_ == 1U) {
             if (partition == 0U) {
-                EncodeK(token, kvHead, slotHead);
+                EncodeK(token, kvHead, slotHead, false);
             }
             return;
         }
         if (debugMode_ == 2U) {
             if (CanPartitionEncode()) {
-                EncodeVPartition(token, kvHead, slotHead, partition);
+                EncodeVPartition(token, kvHead, slotHead, partition, false);
             } else if (partition == 0U) {
-                EncodeV(token, kvHead, slotHead);
+                EncodeV(token, kvHead, slotHead, false);
             }
             return;
         }
@@ -652,12 +710,12 @@ public:
         }
         if (CanPartitionEncode()) {
             if (partition == 0U) {
-                EncodeK(token, kvHead, slotHead);
+                EncodeK(token, kvHead, slotHead, false);
             }
-            EncodeVPartition(token, kvHead, slotHead, partition);
+            EncodeVPartition(token, kvHead, slotHead, partition, false);
         } else if (partition == 0U) {
-            EncodeK(token, kvHead, slotHead);
-            EncodeV(token, kvHead, slotHead);
+            EncodeK(token, kvHead, slotHead, false);
+            EncodeV(token, kvHead, slotHead, false);
         }
     }
 
@@ -675,6 +733,12 @@ public:
         if (endToken > totalTasks) {
             endToken = totalTasks;
         }
+        if (CanUseAlignedScalarWrites()) {
+            for (uint64_t token = startToken; token < endToken; ++token) {
+                ProcessTokenAlignedScalars(static_cast<uint32_t>(token));
+            }
+            return;
+        }
         for (uint64_t token = startToken; token < endToken; ++token) {
             for (uint32_t kvHead = 0; kvHead < numKvHeads_; ++kvHead) {
                 for (uint32_t partition = 0; partition < partitionCount; ++partition) {
@@ -690,6 +754,7 @@ public:
 private:
     TPipe pipe_;
     TBuf<TPosition::VECCALC> sqrtBuf_;
+    TBuf<TPosition::VECCALC> scalarBuf_;
 
     GlobalTensor<KeyT> keyGm_;
     GlobalTensor<ValueT> valueGm_;
@@ -726,6 +791,9 @@ private:
     float kCodebook_[16];
     float kBoundary_[16];
     float vBoundary_[16];
+    float lastKGamma_{0.0F};
+    float lastKNorm_{0.0F};
+    float lastVNorm_{0.0F};
 };
 
 extern "C" __global__ __aicore__ void tq_encode_kv_to_paged_cache(
