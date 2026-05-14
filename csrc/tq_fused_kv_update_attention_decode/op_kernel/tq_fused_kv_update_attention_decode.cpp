@@ -997,7 +997,8 @@ public:
 
     __aicore__ inline uint64_t HistoryPartialStride()
     {
-        return static_cast<uint64_t>(headDim_) + 2U;
+        uint32_t accStride = (headDim_ + 7U) & ~7U;
+        return static_cast<uint64_t>(accStride + 8U);
     }
 
     __aicore__ inline uint64_t HistoryPartialBase(
@@ -1017,10 +1018,29 @@ public:
         uint32_t partition)
     {
         uint64_t base = HistoryPartialBase(b, head, partition);
-        scratchGm_.SetValue(base, initialized_ ? maxScore_ : -3.4028234663852886e38F);
-        scratchGm_.SetValue(base + 1U, initialized_ ? sum_ : 0.0F);
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            scratchGm_.SetValue(base + 2U + d, initialized_ ? accRot_[d] : 0.0F);
+        LocalTensor<float> scratchLocal = expBuf_.Get<float>();
+        scratchLocal.SetValue(
+            0,
+            initialized_ ? maxScore_ : -3.4028234663852886e38F);
+        scratchLocal.SetValue(1, initialized_ ? sum_ : 0.0F);
+        for (uint32_t i = 2U; i < 8U; ++i) {
+            scratchLocal.SetValue(i, 0.0F);
+        }
+        pipe_barrier(PIPE_ALL);
+        DataCopy(scratchGm_[base], scratchLocal, 8U);
+        pipe_barrier(PIPE_ALL);
+
+        uint32_t accStride = (headDim_ + 7U) & ~7U;
+        for (uint32_t d = 0; d < accStride; d += 8U) {
+            for (uint32_t i = 0; i < 8U; ++i) {
+                uint32_t dim = d + i;
+                scratchLocal.SetValue(
+                    i,
+                    initialized_ && dim < headDim_ ? accRot_[dim] : 0.0F);
+            }
+            pipe_barrier(PIPE_ALL);
+            DataCopy(scratchGm_[base + 8U + d], scratchLocal, 8U);
+            pipe_barrier(PIPE_ALL);
         }
     }
 
@@ -1109,7 +1129,7 @@ public:
             float partialScale = ExpScalar(partialMax - globalMax);
             sum_ += partialSum * partialScale;
             for (uint32_t d = 0; d < headDim_; ++d) {
-                accRot_[d] += scratchGm_.GetValue(base + 2U + d) * partialScale;
+                accRot_[d] += scratchGm_.GetValue(base + 8U + d) * partialScale;
             }
         }
 

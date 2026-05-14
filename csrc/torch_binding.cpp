@@ -1477,9 +1477,11 @@ at::Tensor tq_fused_kv_update_attention_decode(
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
         query.options().dtype(at::kFloat));
+    int64_t history_scratch_stride = ((head_dim + 7) / 8) * 8 + 8;
     at::Tensor scratch = history_partitions > 1
         ? at::empty(
-            {query.size(0), query.size(1), history_partitions, head_dim + 2},
+            {query.size(0), query.size(1), history_partitions,
+             history_scratch_stride},
             query.options().dtype(at::kFloat))
         : at::empty({1}, query.options().dtype(at::kFloat));
 
