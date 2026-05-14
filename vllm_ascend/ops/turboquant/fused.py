@@ -1776,11 +1776,14 @@ def tq_fused_decode_history_current_attention(
             transform_mode=transform_mode,
         )
 
-    stage_profile = (
+    profile_enabled = (
         profile_prefix is not None
-        and fused_decode_attention_m4_stage_profile_enabled()
+        and os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
     )
-    if profile_prefix is not None:
+    stage_profile = (
+        profile_enabled and fused_decode_attention_m4_stage_profile_enabled()
+    )
+    if profile_enabled:
         _maybe_sync_for_profile(*tensors)
         t_total = time.perf_counter()
         t_stage = t_total
@@ -1911,7 +1914,7 @@ def tq_fused_decode_history_current_attention(
                 vectors=int(query.shape[0]),
             )
             t_stage = time.perf_counter()
-    if profile_prefix is not None:
+    if profile_enabled:
         if not stage_profile:
             _maybe_sync_for_profile(out)
         _record_tq_profile(
@@ -1921,7 +1924,7 @@ def tq_fused_decode_history_current_attention(
         )
     compare_attention = attention_debug_compare_enabled()
     profile_shadow = (
-        profile_prefix is not None
+        profile_enabled
         and fused_decode_attention_m4_shadow_profile_enabled()
     )
     if compare_attention or profile_shadow:

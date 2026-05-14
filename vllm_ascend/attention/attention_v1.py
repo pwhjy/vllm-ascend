@@ -2132,8 +2132,12 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
-        _maybe_sync_for_profile(query, key, value, attn_metadata.block_tables)
-        t0 = time.perf_counter()
+        profile_enabled = os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
+        if profile_enabled:
+            _maybe_sync_for_profile(query, key, value, attn_metadata.block_tables)
+            t0 = time.perf_counter()
+        else:
+            t0 = 0.0
         self.key_cache = kv_cache  # type: ignore[assignment]
         self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
 
@@ -2253,12 +2257,13 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         ),
                     )
                     output[:num_tokens] = m4_out
-                    _maybe_sync_for_profile(output)
-                    _record_tq_profile(
-                        "turboquant_fused_kv_update_attention.forward",
-                        (time.perf_counter() - t0) * 1000.0,
-                        vectors=num_tokens,
-                    )
+                    if profile_enabled:
+                        _maybe_sync_for_profile(output)
+                        _record_tq_profile(
+                            "turboquant_fused_kv_update_attention.forward",
+                            (time.perf_counter() - t0) * 1000.0,
+                            vectors=num_tokens,
+                        )
                     return output
                 except Exception:
                     if (
