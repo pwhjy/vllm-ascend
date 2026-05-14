@@ -2252,7 +2252,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                             "decode.m4_attention"
                         ),
                     )
-                    output[:num_tokens] = m4_out.to(dtype=output.dtype)
+                    output[:num_tokens] = m4_out
                     _maybe_sync_for_profile(output)
                     _record_tq_profile(
                         "turboquant_fused_kv_update_attention.forward",

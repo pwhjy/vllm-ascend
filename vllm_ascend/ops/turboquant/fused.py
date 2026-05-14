@@ -531,17 +531,38 @@ def _is_npu_tensor(tensor: torch.Tensor) -> bool:
     }
 
 
+_CUSTOM_OPS_ENABLED: bool | None = None
+_CUSTOM_OP_EXISTS: dict[str, bool] = {}
+
+
+def _custom_ops_enabled() -> bool:
+    global _CUSTOM_OPS_ENABLED
+    if _CUSTOM_OPS_ENABLED is None:
+        try:
+            from vllm_ascend.utils import enable_custom_op
+
+            _CUSTOM_OPS_ENABLED = bool(enable_custom_op())
+        except Exception:
+            _CUSTOM_OPS_ENABLED = False
+    return _CUSTOM_OPS_ENABLED
+
+
+def _custom_op_exists(op_name: str) -> bool:
+    cached = _CUSTOM_OP_EXISTS.get(op_name)
+    if cached is not None:
+        return cached
+    exists = hasattr(torch.ops, "_C_ascend") and hasattr(torch.ops._C_ascend, op_name)
+    if exists:
+        _CUSTOM_OP_EXISTS[op_name] = True
+    return exists
+
+
 def _custom_op_available(op_name: str, *tensors: torch.Tensor) -> bool:
     if tensors and not all(_is_npu_tensor(tensor) for tensor in tensors):
         return False
-    try:
-        from vllm_ascend.utils import enable_custom_op
-
-        if not enable_custom_op():
-            return False
-    except Exception:
+    if not _custom_ops_enabled():
         return False
-    return hasattr(torch.ops, "_C_ascend") and hasattr(torch.ops._C_ascend, op_name)
+    return _custom_op_exists(op_name)
 
 
 def _as_int32_tensor(x: torch.Tensor | list[int], device: torch.device) -> torch.Tensor:
