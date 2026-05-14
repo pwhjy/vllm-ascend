@@ -378,8 +378,12 @@ public:
         for (uint32_t col = 0; col < kQjlCols_; ++col) {
             kQjlCacheGm_.SetValue(qjlBase + col, qjlPacked[col]);
         }
-        kGammaCacheGm_.SetValue(slotHead, gamma);
-        kNormCacheGm_.SetValue(slotHead, norm);
+        lastKGamma_ = gamma;
+        lastKNorm_ = norm;
+        if (!deferScalarWrite) {
+            kGammaCacheGm_.SetValue(slotHead, gamma);
+            kNormCacheGm_.SetValue(slotHead, norm);
+        }
     }
 
     __aicore__ inline void EncodeKRotateOnly(
@@ -441,12 +445,8 @@ public:
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             kIdxCacheGm_.SetValue(idxBase + col, idxPacked[col]);
         }
-        lastKGamma_ = gamma;
-        lastKNorm_ = norm;
-        if (!deferScalarWrite) {
-            kGammaCacheGm_.SetValue(slotHead, gamma);
-            kNormCacheGm_.SetValue(slotHead, norm);
-        }
+        kGammaCacheGm_.SetValue(slotHead, gamma);
+        kNormCacheGm_.SetValue(slotHead, norm);
     }
 
     __aicore__ inline void EncodeKStage1QjlDebug(
