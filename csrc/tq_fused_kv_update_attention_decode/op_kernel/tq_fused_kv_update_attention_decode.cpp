@@ -25,6 +25,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t skipCacheUpdate;
     uint32_t debugMode;
     uint32_t pretransformedQuery;
+    uint32_t historyPartitions;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -63,6 +64,7 @@ public:
         GM_ADDR vBoundary,
         GM_ADDR kCodebook,
         GM_ADDR vCodebook,
+        GM_ADDR scratch,
         GM_ADDR out,
         const TqFusedKvUpdateAttentionDecodeTilingData* tiling)
     {
@@ -87,6 +89,7 @@ public:
         vBoundaryGm_.SetGlobalBuffer((__gm__ float*)vBoundary);
         kCodebookGm_.SetGlobalBuffer((__gm__ float*)kCodebook);
         vCodebookGm_.SetGlobalBuffer((__gm__ float*)vCodebook);
+        scratchGm_.SetGlobalBuffer((__gm__ float*)scratch);
         outGm_.SetGlobalBuffer((__gm__ float*)out);
 
         batch_ = tiling->batch;
@@ -101,6 +104,7 @@ public:
         skipCacheUpdate_ = tiling->skipCacheUpdate;
         debugMode_ = tiling->debugMode;
         pretransformedQuery_ = tiling->pretransformedQuery;
+        historyPartitions_ = tiling->historyPartitions;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -947,6 +951,210 @@ public:
         }
     }
 
+    __aicore__ inline void ProcessHistoryTiledRange(
+        uint32_t b,
+        uint32_t kvHead,
+        uint32_t startPos,
+        uint32_t endPos)
+    {
+        if (startPos >= endPos) {
+            return;
+        }
+        uint32_t tileLenLimit = scoreTileLen_;
+        if (tileLenLimit > 64U) {
+            tileLenLimit = 64U;
+        }
+        if (tileLenLimit == 0U) {
+            tileLenLimit = 1U;
+        }
+
+        uint32_t pos = startPos;
+        while (pos < endPos) {
+            uint32_t blockOffset = pos / blockSize_;
+            uint32_t tokenOffset = pos - blockOffset * blockSize_;
+            int32_t blockId = blockTableGm_.GetValue(
+                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
+            uint32_t tokensInBlock = blockSize_ - tokenOffset;
+            uint32_t remaining = endPos - pos;
+            if (tokensInBlock > remaining) {
+                tokensInBlock = remaining;
+            }
+            uint64_t cacheBase =
+                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
+                + kvHead;
+            uint32_t consumed = 0;
+            while (consumed < tokensInBlock) {
+                uint32_t tileLen = tokensInBlock - consumed;
+                if (tileLen > tileLenLimit) {
+                    tileLen = tileLenLimit;
+                }
+                AccumulateHistoryTile(cacheBase, tokenOffset + consumed, tileLen);
+                consumed += tileLen;
+            }
+            pos += tokensInBlock;
+        }
+    }
+
+    __aicore__ inline uint64_t HistoryPartialStride()
+    {
+        return static_cast<uint64_t>(headDim_) + 2U;
+    }
+
+    __aicore__ inline uint64_t HistoryPartialBase(
+        uint32_t b,
+        uint32_t head,
+        uint32_t partition)
+    {
+        return ((static_cast<uint64_t>(b) * numHeads_ + head)
+                * historyPartitions_
+                + partition)
+            * HistoryPartialStride();
+    }
+
+    __aicore__ inline void StoreHistoryPartial(
+        uint32_t b,
+        uint32_t head,
+        uint32_t partition)
+    {
+        uint64_t base = HistoryPartialBase(b, head, partition);
+        scratchGm_.SetValue(base, initialized_ ? maxScore_ : -3.4028234663852886e38F);
+        scratchGm_.SetValue(base + 1U, initialized_ ? sum_ : 0.0F);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            scratchGm_.SetValue(base + 2U + d, initialized_ ? accRot_[d] : 0.0F);
+        }
+    }
+
+    __aicore__ inline void ProcessHistoryPartialTask(uint64_t task)
+    {
+        uint32_t partition = static_cast<uint32_t>(task % historyPartitions_);
+        uint64_t headTask = task / historyPartitions_;
+        uint32_t b = static_cast<uint32_t>(headTask / numHeads_);
+        uint32_t head = static_cast<uint32_t>(headTask % numHeads_);
+        uint32_t kvHead = head / qPerKv_;
+        if (b >= batch_ || head >= numHeads_ || kvHead >= numKvHeads_) {
+            return;
+        }
+
+        int32_t oldLenRaw = oldSeqLensGm_.GetValue(b);
+        uint32_t oldLen = oldLenRaw > 0 ? static_cast<uint32_t>(oldLenRaw) : 0U;
+        if (oldLen > maxSeqLen_) {
+            oldLen = maxSeqLen_;
+        }
+        uint32_t chunk =
+            (oldLen + historyPartitions_ - 1U) / historyPartitions_;
+        uint32_t startPos = partition * chunk;
+        uint32_t endPos = startPos + chunk;
+        if (startPos > oldLen) {
+            startPos = oldLen;
+        }
+        if (endPos > oldLen) {
+            endPos = oldLen;
+        }
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            accRot_[d] = 0.0F;
+        }
+        maxScore_ = -3.4028234663852886e38F;
+        sum_ = 0.0F;
+        currentWeight_ = 0.0F;
+        initialized_ = false;
+
+        if (startPos < endPos) {
+            BuildQueryTransforms(b, head);
+            ProcessHistoryTiledRange(b, kvHead, startPos, endPos);
+        }
+        StoreHistoryPartial(b, head, partition);
+    }
+
+    __aicore__ inline void ReduceHistoryPartialsAndStore(
+        uint32_t b,
+        uint32_t head)
+    {
+        uint32_t kvHead = head / qPerKv_;
+        if (kvHead >= numKvHeads_) {
+            return;
+        }
+
+        float globalMax = -3.4028234663852886e38F;
+        for (uint32_t partition = 0; partition < historyPartitions_; ++partition) {
+            uint64_t base = HistoryPartialBase(b, head, partition);
+            float partialSum = scratchGm_.GetValue(base + 1U);
+            if (partialSum > 0.0F) {
+                float partialMax = scratchGm_.GetValue(base);
+                if (partialMax > globalMax) {
+                    globalMax = partialMax;
+                }
+            }
+        }
+        float curScore = CurrentScore(b, head, kvHead);
+        if (curScore > globalMax) {
+            globalMax = curScore;
+        }
+
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            accRot_[d] = 0.0F;
+        }
+        sum_ = 0.0F;
+        maxScore_ = globalMax;
+        currentWeight_ = 0.0F;
+        initialized_ = true;
+
+        for (uint32_t partition = 0; partition < historyPartitions_; ++partition) {
+            uint64_t base = HistoryPartialBase(b, head, partition);
+            float partialSum = scratchGm_.GetValue(base + 1U);
+            if (partialSum <= 0.0F) {
+                continue;
+            }
+            float partialMax = scratchGm_.GetValue(base);
+            float partialScale = ExpScalar(partialMax - globalMax);
+            sum_ += partialSum * partialScale;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                accRot_[d] += scratchGm_.GetValue(base + 2U + d) * partialScale;
+            }
+        }
+
+        currentWeight_ = ExpScalar(curScore - globalMax);
+        sum_ += currentWeight_;
+        StoreOutput(b, head, kvHead);
+    }
+
+    __aicore__ inline void ProcessHistoryParallel()
+    {
+        uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
+        uint64_t partialTasks = static_cast<uint64_t>(batch_)
+            * static_cast<uint64_t>(numHeads_)
+            * static_cast<uint64_t>(historyPartitions_);
+        uint64_t partialTasksPerCore =
+            (partialTasks + coreCount - 1U) / coreCount;
+        uint64_t partialStart =
+            static_cast<uint64_t>(GetBlockIdx()) * partialTasksPerCore;
+        uint64_t partialEnd = partialStart + partialTasksPerCore;
+        if (partialEnd > partialTasks) {
+            partialEnd = partialTasks;
+        }
+        for (uint64_t task = partialStart; task < partialEnd; ++task) {
+            ProcessHistoryPartialTask(task);
+        }
+
+        SyncAll();
+
+        uint64_t reduceTasks = static_cast<uint64_t>(batch_)
+            * static_cast<uint64_t>(numHeads_);
+        uint64_t reduceTasksPerCore =
+            (reduceTasks + coreCount - 1U) / coreCount;
+        uint64_t reduceStart =
+            static_cast<uint64_t>(GetBlockIdx()) * reduceTasksPerCore;
+        uint64_t reduceEnd = reduceStart + reduceTasksPerCore;
+        if (reduceEnd > reduceTasks) {
+            reduceEnd = reduceTasks;
+        }
+        for (uint64_t task = reduceStart; task < reduceEnd; ++task) {
+            ReduceHistoryPartialsAndStore(
+                static_cast<uint32_t>(task / numHeads_),
+                static_cast<uint32_t>(task % numHeads_));
+        }
+    }
+
     __aicore__ inline void ProcessHistoryGroup(
         uint32_t b,
         uint32_t kvHead,
@@ -1381,6 +1589,24 @@ public:
     __aicore__ inline void Process()
     {
         bool useGrouped = groupedQ_ != 0U && qPerKv_ == 4U;
+        bool useHistoryParallel = historyPartitions_ > 1U
+            && !useGrouped
+            && skipCacheUpdate_ != 0U
+            && debugMode_ == 0U
+            && headDim_ > 0U
+            && headDim_ <= 256U
+            && numKvHeads_ > 0U
+            && qPerKv_ > 0U
+            && kStage1Bits_ > 0U
+            && kStage1Bits_ <= 4U
+            && vBits_ > 0U
+            && vBits_ <= 4U
+            && blockSize_ > 0U
+            && maxBlocksPerSeq_ > 0U;
+        if (useHistoryParallel) {
+            ProcessHistoryParallel();
+            return;
+        }
         uint64_t totalTasks = static_cast<uint64_t>(batch_)
             * static_cast<uint64_t>(useGrouped ? numKvHeads_ : numHeads_);
         if (totalTasks == 0U) {
@@ -1431,6 +1657,7 @@ private:
     GlobalTensor<float> vBoundaryGm_;
     GlobalTensor<float> kCodebookGm_;
     GlobalTensor<float> vCodebookGm_;
+    GlobalTensor<float> scratchGm_;
     GlobalTensor<float> outGm_;
 
     uint32_t batch_{0};
@@ -1445,6 +1672,7 @@ private:
     uint32_t skipCacheUpdate_{0};
     uint32_t debugMode_{0};
     uint32_t pretransformedQuery_{0};
+    uint32_t historyPartitions_{1};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};
@@ -1502,6 +1730,7 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
     GM_ADDR vBoundary,
     GM_ADDR kCodebook,
     GM_ADDR vCodebook,
+    GM_ADDR scratch,
     GM_ADDR out,
     GM_ADDR workspace,
     GM_ADDR tiling)
@@ -1534,6 +1763,7 @@ extern "C" __global__ __aicore__ void tq_fused_kv_update_attention_decode(
         vBoundary,
         kCodebook,
         vCodebook,
+        scratch,
         out,
         &tilingData);
     op.Process();

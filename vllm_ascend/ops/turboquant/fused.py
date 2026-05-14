@@ -427,6 +427,18 @@ def fused_decode_attention_m4_score_tile_len() -> int:
     return min(64, max(1, tile_len))
 
 
+def fused_decode_attention_m4_history_partitions() -> int:
+    """Number of independent history chunks for M4 decode partial softmax."""
+
+    try:
+        partitions = int(os.getenv("VLLM_ASCEND_TQ_M4_HISTORY_PARTITIONS", "1"))
+    except ValueError:
+        partitions = 1
+    if partitions <= 1:
+        return 1
+    return min(16, partitions)
+
+
 def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     """Process all Q heads that share a KV head in one M4 decode task."""
 
@@ -1858,6 +1870,7 @@ def tq_fused_decode_history_current_attention(
         1 if split_cache_update else 0,
         debug_mode,
         1 if pretransform_query else 0,
+        fused_decode_attention_m4_history_partitions(),
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -2371,6 +2384,7 @@ __all__ = [
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",
+    "fused_decode_attention_m4_history_partitions",
     "fused_decode_attention_m4_pretransform_query_enabled",
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_split_cache_update_enabled",

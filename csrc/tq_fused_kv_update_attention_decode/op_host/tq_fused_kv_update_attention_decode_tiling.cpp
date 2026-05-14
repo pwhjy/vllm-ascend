@@ -40,6 +40,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* skipCacheUpdatePtr = attr->GetAttrPointer<int64_t>(7);
     const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(8);
     const int64_t* pretransformedQueryPtr = attr->GetAttrPointer<int64_t>(9);
+    const int64_t* historyPartitionsPtr = attr->GetAttrPointer<int64_t>(10);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -68,6 +69,14 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     }
     bool pretransformedQueryAttr =
         pretransformedQueryPtr != nullptr && *pretransformedQueryPtr != 0;
+    int64_t historyPartitionsAttr =
+        historyPartitionsPtr != nullptr ? *historyPartitionsPtr : 1;
+    uint32_t historyPartitions = historyPartitionsAttr > 1
+        ? static_cast<uint32_t>(historyPartitionsAttr)
+        : 1U;
+    if (historyPartitions > 16U) {
+        historyPartitions = 16U;
+    }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
@@ -79,8 +88,13 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     auto platformInfo = platform_ascendc::PlatformAscendC(
         context->GetPlatformInfo());
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
+    bool historyParallel = historyPartitions > 1U
+        && !groupedQ
+        && skipCacheUpdateAttr
+        && debugMode == 0U;
     uint64_t usefulCore = static_cast<uint64_t>(batch)
-        * static_cast<uint64_t>(groupedQ ? numKvHeads : numHeads);
+        * static_cast<uint64_t>(groupedQ ? numKvHeads : numHeads)
+        * static_cast<uint64_t>(historyParallel ? historyPartitions : 1U);
     if (usefulCore > 0U && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);
     }
@@ -101,6 +115,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_skipCacheUpdate(skipCacheUpdateAttr ? 1U : 0U);
     tiling.set_debugMode(debugMode);
     tiling.set_pretransformedQuery(pretransformedQueryAttr ? 1U : 0U);
+    tiling.set_historyPartitions(historyPartitions);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);

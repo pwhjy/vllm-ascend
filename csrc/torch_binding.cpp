@@ -1352,7 +1352,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     int64_t grouped_q,
     int64_t skip_cache_update,
     int64_t debug_mode,
-    int64_t pretransformed_query)
+    int64_t pretransformed_query,
+    int64_t history_partitions)
 {
     auto is_supported_qkv_dtype = [](at::ScalarType dtype) {
         return dtype == at::kFloat || dtype == at::kHalf
@@ -1470,10 +1471,17 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "debug_mode must be in [0, 9]");
     TORCH_CHECK(pretransformed_query == 0 || pretransformed_query == 1,
                 "pretransformed_query must be 0 or 1");
+    TORCH_CHECK(history_partitions >= 1 && history_partitions <= 16,
+                "history_partitions must be in [1, 16]");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
         query.options().dtype(at::kFloat));
+    at::Tensor scratch = history_partitions > 1
+        ? at::empty(
+            {query.size(0), query.size(1), history_partitions, head_dim + 2},
+            query.options().dtype(at::kFloat))
+        : at::empty({1}, query.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
         query, key, value,
@@ -1482,9 +1490,10 @@ at::Tensor tq_fused_kv_update_attention_decode(
         v_packed_idx, v_norm, block_table, old_seq_lens,
         k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
         v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
+        scratch,
         k_total_bits, v_bits, head_dim, scale, max_seq_len,
         score_tile_len, grouped_q, skip_cache_update, debug_mode,
-        pretransformed_query, out);
+        pretransformed_query, history_partitions, out);
 
     return out;
 }
@@ -1905,7 +1914,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int k_total_bits, int v_bits, int head_dim, "
         "float scale, int max_seq_len, int score_tile_len, "
         "int grouped_q, int skip_cache_update, int debug_mode, "
-        "int pretransformed_query) -> Tensor"
+        "int pretransformed_query, int history_partitions) -> Tensor"
     );
     ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
              &vllm_ascend::tq_fused_kv_update_attention_decode);

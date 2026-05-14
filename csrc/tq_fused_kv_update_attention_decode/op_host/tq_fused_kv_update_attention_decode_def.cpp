@@ -96,6 +96,10 @@ public:
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("scratch").ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("out").ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
@@ -109,6 +113,7 @@ public:
         this->Attr("skipCacheUpdate").AttrType(REQUIRED).Int(0);
         this->Attr("debugMode").AttrType(REQUIRED).Int(0);
         this->Attr("pretransformedQuery").AttrType(REQUIRED).Int(0);
+        this->Attr("historyPartitions").AttrType(REQUIRED).Int(1);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
