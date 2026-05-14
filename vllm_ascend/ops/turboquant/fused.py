@@ -460,7 +460,7 @@ def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
 def fused_decode_attention_m4_force_fp32_input() -> bool:
     """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_FORCE_FP32_INPUT", "1") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_M4_FORCE_FP32_INPUT", "0") == "1"
 
 
 def encode_cache_update_debug_mode() -> int:
