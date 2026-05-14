@@ -1483,6 +1483,9 @@ at::Tensor tq_fused_kv_update_attention_decode(
         && debug_mode == 0;
     const int64_t kernel_history_partitions =
         use_history_partitions ? history_partitions : 1;
+    int64_t history_partition_phase_none = 0;
+    int64_t history_partition_phase_partial = 1;
+    int64_t history_partition_phase_reduce = 2;
     int64_t history_scratch_stride = ((head_dim + 7) / 8) * 8 + 8;
     at::Tensor scratch = use_history_partitions
         ? at::empty(
@@ -1502,7 +1505,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
             scratch,
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
-            pretransformed_query, kernel_history_partitions, 1, out);
+            pretransformed_query, kernel_history_partitions,
+            history_partition_phase_partial, out);
 
         EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
             query, key, value,
@@ -1514,7 +1518,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
             scratch,
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
-            pretransformed_query, kernel_history_partitions, 2, out);
+            pretransformed_query, kernel_history_partitions,
+            history_partition_phase_reduce, out);
     } else {
         EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
             query, key, value,
@@ -1526,7 +1531,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
             scratch,
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
-            pretransformed_query, kernel_history_partitions, 0, out);
+            pretransformed_query, kernel_history_partitions,
+            history_partition_phase_none, out);
     }
 
     return out;
