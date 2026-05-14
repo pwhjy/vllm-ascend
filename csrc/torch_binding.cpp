@@ -1477,25 +1477,57 @@ at::Tensor tq_fused_kv_update_attention_decode(
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
         query.options().dtype(at::kFloat));
+    const bool use_history_partitions = history_partitions > 1
+        && grouped_q == 0
+        && skip_cache_update != 0
+        && debug_mode == 0;
+    const int64_t kernel_history_partitions =
+        use_history_partitions ? history_partitions : 1;
     int64_t history_scratch_stride = ((head_dim + 7) / 8) * 8 + 8;
-    at::Tensor scratch = history_partitions > 1
+    at::Tensor scratch = use_history_partitions
         ? at::empty(
-            {query.size(0), query.size(1), history_partitions,
+            {query.size(0), query.size(1), kernel_history_partitions,
              history_scratch_stride},
             query.options().dtype(at::kFloat))
         : at::empty({1}, query.options().dtype(at::kFloat));
 
-    EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
-        query, key, value,
-        slot_mapping,
-        k_packed_idx, k_packed_qjl, k_gamma, k_norm,
-        v_packed_idx, v_norm, block_table, old_seq_lens,
-        k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
-        v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
-        scratch,
-        k_total_bits, v_bits, head_dim, scale, max_seq_len,
-        score_tile_len, grouped_q, skip_cache_update, debug_mode,
-        pretransformed_query, history_partitions, out);
+    if (use_history_partitions) {
+        EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
+            query, key, value,
+            slot_mapping,
+            k_packed_idx, k_packed_qjl, k_gamma, k_norm,
+            v_packed_idx, v_norm, block_table, old_seq_lens,
+            k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
+            v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
+            scratch,
+            k_total_bits, v_bits, head_dim, scale, max_seq_len,
+            score_tile_len, grouped_q, skip_cache_update, debug_mode,
+            pretransformed_query, kernel_history_partitions, 1, out);
+
+        EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
+            query, key, value,
+            slot_mapping,
+            k_packed_idx, k_packed_qjl, k_gamma, k_norm,
+            v_packed_idx, v_norm, block_table, old_seq_lens,
+            k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
+            v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
+            scratch,
+            k_total_bits, v_bits, head_dim, scale, max_seq_len,
+            score_tile_len, grouped_q, skip_cache_update, debug_mode,
+            pretransformed_query, kernel_history_partitions, 2, out);
+    } else {
+        EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
+            query, key, value,
+            slot_mapping,
+            k_packed_idx, k_packed_qjl, k_gamma, k_norm,
+            v_packed_idx, v_norm, block_table, old_seq_lens,
+            k_rotation, k_qjl_query_matrix, k_qjl_proj_t, k_boundary,
+            v_rotation, v_rotation_t, v_boundary, k_codebook, v_codebook,
+            scratch,
+            k_total_bits, v_bits, head_dim, scale, max_seq_len,
+            score_tile_len, grouped_q, skip_cache_update, debug_mode,
+            pretransformed_query, kernel_history_partitions, 0, out);
+    }
 
     return out;
 }

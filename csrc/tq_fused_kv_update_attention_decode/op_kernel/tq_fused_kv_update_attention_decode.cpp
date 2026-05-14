@@ -26,6 +26,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t debugMode;
     uint32_t pretransformedQuery;
     uint32_t historyPartitions;
+    uint32_t historyPartitionPhase;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -105,6 +106,7 @@ public:
         debugMode_ = tiling->debugMode;
         pretransformedQuery_ = tiling->pretransformedQuery;
         historyPartitions_ = tiling->historyPartitions;
+        historyPartitionPhase_ = tiling->historyPartitionPhase;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -1138,7 +1140,7 @@ public:
         StoreOutput(b, head, kvHead);
     }
 
-    __aicore__ inline void ProcessHistoryParallel()
+    __aicore__ inline void ProcessHistoryPartialPhase()
     {
         uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
         uint64_t partialTasks = static_cast<uint64_t>(batch_)
@@ -1155,9 +1157,11 @@ public:
         for (uint64_t task = partialStart; task < partialEnd; ++task) {
             ProcessHistoryPartialTask(task);
         }
+    }
 
-        SyncAll();
-
+    __aicore__ inline void ProcessHistoryReducePhase()
+    {
+        uint64_t coreCount = static_cast<uint64_t>(numCore_ == 0 ? 1 : numCore_);
         uint64_t reduceTasks = static_cast<uint64_t>(batch_)
             * static_cast<uint64_t>(numHeads_);
         uint64_t reduceTasksPerCore =
@@ -1624,8 +1628,14 @@ public:
             && blockSize_ > 0U
             && maxBlocksPerSeq_ > 0U;
         if (useHistoryParallel) {
-            ProcessHistoryParallel();
-            return;
+            if (historyPartitionPhase_ == 1U) {
+                ProcessHistoryPartialPhase();
+                return;
+            }
+            if (historyPartitionPhase_ == 2U) {
+                ProcessHistoryReducePhase();
+                return;
+            }
         }
         uint64_t totalTasks = static_cast<uint64_t>(batch_)
             * static_cast<uint64_t>(useGrouped ? numKvHeads_ : numHeads_);
@@ -1693,6 +1703,7 @@ private:
     uint32_t debugMode_{0};
     uint32_t pretransformedQuery_{0};
     uint32_t historyPartitions_{1};
+    uint32_t historyPartitionPhase_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};

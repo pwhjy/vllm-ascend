@@ -41,6 +41,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* debugModePtr = attr->GetAttrPointer<int64_t>(8);
     const int64_t* pretransformedQueryPtr = attr->GetAttrPointer<int64_t>(9);
     const int64_t* historyPartitionsPtr = attr->GetAttrPointer<int64_t>(10);
+    const int64_t* historyPartitionPhasePtr = attr->GetAttrPointer<int64_t>(11);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -77,6 +78,14 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     if (historyPartitions > 16U) {
         historyPartitions = 16U;
     }
+    int64_t historyPartitionPhaseAttr =
+        historyPartitionPhasePtr != nullptr ? *historyPartitionPhasePtr : 0;
+    uint32_t historyPartitionPhase = historyPartitionPhaseAttr > 0
+        ? static_cast<uint32_t>(historyPartitionPhaseAttr)
+        : 0U;
+    if (historyPartitionPhase > 2U) {
+        historyPartitionPhase = 0U;
+    }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
@@ -94,7 +103,10 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
         && debugMode == 0U;
     uint64_t usefulCore = static_cast<uint64_t>(batch)
         * static_cast<uint64_t>(groupedQ ? numKvHeads : numHeads)
-        * static_cast<uint64_t>(historyParallel ? historyPartitions : 1U);
+        * static_cast<uint64_t>(
+            historyParallel && historyPartitionPhase == 1U
+                ? historyPartitions
+                : 1U);
     if (usefulCore > 0U && usefulCore < coreNum) {
         coreNum = static_cast<uint32_t>(usefulCore);
     }
@@ -116,6 +128,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_debugMode(debugMode);
     tiling.set_pretransformedQuery(pretransformedQueryAttr ? 1U : 0U);
     tiling.set_historyPartitions(historyPartitions);
+    tiling.set_historyPartitionPhase(historyPartitionPhase);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);
