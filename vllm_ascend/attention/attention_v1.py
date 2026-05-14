@@ -2138,17 +2138,6 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         self._prepare_turboquant_runtime(layer, next(iter(kv_cache.values())).device)
 
         batch_size = len(attn_metadata.seq_lens_list)
-        query_start_loc = attn_metadata.query_start_loc[: batch_size + 1].to(
-            device=query.device, dtype=torch.int32,
-        ).contiguous()
-        key_start_loc = query_start_loc
-        current_lens = key_start_loc[1:] - key_start_loc[:-1]
-        seq_lens_t = torch.tensor(
-            attn_metadata.seq_lens_list,
-            dtype=torch.int32,
-            device=query.device,
-        )
-        old_seq_lens = torch.clamp(seq_lens_t - current_lens, min=0).contiguous()
         num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
@@ -2580,6 +2569,17 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             AscendAttentionState.PrefillCacheHit: 1,
             AscendAttentionState.PrefillNoCache: 2,
         }
+        query_start_loc = attn_metadata.query_start_loc[: batch_size + 1].to(
+            device=query.device, dtype=torch.int32,
+        ).contiguous()
+        key_start_loc = query_start_loc
+        current_lens = key_start_loc[1:] - key_start_loc[:-1]
+        seq_lens_t = torch.tensor(
+            attn_metadata.seq_lens_list,
+            dtype=torch.int32,
+            device=query.device,
+        )
+        old_seq_lens = torch.clamp(seq_lens_t - current_lens, min=0).contiguous()
         fused_out = tq_fused_kv_update_attention(
             query[:num_tokens],
             key[:num_tokens],
