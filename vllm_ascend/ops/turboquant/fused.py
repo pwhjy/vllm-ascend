@@ -419,7 +419,7 @@ def fused_decode_attention_m4_score_tile_len() -> int:
     """
 
     try:
-        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "0"))
+        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "64"))
     except ValueError:
         tile_len = 0
     if tile_len <= 0:
@@ -430,13 +430,13 @@ def fused_decode_attention_m4_score_tile_len() -> int:
 def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     """Process all Q heads that share a KV head in one M4 decode task."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "1") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0") == "1"
 
 
 def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
     """Run decode cache update as a separate custom op before M4 attention."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "0") == "1"
+    return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "1") == "1"
 
 
 def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
