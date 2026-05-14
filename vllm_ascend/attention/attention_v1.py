@@ -217,6 +217,10 @@ class AscendMetadata:
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
+    tq_decode_current_lens_list: list[int] | None = None
+    tq_decode_old_seq_lens_list: list[int] | None = None
+    tq_decode_old_seq_lens_tensor: torch.Tensor | None = None
+    tq_decode_max_old_seq_len: int | None = None
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -2195,19 +2199,31 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA", "1") == "1"
         ):
-            q_ends = [int(v) for v in attn_metadata.actual_seq_lengths_q]
-            q_starts = [0] + q_ends[:-1]
-            current_lens_list = [
-                max(0, q_end - q_start)
-                for q_start, q_end in zip(q_starts, q_ends)
-            ]
-            old_seq_lens_list = [
-                max(0, int(total_len) - cur_len)
-                for total_len, cur_len in zip(
-                    attn_metadata.seq_lens_list,
-                    current_lens_list,
+            current_lens_list = attn_metadata.tq_decode_current_lens_list
+            old_seq_lens_list = attn_metadata.tq_decode_old_seq_lens_list
+            if current_lens_list is None or old_seq_lens_list is None:
+                q_ends = [int(v) for v in attn_metadata.actual_seq_lengths_q]
+                q_starts = [0] + q_ends[:-1]
+                current_lens_list = [
+                    max(0, q_end - q_start)
+                    for q_start, q_end in zip(q_starts, q_ends)
+                ]
+                old_seq_lens_list = [
+                    max(0, int(total_len) - cur_len)
+                    for total_len, cur_len in zip(
+                        attn_metadata.seq_lens_list,
+                        current_lens_list,
+                    )
+                ]
+                attn_metadata.tq_decode_current_lens_list = current_lens_list
+                attn_metadata.tq_decode_old_seq_lens_list = old_seq_lens_list
+                attn_metadata.tq_decode_max_old_seq_len = max(
+                    old_seq_lens_list,
+                    default=0,
                 )
-            ]
+            else:
+                q_ends = [int(v) for v in attn_metadata.actual_seq_lengths_q]
+                q_starts = [0] + q_ends[:-1]
             tq_transform_mode = int(getattr(layer, "tq_transform_mode", 0))
             structured_safe_path = (
                 tq_transform_mode != 0
@@ -2225,6 +2241,14 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                 and all(cur_len == 1 for cur_len in current_lens_list)
             ):
                 try:
+                    old_seq_lens_tensor = attn_metadata.tq_decode_old_seq_lens_tensor
+                    if old_seq_lens_tensor is None or old_seq_lens_tensor.device != query.device:
+                        old_seq_lens_tensor = torch.tensor(
+                            old_seq_lens_list,
+                            dtype=torch.int32,
+                            device=query.device,
+                        )
+                        attn_metadata.tq_decode_old_seq_lens_tensor = old_seq_lens_tensor
                     m4_out = tq_fused_decode_history_current_attention(
                         query[:num_tokens],
                         key[:num_tokens],
@@ -2232,7 +2256,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         attn_metadata.slot_mapping[:num_tokens],
                         kv_cache,
                         attn_metadata.block_tables,
-                        old_seq_lens_list,
+                        old_seq_lens_tensor,
                         layer._tq_k_rot,
                         layer._tq_k_qjl_query_matrix,
                         layer._tq_k_qjl_proj_t,
@@ -2248,7 +2272,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         head_dim=self.head_size,
                         scale=self.scale,
                         output_dtype=output.dtype,
-                        max_seq_len=max(old_seq_lens_list, default=0),
+                        max_seq_len=attn_metadata.tq_decode_max_old_seq_len,
                         k_qjl_proj=layer._tq_k_qjl_proj,
                         transform_mode=tq_transform_mode,
                         profile_prefix=(
