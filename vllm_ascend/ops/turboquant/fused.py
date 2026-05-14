@@ -37,6 +37,7 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 )
 
 from .dequant import (
+    attention_debug_compare_enabled,
     cached_token_map_from_block_table,
     custom_strict_enabled,
     tq_dequant_mse_paged_rot,
@@ -1884,10 +1885,12 @@ def tq_fused_decode_history_current_attention(
             (time.perf_counter() - t_total) * 1000.0,
             vectors=int(query.shape[0]),
         )
-    if (
+    compare_attention = attention_debug_compare_enabled()
+    profile_shadow = (
         profile_prefix is not None
         and fused_decode_attention_m4_shadow_profile_enabled()
-    ):
+    )
+    if compare_attention or profile_shadow:
         shadow_t0 = time.perf_counter()
         shadow_out = tq_prod_mse_history_current_decode_attention(
             query,
@@ -1907,14 +1910,34 @@ def tq_fused_decode_history_current_attention(
             scale=float(scale),
             score_dtype=torch.float32,
             output_dtype=output_dtype,
-            profile_prefix=f"{profile_prefix}.shadow",
+            profile_prefix=(
+                f"{profile_prefix}.shadow" if profile_shadow else None
+            ),
         )
         _maybe_sync_for_profile(shadow_out)
-        _record_tq_profile(
-            f"{profile_prefix}.shadow.total",
-            (time.perf_counter() - shadow_t0) * 1000.0,
-            vectors=int(query.shape[0]),
-        )
+        if compare_attention:
+            delta = (
+                out.to(torch.float32) - shadow_out.to(torch.float32)
+            ).abs()
+            max_diff = float(delta.max().item()) if delta.numel() else 0.0
+            mean_diff = float(delta.mean().item()) if delta.numel() else 0.0
+            atol = float(os.getenv("VLLM_ASCEND_TQ_M4_COMPARE_ATOL", "1e-2"))
+            if max_diff > atol:
+                first = int(delta.flatten().argmax().item())
+                raise RuntimeError(
+                    "TurboQuant M4 attention mismatch: "
+                    f"max_diff={max_diff:.6g}, mean_diff={mean_diff:.6g}, "
+                    f"first_flat={first}, custom="
+                    f"{float(out.flatten()[first].item()):.6g}, ref="
+                    f"{float(shadow_out.flatten()[first].item()):.6g}, "
+                    f"atol={atol:.6g}"
+                )
+        if profile_shadow:
+            _record_tq_profile(
+                f"{profile_prefix}.shadow.total",
+                (time.perf_counter() - shadow_t0) * 1000.0,
+                vectors=int(query.shape[0]),
+            )
     return out.contiguous()
 
 
