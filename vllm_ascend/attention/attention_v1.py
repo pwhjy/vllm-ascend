@@ -221,6 +221,8 @@ class AscendMetadata:
     tq_decode_old_seq_lens_list: list[int] | None = None
     tq_decode_old_seq_lens_tensor: torch.Tensor | None = None
     tq_decode_max_old_seq_len: int | None = None
+    tq_decode_slot_mapping_i64: torch.Tensor | None = None
+    tq_decode_block_table_i32: torch.Tensor | None = None
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -2249,13 +2251,21 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                             device=query.device,
                         )
                         attn_metadata.tq_decode_old_seq_lens_tensor = old_seq_lens_tensor
+                    slot_mapping_i64 = attn_metadata.tq_decode_slot_mapping_i64
+                    if slot_mapping_i64 is None or slot_mapping_i64.device != query.device:
+                        slot_mapping_i64 = attn_metadata.slot_mapping[:num_tokens].to(torch.long).contiguous()
+                        attn_metadata.tq_decode_slot_mapping_i64 = slot_mapping_i64
+                    block_table_i32 = attn_metadata.tq_decode_block_table_i32
+                    if block_table_i32 is None or block_table_i32.device != query.device:
+                        block_table_i32 = attn_metadata.block_tables.to(torch.int32).contiguous()
+                        attn_metadata.tq_decode_block_table_i32 = block_table_i32
                     m4_out = tq_fused_decode_history_current_attention(
                         query[:num_tokens],
                         key[:num_tokens],
                         value[:num_tokens],
-                        attn_metadata.slot_mapping[:num_tokens],
+                        slot_mapping_i64,
                         kv_cache,
-                        attn_metadata.block_tables,
+                        block_table_i32,
                         old_seq_lens_tensor,
                         layer._tq_k_rot,
                         layer._tq_k_qjl_query_matrix,
