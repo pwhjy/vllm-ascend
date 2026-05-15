@@ -119,7 +119,7 @@ public:
         scale_ = tiling->scale;
         correction_ = tiling->correction;
 
-        pipe_.InitBuffer(expBuf_, 8U * sizeof(float));
+        pipe_.InitBuffer(expBuf_, 64U * sizeof(float));
         LoadSmallParams();
     }
 
@@ -1007,8 +1007,15 @@ public:
         }
 
         float tileSum = 0.0F;
+        LocalTensor<float> weightLocal = expBuf_.Get<float>();
         for (uint32_t i = 0; i < tileLen; ++i) {
-            float weight = ExpScalar(scoreTile_[i] - newMax);
+            weightLocal.SetValue(i, scoreTile_[i] - newMax);
+        }
+        SToVSync();
+        Exp(weightLocal, weightLocal, tileLen);
+        VToSSync();
+        for (uint32_t i = 0; i < tileLen; ++i) {
+            float weight = weightLocal.GetValue(i);
             tileSum += weight;
             uint64_t cacheIndex =
                 cacheBase + static_cast<uint64_t>(tokenOffset + i) * numKvHeads_;
