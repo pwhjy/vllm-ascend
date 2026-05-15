@@ -1353,7 +1353,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
     int64_t skip_cache_update,
     int64_t debug_mode,
     int64_t pretransformed_query,
-    int64_t history_partitions)
+    int64_t history_partitions,
+    int64_t transform_mode)
 {
     auto is_supported_qkv_dtype = [](at::ScalarType dtype) {
         return dtype == at::kFloat || dtype == at::kHalf
@@ -1473,6 +1474,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "pretransformed_query must be 0 or 1");
     TORCH_CHECK(history_partitions >= 1 && history_partitions <= 16,
                 "history_partitions must be in [1, 16]");
+    TORCH_CHECK(transform_mode == 0 || transform_mode == 1,
+                "transform_mode must be 0 or 1");
 
     at::Tensor out = at::empty(
         {query.size(0), query.size(1), head_dim},
@@ -1508,7 +1511,7 @@ at::Tensor tq_fused_kv_update_attention_decode(
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
             pretransformed_query, kernel_history_partitions,
-            history_partition_phase_partial, out);
+            history_partition_phase_partial, transform_mode, out);
 
         EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
             query, key, value,
@@ -1521,7 +1524,7 @@ at::Tensor tq_fused_kv_update_attention_decode(
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
             pretransformed_query, kernel_history_partitions,
-            history_partition_phase_reduce, out);
+            history_partition_phase_reduce, transform_mode, out);
     } else {
         EXEC_NPU_CMD(aclnnTqFusedKvUpdateAttentionDecode,
             query, key, value,
@@ -1534,7 +1537,7 @@ at::Tensor tq_fused_kv_update_attention_decode(
             k_total_bits, v_bits, head_dim, scale, max_seq_len,
             score_tile_len, grouped_q, skip_cache_update, debug_mode,
             pretransformed_query, kernel_history_partitions,
-            history_partition_phase_none, out);
+            history_partition_phase_none, transform_mode, out);
     }
 
     return out;
@@ -1956,7 +1959,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int k_total_bits, int v_bits, int head_dim, "
         "float scale, int max_seq_len, int score_tile_len, "
         "int grouped_q, int skip_cache_update, int debug_mode, "
-        "int pretransformed_query, int history_partitions) -> Tensor"
+        "int pretransformed_query, int history_partitions, "
+        "int transform_mode) -> Tensor"
     );
     ops.impl("tq_fused_kv_update_attention_decode", torch::kPrivateUse1,
              &vllm_ascend::tq_fused_kv_update_attention_decode);

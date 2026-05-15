@@ -27,6 +27,7 @@ struct TqFusedKvUpdateAttentionDecodeTilingData {
     uint32_t pretransformedQuery;
     uint32_t historyPartitions;
     uint32_t historyPartitionPhase;
+    uint32_t transformMode;
     uint32_t headDim;
     uint32_t kPackedCols;
     uint32_t kQjlCols;
@@ -107,6 +108,7 @@ public:
         pretransformedQuery_ = tiling->pretransformedQuery;
         historyPartitions_ = tiling->historyPartitions;
         historyPartitionPhase_ = tiling->historyPartitionPhase;
+        transformMode_ = tiling->transformMode;
         headDim_ = tiling->headDim;
         kPackedCols_ = tiling->kPackedCols;
         kQjlCols_ = tiling->kQjlCols;
@@ -226,6 +228,137 @@ public:
         return sum;
     }
 
+    __aicore__ inline bool UseHadamardTransform()
+    {
+        return transformMode_ == 1U && headDim_ > 0U && headDim_ <= 256U
+            && ((headDim_ & (headDim_ - 1U)) == 0U);
+    }
+
+    __aicore__ inline float MatrixSign(
+        GlobalTensor<float>& matrix,
+        uint32_t row)
+    {
+        return matrix.GetValue(static_cast<uint64_t>(row) * headDim_) >= 0.0F
+            ? 1.0F
+            : -1.0F;
+    }
+
+    __aicore__ inline void FwhtCurrentRot()
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = base + off;
+                    uint32_t j = i + len;
+                    float a = kResidual_[i];
+                    float b = kResidual_[j];
+                    kResidual_[i] = a + b;
+                    kResidual_[j] = a - b;
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void FwhtQueryRot()
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = base + off;
+                    uint32_t j = i + len;
+                    float a = qRot_[i];
+                    float b = qRot_[j];
+                    qRot_[i] = a + b;
+                    qRot_[j] = a - b;
+                }
+            }
+        }
+    }
+
+    __aicore__ inline void FwhtQueryRotGroup(uint32_t groupBase)
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = groupBase + base + off;
+                    uint32_t j = i + len;
+                    float a = qRotGroup_[i];
+                    float b = qRotGroup_[j];
+                    qRotGroup_[i] = a + b;
+                    qRotGroup_[j] = a - b;
+                }
+            }
+        }
+    }
+
+    __aicore__ inline float HadamardScale()
+    {
+        if (headDim_ == 1U) {
+            return 1.0F;
+        }
+        if (headDim_ == 2U) {
+            return 0.7071067811865475F;
+        }
+        if (headDim_ == 4U) {
+            return 0.5F;
+        }
+        if (headDim_ == 8U) {
+            return 0.3535533905932738F;
+        }
+        if (headDim_ == 16U) {
+            return 0.25F;
+        }
+        if (headDim_ == 32U) {
+            return 0.1767766952966369F;
+        }
+        if (headDim_ == 64U) {
+            return 0.125F;
+        }
+        if (headDim_ == 128U) {
+            return 0.08838834764831845F;
+        }
+        return 0.0625F;
+    }
+
+    __aicore__ inline void PrepareCurrentRot(
+        GlobalTensor<float>& rotation,
+        float invNorm)
+    {
+        if (UseHadamardTransform()) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                kResidual_[d] = currentVec_[d] * invNorm * MatrixSign(rotation, d);
+            }
+            FwhtCurrentRot();
+            float scale = HadamardScale();
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                kResidual_[d] *= scale;
+            }
+            return;
+        }
+
+        for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+            kResidual_[outDim] = CalcCurrentRotFromBuffer(rotation, outDim, invNorm);
+        }
+    }
+
+    __aicore__ inline void PrepareCurrentRotRange(
+        GlobalTensor<float>& rotation,
+        float invNorm,
+        uint32_t dimStart,
+        uint32_t dimEnd)
+    {
+        if (UseHadamardTransform()) {
+            PrepareCurrentRot(rotation, invNorm);
+            return;
+        }
+        for (uint32_t outDim = dimStart; outDim < dimEnd; ++outDim) {
+            kResidual_[outDim] = CalcCurrentRotFromBuffer(rotation, outDim, invNorm);
+        }
+    }
+
     __aicore__ inline void LoadSmallParams()
     {
         uint32_t kLevels = kStage1Bits_ < 4U ? (1U << kStage1Bits_) : 16U;
@@ -290,7 +423,6 @@ public:
     {
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
-        float residual[256];
 
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             idxPacked[col] = 0;
@@ -303,14 +435,15 @@ public:
         float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
+        PrepareCurrentRot(kRotationGm_, invNorm);
 
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
+            float xRot = kResidual_[d];
             uint32_t idx = KBoundaryIndex(xRot);
             PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
             float xHat = kCodebook_[idx];
-            residual[d] = xRot - xHat;
-            gammaSq += residual[d] * residual[d];
+            kResidual_[d] = xRot - xHat;
+            gammaSq += kResidual_[d] * kResidual_[d];
         }
 
         float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
@@ -319,7 +452,7 @@ public:
             for (uint32_t d = 0; d < headDim_; ++d) {
                 float p = kQjlProjTGm_.GetValue(
                     static_cast<uint64_t>(d) * headDim_ + j);
-                sum += residual[d] * p;
+                sum += kResidual_[d] * p;
             }
             PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
         }
@@ -359,8 +492,9 @@ public:
         float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
         float gammaSq = 0.0F;
+        PrepareCurrentRot(kRotationGm_, invNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcCurrentRotFromBuffer(kRotationGm_, d, invNorm);
+            float xRot = kResidual_[d];
             uint32_t idx = KBoundaryIndex(xRot);
             if (writeStage1) {
                 PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
@@ -434,14 +568,14 @@ public:
         LoadCurrentVector(valueGm_, b, kvHead);
         float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
+        PrepareCurrentRot(vRotationGm_, invNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
-            float xRot = CalcCurrentRotFromBuffer(vRotationGm_, d, invNorm);
             PackIndex(
                 packed,
                 vPackedCols_,
                 vBits_,
                 d,
-                VBoundaryIndex(xRot));
+                VBoundaryIndex(kResidual_[d]));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;
@@ -485,14 +619,14 @@ public:
         if (dimEnd > headDim_) {
             dimEnd = headDim_;
         }
+        PrepareCurrentRotRange(vRotationGm_, invNorm, dimStart, dimEnd);
         for (uint32_t d = dimStart; d < dimEnd; ++d) {
-            float xRot = CalcCurrentRotFromBuffer(vRotationGm_, d, invNorm);
             PackIndex(
                 packed,
                 vPackedCols_,
                 vBits_,
                 d,
-                VBoundaryIndex(xRot));
+                VBoundaryIndex(kResidual_[d]));
         }
 
         uint64_t packedBase = slotHead * vPackedCols_;
@@ -512,6 +646,27 @@ public:
             for (uint32_t d = 0; d < headDim_; ++d) {
                 qRot_[d] = kRotationGm_.GetValue(qBase + d);
                 qQjl_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
+        if (UseHadamardTransform()) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                float q = InputToFloat(queryGm_.GetValue(qBase + d));
+                qRot_[d] = q * MatrixSign(kRotationGm_, d);
+                qQjl_[d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float q = InputToFloat(queryGm_.GetValue(qBase + inDim));
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    qQjl_[outDim] +=
+                        q * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                }
+            }
+            FwhtQueryRot();
+            float rotScale = HadamardScale();
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                qRot_[d] *= rotScale;
             }
             return;
         }
@@ -544,6 +699,52 @@ public:
             for (uint32_t d = 0; d < 4U * headDim_; ++d) {
                 qRotGroup_[d] = kRotationGm_.GetValue(qBase + d);
                 qQjlGroup_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
+        if (UseHadamardTransform()) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                float sign = MatrixSign(kRotationGm_, d);
+                float query0 = InputToFloat(queryGm_.GetValue(qBase + d));
+                float query1 = InputToFloat(
+                    queryGm_.GetValue(qBase + q1Base + d));
+                float query2 = InputToFloat(
+                    queryGm_.GetValue(qBase + q2Base + d));
+                float query3 = InputToFloat(
+                    queryGm_.GetValue(qBase + q3Base + d));
+                qRotGroup_[d] = query0 * sign;
+                qRotGroup_[q1Base + d] = query1 * sign;
+                qRotGroup_[q2Base + d] = query2 * sign;
+                qRotGroup_[q3Base + d] = query3 * sign;
+                qQjlGroup_[d] = 0.0F;
+                qQjlGroup_[q1Base + d] = 0.0F;
+                qQjlGroup_[q2Base + d] = 0.0F;
+                qQjlGroup_[q3Base + d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float query0 = InputToFloat(queryGm_.GetValue(qBase + inDim));
+                float query1 = InputToFloat(
+                    queryGm_.GetValue(qBase + q1Base + inDim));
+                float query2 = InputToFloat(
+                    queryGm_.GetValue(qBase + q2Base + inDim));
+                float query3 = InputToFloat(
+                    queryGm_.GetValue(qBase + q3Base + inDim));
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    float qjl = kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                    qQjlGroup_[outDim] += query0 * qjl;
+                    qQjlGroup_[q1Base + outDim] += query1 * qjl;
+                    qQjlGroup_[q2Base + outDim] += query2 * qjl;
+                    qQjlGroup_[q3Base + outDim] += query3 * qjl;
+                }
+            }
+            FwhtQueryRotGroup(0U);
+            FwhtQueryRotGroup(q1Base);
+            FwhtQueryRotGroup(q2Base);
+            FwhtQueryRotGroup(q3Base);
+            float rotScale = HadamardScale();
+            for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+                qRotGroup_[d] *= rotScale;
             }
             return;
         }
@@ -1704,6 +1905,7 @@ private:
     uint32_t pretransformedQuery_{0};
     uint32_t historyPartitions_{1};
     uint32_t historyPartitionPhase_{0};
+    uint32_t transformMode_{0};
     uint32_t headDim_{0};
     uint32_t kPackedCols_{0};
     uint32_t kQjlCols_{0};

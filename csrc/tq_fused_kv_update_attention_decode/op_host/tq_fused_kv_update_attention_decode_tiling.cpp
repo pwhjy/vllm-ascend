@@ -42,6 +42,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* pretransformedQueryPtr = attr->GetAttrPointer<int64_t>(9);
     const int64_t* historyPartitionsPtr = attr->GetAttrPointer<int64_t>(10);
     const int64_t* historyPartitionPhasePtr = attr->GetAttrPointer<int64_t>(11);
+    const int64_t* transformModePtr = attr->GetAttrPointer<int64_t>(12);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -86,6 +87,14 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     if (historyPartitionPhase > 2U) {
         historyPartitionPhase = 0U;
     }
+    int64_t transformModeAttr =
+        transformModePtr != nullptr ? *transformModePtr : 0;
+    uint32_t transformMode = transformModeAttr == 1 ? 1U : 0U;
+    if (transformMode == 1U
+        && (headDim == 0U || (headDim & (headDim - 1U)) != 0U
+            || headDim > 256U)) {
+        transformMode = 0U;
+    }
     uint32_t qPerKv = numKvHeads == 0 ? 1U : numHeads / numKvHeads;
     if (qPerKv == 0U) {
         qPerKv = 1U;
@@ -129,6 +138,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_pretransformedQuery(pretransformedQueryAttr ? 1U : 0U);
     tiling.set_historyPartitions(historyPartitions);
     tiling.set_historyPartitionPhase(historyPartitionPhase);
+    tiling.set_transformMode(transformMode);
     tiling.set_headDim(headDim);
     tiling.set_kPackedCols(kPackedCols);
     tiling.set_kQjlCols(kQjlCols);

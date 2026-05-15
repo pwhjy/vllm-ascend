@@ -115,6 +115,7 @@ public:
         this->Attr("pretransformedQuery").AttrType(REQUIRED).Int(0);
         this->Attr("historyPartitions").AttrType(REQUIRED).Int(1);
         this->Attr("historyPartitionPhase").AttrType(REQUIRED).Int(0);
+        this->Attr("transformMode").AttrType(REQUIRED).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

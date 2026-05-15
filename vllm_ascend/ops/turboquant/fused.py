@@ -1895,6 +1895,7 @@ def tq_fused_decode_history_current_attention(
         debug_mode,
         1 if pretransform_query else 0,
         fused_decode_attention_m4_history_partitions(),
+        int(transform_mode),
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
