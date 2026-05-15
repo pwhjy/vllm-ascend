@@ -445,10 +445,17 @@ def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0") == "1"
 
 
-def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
+def fused_decode_attention_m4_split_cache_update_enabled(
+    transform_mode: int | None = None,
+) -> bool:
     """Run decode cache update as a separate custom op before M4 attention."""
 
-    return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "1") == "1"
+    configured = os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE")
+    if configured is not None:
+        return configured == "1"
+    if transform_mode is not None and int(transform_mode) != TQ_TRANSFORM_DENSE:
+        return False
+    return True
 
 
 def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
@@ -1751,7 +1758,9 @@ def tq_fused_decode_history_current_attention(
             "torch.ops._C_ascend.tq_fused_kv_update_attention_decode is unavailable"
         )
 
-    split_cache_update = fused_decode_attention_m4_split_cache_update_enabled()
+    split_cache_update = fused_decode_attention_m4_split_cache_update_enabled(
+        transform_mode
+    )
     if split_cache_update:
         tq_encode_kv_to_paged_cache(
             key,
