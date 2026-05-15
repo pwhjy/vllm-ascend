@@ -282,6 +282,23 @@ public:
         }
     }
 
+    __aicore__ inline void FwhtCurrentVec()
+    {
+        for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
+            uint32_t step = len << 1U;
+            for (uint32_t base = 0U; base < headDim_; base += step) {
+                for (uint32_t off = 0U; off < len; ++off) {
+                    uint32_t i = base + off;
+                    uint32_t j = i + len;
+                    float a = currentVec_[i];
+                    float b = currentVec_[j];
+                    currentVec_[i] = a + b;
+                    currentVec_[j] = a - b;
+                }
+            }
+        }
+    }
+
     __aicore__ inline void FwhtQueryRot()
     {
         for (uint32_t len = 1U; len < headDim_; len <<= 1U) {
@@ -1712,15 +1729,26 @@ public:
         uint64_t valueBase =
             (static_cast<uint64_t>(b) * numKvHeads_ + kvHead) * headDim_;
         float invSum = sum_ > 0.0F ? 1.0F / sum_ : 0.0F;
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            currentVec_[d] = 0.0F;
-        }
-        for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-            float acc = accRot_[inDim] * invSum;
-            uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
-            for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                currentVec_[outDim] +=
-                    acc * vRotationTGm_.GetValue(matrixBase + outDim);
+        if (UseHadamardTransform()) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                currentVec_[d] = accRot_[d] * invSum;
+            }
+            FwhtCurrentVec();
+            float rotScale = HadamardScale();
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                currentVec_[d] *= rotScale * MatrixSign(vRotationGm_, d);
+            }
+        } else {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                currentVec_[d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float acc = accRot_[inDim] * invSum;
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    currentVec_[outDim] +=
+                        acc * vRotationTGm_.GetValue(matrixBase + outDim);
+                }
             }
         }
         for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
