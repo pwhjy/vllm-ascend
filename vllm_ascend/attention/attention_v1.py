@@ -2281,7 +2281,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                         v_bits=int(layer.tq_v_stage1_bits),
                         head_dim=self.head_size,
                         scale=self.scale,
-                        output_dtype=None,
+                        output_dtype=output.dtype,
                         max_seq_len=attn_metadata.tq_decode_max_old_seq_len,
                         k_qjl_proj=layer._tq_k_qjl_proj,
                         transform_mode=tq_transform_mode,
