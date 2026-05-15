@@ -1448,6 +1448,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         if (
             getattr(layer, "tq_runtime_prepared", False)
             and hasattr(layer, "_tq_k_qjl_proj_t")
+            and hasattr(layer, "_tq_m4_query_pretransform_matrix")
             and hasattr(layer, "_tq_kv_mse_rotation")
             and hasattr(layer, "_tq_kv_mse_shared_boundary")
         ):
@@ -1465,6 +1466,10 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         layer._tq_k_qjl_proj_t = layer._tq_k_qjl_proj.transpose(0, 1).contiguous()
         layer._tq_k_qjl_query_matrix = (
             layer._tq_k_rot @ layer._tq_k_qjl_proj_t
+        ).contiguous()
+        layer._tq_m4_query_pretransform_matrix = torch.cat(
+            (layer._tq_k_rot, layer._tq_k_qjl_query_matrix),
+            dim=1,
         ).contiguous()
         if (
             layer._tq_k_rot.shape == layer._tq_v_rot.shape
@@ -2289,6 +2294,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
                             "turboquant_fused_kv_update_attention."
                             "decode.m4_attention"
                         ),
+                        k_query_pretransform_matrix=layer._tq_m4_query_pretransform_matrix,
                     )
                     output[:num_tokens] = m4_out
                     if profile_enabled:
