@@ -69,8 +69,14 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     if (debugMode > 9U) {
         debugMode = 9U;
     }
-    bool pretransformedQueryAttr =
-        pretransformedQueryPtr != nullptr && *pretransformedQueryPtr != 0;
+    int64_t pretransformedQueryAttr =
+        pretransformedQueryPtr != nullptr ? *pretransformedQueryPtr : 0;
+    uint32_t pretransformedQuery = pretransformedQueryAttr > 0
+        ? static_cast<uint32_t>(pretransformedQueryAttr)
+        : 0U;
+    if (pretransformedQuery > 2U) {
+        pretransformedQuery = 0U;
+    }
     int64_t historyPartitionsAttr =
         historyPartitionsPtr != nullptr ? *historyPartitionsPtr : 1;
     uint32_t historyPartitions = historyPartitionsAttr > 1
@@ -135,7 +141,7 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     tiling.set_groupedQ(groupedQ ? 1U : 0U);
     tiling.set_skipCacheUpdate(skipCacheUpdateAttr ? 1U : 0U);
     tiling.set_debugMode(debugMode);
-    tiling.set_pretransformedQuery(pretransformedQueryAttr ? 1U : 0U);
+    tiling.set_pretransformedQuery(pretransformedQuery);
     tiling.set_historyPartitions(historyPartitions);
     tiling.set_historyPartitionPhase(historyPartitionPhase);
     tiling.set_transformMode(transformMode);

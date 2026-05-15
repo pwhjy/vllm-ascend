@@ -464,6 +464,12 @@ def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
 
 
+def fused_decode_attention_m4_pretransform_qjl_enabled() -> bool:
+    """Precompute only the M4 QJL query transform before the custom op."""
+
+    return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QJL", "0") == "1"
+
+
 def fused_decode_attention_m4_force_fp32_input() -> bool:
     """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
 
@@ -1851,6 +1857,13 @@ def tq_fused_decode_history_current_attention(
         and fused_decode_attention_m4_pretransform_query_enabled()
         and debug_mode not in (6, 8, 9)
     )
+    pretransform_qjl = (
+        not split_cache_update
+        and int(transform_mode) != TQ_TRANSFORM_DENSE
+        and fused_decode_attention_m4_pretransform_qjl_enabled()
+        and debug_mode not in (6, 8, 9)
+    )
+    pretransform_mode = 0
     if pretransform_query:
         query_transform_f = (
             query_arg if query_arg.dtype == torch.float32
@@ -1868,6 +1881,24 @@ def tq_fused_decode_history_current_attention(
             t_stage = time.perf_counter()
         k_rotation_arg = q_rot_f
         k_qjl_query_matrix_arg = q_qjl_f
+        pretransform_mode = 1
+    elif pretransform_qjl:
+        query_transform_f = (
+            query_arg if query_arg.dtype == torch.float32
+            else query.to(torch.float32).contiguous()
+        )
+        q_qjl_f = torch.matmul(query_transform_f, k_qjl_query_matrix_f).contiguous()
+        if stage_profile:
+            _maybe_sync_for_profile(q_qjl_f)
+            _record_tq_profile(
+                f"{profile_prefix}.pretransform_qjl",
+                (time.perf_counter() - t_stage) * 1000.0,
+                vectors=int(query.shape[0]),
+            )
+            t_stage = time.perf_counter()
+        k_rotation_arg = k_rotation_f
+        k_qjl_query_matrix_arg = q_qjl_f
+        pretransform_mode = 2
     else:
         k_rotation_arg = k_rotation_f
         k_qjl_query_matrix_arg = k_qjl_query_matrix_f
@@ -1902,7 +1933,7 @@ def tq_fused_decode_history_current_attention(
         1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
         1 if split_cache_update else 0,
         debug_mode,
-        1 if pretransform_query else 0,
+        pretransform_mode,
         fused_decode_attention_m4_history_partitions(),
         int(transform_mode),
     )
@@ -2419,6 +2450,7 @@ __all__ = [
     "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",
     "fused_decode_attention_m4_history_partitions",
+    "fused_decode_attention_m4_pretransform_qjl_enabled",
     "fused_decode_attention_m4_pretransform_query_enabled",
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_split_cache_update_enabled",

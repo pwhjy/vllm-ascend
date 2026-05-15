@@ -681,10 +681,39 @@ public:
     {
         uint64_t qBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
-        if (pretransformedQuery_ != 0U) {
+        if (pretransformedQuery_ == 1U) {
             for (uint32_t d = 0; d < headDim_; ++d) {
                 qRot_[d] = kRotationGm_.GetValue(qBase + d);
                 qQjl_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
+        if (pretransformedQuery_ == 2U) {
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                qQjl_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            if (UseHadamardTransform()) {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    float q = InputToFloat(queryGm_.GetValue(qBase + d));
+                    qRot_[d] = q * MatrixSign(kRotationGm_, d);
+                }
+                FwhtQueryRot();
+                float rotScale = HadamardScale();
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    qRot_[d] *= rotScale;
+                }
+                return;
+            }
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                qRot_[d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float q = InputToFloat(queryGm_.GetValue(qBase + inDim));
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    qRot_[outDim] +=
+                        q * kRotationGm_.GetValue(matrixBase + outDim);
+                }
             }
             return;
         }
@@ -734,10 +763,61 @@ public:
         uint32_t q1Base = headDim_;
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
-        if (pretransformedQuery_ != 0U) {
+        if (pretransformedQuery_ == 1U) {
             for (uint32_t d = 0; d < 4U * headDim_; ++d) {
                 qRotGroup_[d] = kRotationGm_.GetValue(qBase + d);
                 qQjlGroup_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            return;
+        }
+        if (pretransformedQuery_ == 2U) {
+            for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+                qQjlGroup_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+            }
+            if (UseHadamardTransform()) {
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    float sign = MatrixSign(kRotationGm_, d);
+                    float query0 = InputToFloat(queryGm_.GetValue(qBase + d));
+                    float query1 = InputToFloat(
+                        queryGm_.GetValue(qBase + q1Base + d));
+                    float query2 = InputToFloat(
+                        queryGm_.GetValue(qBase + q2Base + d));
+                    float query3 = InputToFloat(
+                        queryGm_.GetValue(qBase + q3Base + d));
+                    qRotGroup_[d] = query0 * sign;
+                    qRotGroup_[q1Base + d] = query1 * sign;
+                    qRotGroup_[q2Base + d] = query2 * sign;
+                    qRotGroup_[q3Base + d] = query3 * sign;
+                }
+                FwhtQueryRotGroup(0U);
+                FwhtQueryRotGroup(q1Base);
+                FwhtQueryRotGroup(q2Base);
+                FwhtQueryRotGroup(q3Base);
+                float rotScale = HadamardScale();
+                for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+                    qRotGroup_[d] *= rotScale;
+                }
+                return;
+            }
+            for (uint32_t d = 0; d < 4U * headDim_; ++d) {
+                qRotGroup_[d] = 0.0F;
+            }
+            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                float query0 = InputToFloat(queryGm_.GetValue(qBase + inDim));
+                float query1 = InputToFloat(
+                    queryGm_.GetValue(qBase + q1Base + inDim));
+                float query2 = InputToFloat(
+                    queryGm_.GetValue(qBase + q2Base + inDim));
+                float query3 = InputToFloat(
+                    queryGm_.GetValue(qBase + q3Base + inDim));
+                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
+                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                    float rot = kRotationGm_.GetValue(matrixBase + outDim);
+                    qRotGroup_[outDim] += query0 * rot;
+                    qRotGroup_[q1Base + outDim] += query1 * rot;
+                    qRotGroup_[q2Base + outDim] += query2 * rot;
+                    qRotGroup_[q3Base + outDim] += query3 * rot;
+                }
             }
             return;
         }
