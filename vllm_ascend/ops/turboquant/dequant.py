@@ -44,69 +44,101 @@ from vllm_ascend.quantization.methods.turboquant_runtime import (
 # Environment gates
 # ---------------------------------------------------------------------------
 
+_ENV_BOOL_CACHE: dict[tuple[str, str], bool] = {}
+_ENV_INT_CACHE: dict[tuple[str, str], int] = {}
+
+
+def _env_bool(name: str, default: str) -> bool:
+    key = (name, default)
+    cached = _ENV_BOOL_CACHE.get(key)
+    if cached is None:
+        cached = os.getenv(name, default) == "1"
+        _ENV_BOOL_CACHE[key] = cached
+    return cached
+
+
+def _env_int(name: str, default: str) -> int:
+    key = (name, default)
+    cached = _ENV_INT_CACHE.get(key)
+    if cached is None:
+        try:
+            cached = int(os.getenv(name, default))
+        except ValueError:
+            cached = int(default)
+        _ENV_INT_CACHE[key] = cached
+    return cached
+
+
+def clear_turboquant_dequant_env_cache() -> None:
+    """Clear cached TurboQuant dequant environment flags for tests."""
+
+    _ENV_BOOL_CACHE.clear()
+    _ENV_INT_CACHE.clear()
+
+
 def custom_dequant_enabled() -> bool:
-    return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "0") == "1"
+    return _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_DEQUANT", "0")
 
 
 def prod_custom_dequant_enabled() -> bool:
     return (
         custom_dequant_enabled()
-        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT", "0") == "1"
+        and _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_PROD_DEQUANT", "0")
     )
 
 
 def k_score_custom_enabled() -> bool:
     return (
         custom_dequant_enabled()
-        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE", "0") == "1"
+        and _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_K_SCORE", "0")
     )
 
 
 def fused_attention_custom_enabled() -> bool:
     return (
         custom_dequant_enabled()
-        and os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION", "0") == "1"
+        and _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_ATTENTION", "0")
     )
 
 
 def custom_strict_enabled() -> bool:
-    return os.getenv("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0") == "1"
+    return _env_bool("VLLM_ASCEND_TQ_CUSTOM_STRICT", "0")
 
 
 def debug_compare_enabled() -> bool:
-    return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0") == "1"
+    return _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE", "0")
 
 
 def attention_debug_compare_enabled() -> bool:
     return (
         debug_compare_enabled()
-        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION", "0") == "1"
+        or _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE_ATTENTION", "0")
     )
 
 
 def dequant_debug_compare_enabled() -> bool:
     return (
         debug_compare_enabled()
-        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT", "0") == "1"
+        or _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE_DEQUANT", "0")
     )
 
 
 def k_score_debug_compare_enabled() -> bool:
     return (
         debug_compare_enabled()
-        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE", "0") == "1"
+        or _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE_K_SCORE", "0")
     )
 
 
 def prod_dequant_debug_compare_enabled() -> bool:
     return (
         debug_compare_enabled()
-        or os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT", "0") == "1"
+        or _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE_PROD_DEQUANT", "0")
     )
 
 
 def token_map_cache_size() -> int:
-    return max(0, int(os.getenv("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32")))
+    return max(0, _env_int("VLLM_ASCEND_TQ_TOKEN_MAP_CACHE_SIZE", "32"))
 
 
 def fused_attention_score_tile_len() -> int:

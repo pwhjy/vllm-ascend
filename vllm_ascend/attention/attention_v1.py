@@ -72,13 +72,18 @@ from vllm_ascend.ops.turboquant.dequant import (
 from vllm_ascend.ops.turboquant.fused import (
     compressed_decode_current_enabled,
     decode_compressed_full_cache_enabled,
+    encode_cache_update_structured_fast_enabled,
+    fused_decode_attention_m4_structured_fast_enabled,
+    fused_decode_dense_fia_enabled,
     fused_decode_attention_m4_enabled,
+    fused_prefill_dense_fia_enabled,
     fused_kv_update_attention_enabled,
     tq_decode_history_to_dense,
     tq_encode_kv_to_paged_cache,
     tq_fused_decode_history_current_attention,
     tq_fused_kv_update_attention,
     tq_prod_mse_history_current_decode_attention,
+    turboquant_profile_enabled,
 )
 from vllm_ascend.quantization.methods.turboquant_layout import TurboQuantAttentionSpec
 from vllm_ascend.quantization.methods.turboquant_runtime import (
@@ -2138,7 +2143,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
-        profile_enabled = os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
+        profile_enabled = turboquant_profile_enabled()
         if profile_enabled:
             _maybe_sync_for_profile(query, key, value, attn_metadata.block_tables)
             t0 = time.perf_counter()
@@ -2199,7 +2204,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
 
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA", "1") == "1"
+            and fused_decode_dense_fia_enabled()
         ):
             current_lens_list = attn_metadata.tq_decode_current_lens_list
             old_seq_lens_list = attn_metadata.tq_decode_old_seq_lens_list
@@ -2229,8 +2234,8 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             tq_transform_mode = int(getattr(layer, "tq_transform_mode", 0))
             structured_safe_path = (
                 tq_transform_mode != 0
-                and os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") != "1"
-                and os.getenv("VLLM_ASCEND_TQ_M4_STRUCTURED_FAST", "0") != "1"
+                and not encode_cache_update_structured_fast_enabled()
+                and not fused_decode_attention_m4_structured_fast_enabled()
             )
 
             if (
@@ -2544,7 +2549,7 @@ class AscendTurboQuantAttentionBackendImpl(AscendAttentionBackendImpl):
             return output
 
         if (
-            os.getenv("VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA", "1") == "1"
+            fused_prefill_dense_fia_enabled()
             and attn_metadata.attn_state
             in {
                 AscendAttentionState.ChunkedPrefill,
