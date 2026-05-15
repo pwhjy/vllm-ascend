@@ -457,12 +457,6 @@ def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
 
 
-def fused_decode_attention_m4_combine_query_pretransform_enabled() -> bool:
-    """Use one wider matmul for the two M4 query pretransforms."""
-
-    return os.getenv("VLLM_ASCEND_TQ_M4_COMBINE_QUERY_PRETRANSFORM", "0") == "1"
-
-
 def fused_decode_attention_m4_force_fp32_input() -> bool:
     """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
 
@@ -1716,7 +1710,6 @@ def tq_fused_decode_history_current_attention(
     max_seq_len: int | None = None,
     profile_prefix: str | None = None,
     k_qjl_proj: torch.Tensor | None = None,
-    k_query_pretransform_matrix: torch.Tensor | None = None,
     transform_mode: int = TQ_TRANSFORM_DENSE,
 ) -> torch.Tensor:
     """M4 decode-only custom cache update + attention."""
@@ -1753,8 +1746,6 @@ def tq_fused_decode_history_current_attention(
         k_codebook,
         v_codebook,
     )
-    if k_query_pretransform_matrix is not None:
-        tensors = tensors + (k_query_pretransform_matrix,)
     if not _custom_op_available("tq_fused_kv_update_attention_decode", *tensors):
         raise RuntimeError(
             "torch.ops._C_ascend.tq_fused_kv_update_attention_decode is unavailable"
@@ -1856,21 +1847,8 @@ def tq_fused_decode_history_current_attention(
             query_arg if query_arg.dtype == torch.float32
             else query.to(torch.float32).contiguous()
         )
-        combine_query_pretransform = (
-            k_query_pretransform_matrix is not None
-            and fused_decode_attention_m4_combine_query_pretransform_enabled()
-        )
-        if combine_query_pretransform:
-            head_dim_i = int(head_dim)
-            query_pretransform_f = torch.matmul(
-                query_transform_f,
-                k_query_pretransform_matrix.to(torch.float32).contiguous(),
-            )
-            q_rot_f = query_pretransform_f[..., :head_dim_i].contiguous()
-            q_qjl_f = query_pretransform_f[..., head_dim_i:].contiguous()
-        else:
-            q_rot_f = torch.matmul(query_transform_f, k_rotation_f).contiguous()
-            q_qjl_f = torch.matmul(query_transform_f, k_qjl_query_matrix_f).contiguous()
+        q_rot_f = torch.matmul(query_transform_f, k_rotation_f).contiguous()
+        q_qjl_f = torch.matmul(query_transform_f, k_qjl_query_matrix_f).contiguous()
         if stage_profile:
             _maybe_sync_for_profile(q_rot_f, q_qjl_f)
             _record_tq_profile(
