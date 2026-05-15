@@ -48,65 +48,22 @@ from .dequant import (
 )
 
 
-_ENV_BOOL_CACHE: dict[tuple[str, str], bool] = {}
-_ENV_INT_CACHE: dict[tuple[str, str, int | None], int] = {}
-
-
-def _env_bool(name: str, default: str) -> bool:
-    key = (name, default)
-    cached = _ENV_BOOL_CACHE.get(key)
-    if cached is None:
-        cached = os.getenv(name, default) == "1"
-        _ENV_BOOL_CACHE[key] = cached
-    return cached
-
-
-def _env_int(
-    name: str,
-    default: str,
-    *,
-    invalid_default: int | None = None,
-) -> int:
-    key = (name, default, invalid_default)
-    cached = _ENV_INT_CACHE.get(key)
-    if cached is None:
-        try:
-            cached = int(os.getenv(name, default))
-        except ValueError:
-            cached = int(default) if invalid_default is None else invalid_default
-        _ENV_INT_CACHE[key] = cached
-    return cached
-
-
-def clear_turboquant_env_cache() -> None:
-    """Clear cached TurboQuant environment flags for tests."""
-
-    _ENV_BOOL_CACHE.clear()
-    _ENV_INT_CACHE.clear()
-
-
-def turboquant_profile_enabled() -> bool:
-    """Return whether TurboQuant profiling is enabled."""
-
-    return _env_bool("VLLM_ASCEND_TQ_PROFILE", "0")
-
-
 def fused_kv_update_attention_enabled() -> bool:
     """Enable the final-architecture Python path in attention_v1."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_FUSED_KV_UPDATE_ATTENTION", "0") == "1"
 
 
 def fused_kv_update_attention_custom_enabled() -> bool:
     """Try the future Ascend C unified op before the reference path."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_FUSED_KV_UPDATE_ATTENTION", "0") == "1"
 
 
 def encode_cache_update_custom_enabled() -> bool:
     """Try the Phase-A Ascend C cache-update op before the reference path."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_CUSTOM_ENCODE_CACHE_UPDATE", "0") == "1"
 
 
 def encode_cache_update_stage_profile_enabled() -> bool:
@@ -116,31 +73,31 @@ def encode_cache_update_stage_profile_enabled() -> bool:
     throughput measurement.
     """
 
-    return _env_bool("VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES", "0")
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_ENCODE_STAGES", "0") == "1"
 
 
 def encode_cache_update_force_fp32_input() -> bool:
     """Force legacy fp32 input materialization before the custom encode op."""
 
-    return _env_bool("VLLM_ASCEND_TQ_ENCODE_FORCE_FP32_INPUT", "0")
+    return os.getenv("VLLM_ASCEND_TQ_ENCODE_FORCE_FP32_INPUT", "0") == "1"
 
 
 def encode_cache_update_structured_fast_enabled() -> bool:
     """Use custom encode ops for structured transforms."""
 
-    return _env_bool("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0")
+    return os.getenv("VLLM_ASCEND_TQ_ENCODE_STRUCTURED_FAST", "0") == "1"
 
 
 def encode_cache_update_debug_compare_enabled() -> bool:
     """Compare custom encode cache writes against the Python reference."""
 
-    return _env_bool("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0")
+    return os.getenv("VLLM_ASCEND_TQ_DEBUG_COMPARE_ENCODE", "0") == "1"
 
 
 def encode_cache_update_debug_dump_enabled() -> bool:
     """Dump custom encode cache-write summaries before the reference compare."""
 
-    return _env_bool("VLLM_ASCEND_TQ_DEBUG_DUMP_ENCODE_CACHE", "0")
+    return os.getenv("VLLM_ASCEND_TQ_DEBUG_DUMP_ENCODE_CACHE", "0") == "1"
 
 
 def _sync_npu_tensors_for_debug(*objs) -> None:
@@ -428,31 +385,31 @@ def _debug_compare_encode_cache_update(
 def combined_kv_mse_encode_enabled() -> bool:
     """Combine K stage1 MSE and V MSE launches in the NPU fallback path."""
 
-    return _env_bool("VLLM_ASCEND_TQ_COMBINE_KV_MSE_ENCODE", "1")
+    return os.getenv("VLLM_ASCEND_TQ_COMBINE_KV_MSE_ENCODE", "1") == "1"
 
 
 def compressed_decode_current_enabled() -> bool:
     """Use compressed-history scores plus dense-current V for decode."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CURRENT", "0") == "1"
 
 
 def fused_decode_attention_m4_enabled() -> bool:
     """Use the M4 decode-only custom attention kernel after staged cache update."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_FUSED_DECODE_ATTENTION_M4", "0") == "1"
 
 
 def fused_decode_attention_m4_shadow_profile_enabled() -> bool:
     """Run the decomposed reference path only to profile M4 decode stages."""
 
-    return _env_bool("VLLM_ASCEND_TQ_PROFILE_M4_SHADOW", "0")
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_M4_SHADOW", "0") == "1"
 
 
 def fused_decode_attention_m4_stage_profile_enabled() -> bool:
     """Record synchronized sub-stage timings around the M4 custom op."""
 
-    return _env_bool("VLLM_ASCEND_TQ_PROFILE_M4_STAGES", "0")
+    return os.getenv("VLLM_ASCEND_TQ_PROFILE_M4_STAGES", "0") == "1"
 
 
 def fused_decode_attention_m4_score_tile_len() -> int:
@@ -461,11 +418,10 @@ def fused_decode_attention_m4_score_tile_len() -> int:
     Set ``VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN=0`` to use the scalar online path.
     """
 
-    tile_len = _env_int(
-        "VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN",
-        "64",
-        invalid_default=0,
-    )
+    try:
+        tile_len = int(os.getenv("VLLM_ASCEND_TQ_M4_SCORE_TILE_LEN", "64"))
+    except ValueError:
+        tile_len = 0
     if tile_len <= 0:
         return 0
     return min(64, max(1, tile_len))
@@ -474,7 +430,10 @@ def fused_decode_attention_m4_score_tile_len() -> int:
 def fused_decode_attention_m4_history_partitions() -> int:
     """Number of independent history chunks for M4 decode partial softmax."""
 
-    partitions = _env_int("VLLM_ASCEND_TQ_M4_HISTORY_PARTITIONS", "1")
+    try:
+        partitions = int(os.getenv("VLLM_ASCEND_TQ_M4_HISTORY_PARTITIONS", "1"))
+    except ValueError:
+        partitions = 1
     if partitions <= 1:
         return 1
     return min(2, partitions)
@@ -483,56 +442,44 @@ def fused_decode_attention_m4_history_partitions() -> int:
 def fused_decode_attention_m4_grouped_q_enabled() -> bool:
     """Process all Q heads that share a KV head in one M4 decode task."""
 
-    return _env_bool("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0")
+    return os.getenv("VLLM_ASCEND_TQ_M4_GROUPED_Q", "0") == "1"
 
 
 def fused_decode_attention_m4_split_cache_update_enabled() -> bool:
     """Run decode cache update as a separate custom op before M4 attention."""
 
-    return _env_bool("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "1")
+    return os.getenv("VLLM_ASCEND_TQ_M4_SPLIT_CACHE_UPDATE", "1") == "1"
 
 
 def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     """Precompute M4 query transforms with NPU matmul before the custom op."""
 
-    return _env_bool("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1")
+    return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
 
 
 def fused_decode_attention_m4_force_fp32_input() -> bool:
     """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
 
-    return _env_bool("VLLM_ASCEND_TQ_M4_FORCE_FP32_INPUT", "0")
-
-
-def fused_decode_dense_fia_enabled() -> bool:
-    """Use fused dense FIA after TurboQuant decode cache update."""
-
-    return _env_bool("VLLM_ASCEND_TQ_USE_FUSED_DECODE_DENSE_FIA", "1")
-
-
-def fused_prefill_dense_fia_enabled() -> bool:
-    """Use fused dense FIA after TurboQuant prefill cache update."""
-
-    return _env_bool("VLLM_ASCEND_TQ_USE_FUSED_PREFILL_DENSE_FIA", "1")
-
-
-def fused_decode_attention_m4_structured_fast_enabled() -> bool:
-    """Allow the M4 decode op on structured TurboQuant transforms."""
-
-    return _env_bool("VLLM_ASCEND_TQ_M4_STRUCTURED_FAST", "0")
+    return os.getenv("VLLM_ASCEND_TQ_M4_FORCE_FP32_INPUT", "0") == "1"
 
 
 def encode_cache_update_debug_mode() -> int:
     """Diagnostic mode for decomposing the fused K/V encode custom op."""
 
-    mode = _env_int("VLLM_ASCEND_TQ_ENCODE_DEBUG_MODE", "0")
+    try:
+        mode = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_DEBUG_MODE", "0"))
+    except ValueError:
+        mode = 0
     return min(9, max(0, mode))
 
 
 def encode_cache_update_v_partitions() -> int:
     """V encode task split count for the fused K/V encode custom op."""
 
-    partitions = _env_int("VLLM_ASCEND_TQ_ENCODE_V_PARTITIONS", "1")
+    try:
+        partitions = int(os.getenv("VLLM_ASCEND_TQ_ENCODE_V_PARTITIONS", "1"))
+    except ValueError:
+        partitions = 1
     if partitions <= 1:
         return 1
     if partitions <= 2:
@@ -550,14 +497,20 @@ def fused_decode_attention_m4_debug_mode() -> int:
     9 = current score + output store without query transform.
     """
 
-    mode = _env_int("VLLM_ASCEND_TQ_M4_DEBUG_MODE", "0")
+    try:
+        mode = int(os.getenv("VLLM_ASCEND_TQ_M4_DEBUG_MODE", "0"))
+    except ValueError:
+        mode = 0
     return min(9, max(0, mode))
 
 
 def compressed_decode_current_custom_k_score_enabled() -> bool:
     """Use custom compressed K-score inside the decode-current path."""
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE", "0")
+    return (
+        os.getenv("VLLM_ASCEND_TQ_USE_COMPRESSED_DECODE_CUSTOM_K_SCORE", "0")
+        == "1"
+    )
 
 
 def decode_compressed_full_cache_enabled() -> bool:
@@ -568,7 +521,7 @@ def decode_compressed_full_cache_enabled() -> bool:
     from compressed cache instead of participating as dense K/V.
     """
 
-    return _env_bool("VLLM_ASCEND_TQ_USE_DECODE_COMPRESSED_FULL_CACHE", "0")
+    return os.getenv("VLLM_ASCEND_TQ_USE_DECODE_COMPRESSED_FULL_CACHE", "0") == "1"
 
 
 def _is_npu_tensor(tensor: torch.Tensor) -> bool:
@@ -1110,15 +1063,9 @@ def tq_encode_kv_to_paged_cache(
     ):
         custom_enabled = False
     if custom_enabled:
-        profile_enabled = turboquant_profile_enabled()
-        if profile_enabled:
-            _maybe_sync_for_profile(key, value, slot_mapping)
-            custom_t0 = time.perf_counter()
-        else:
-            custom_t0 = 0.0
-        stage_profile = (
-            profile_enabled and encode_cache_update_stage_profile_enabled()
-        )
+        _maybe_sync_for_profile(key, value, slot_mapping)
+        custom_t0 = time.perf_counter()
+        stage_profile = encode_cache_update_stage_profile_enabled()
 
         def _custom_stage_record(
             name: str,
@@ -1126,7 +1073,7 @@ def tq_encode_kv_to_paged_cache(
             *objs,
         ) -> float:
             if not stage_profile:
-                return 0.0
+                return time.perf_counter()
             _maybe_sync_for_profile(*objs)
             _record_tq_profile(
                 f"turboquant_encode_cache_update.{name}",
@@ -1162,7 +1109,7 @@ def tq_encode_kv_to_paged_cache(
 
         if not fallback_reasons:
             try:
-                stage_t0 = time.perf_counter() if stage_profile else 0.0
+                stage_t0 = time.perf_counter()
                 if encode_cache_update_force_fp32_input():
                     key_c = key.to(torch.float32).contiguous()
                     value_c = value.to(torch.float32).contiguous()
@@ -1271,14 +1218,13 @@ def tq_encode_kv_to_paged_cache(
                         kv_mse_shared_boundary=kv_mse_shared_boundary,
                         transform_mode=int(transform_mode),
                     )
-                if profile_enabled:
-                    if not stage_profile:
-                        _maybe_sync_for_profile(kv_cache)
-                    _record_tq_profile(
-                        "turboquant_encode_cache_update.total",
-                        (time.perf_counter() - custom_t0) * 1000.0,
-                        vectors=int(slot_mapping.numel()) * int(key.shape[1]),
-                    )
+                if not stage_profile:
+                    _maybe_sync_for_profile(kv_cache)
+                _record_tq_profile(
+                    "turboquant_encode_cache_update.total",
+                    (time.perf_counter() - custom_t0) * 1000.0,
+                    vectors=int(slot_mapping.numel()) * int(key.shape[1]),
+                )
                 return
             except Exception:
                 if (
@@ -1832,7 +1778,7 @@ def tq_fused_decode_history_current_attention(
 
     profile_enabled = (
         profile_prefix is not None
-        and turboquant_profile_enabled()
+        and os.getenv("VLLM_ASCEND_TQ_PROFILE", "0") == "1"
     )
     stage_profile = (
         profile_enabled and fused_decode_attention_m4_stage_profile_enabled()
@@ -2458,10 +2404,7 @@ __all__ = [
     "encode_cache_update_debug_mode",
     "encode_cache_update_force_fp32_input",
     "encode_cache_update_stage_profile_enabled",
-    "encode_cache_update_structured_fast_enabled",
     "encode_cache_update_v_partitions",
-    "fused_decode_attention_m4_structured_fast_enabled",
-    "fused_decode_dense_fia_enabled",
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",
     "fused_decode_attention_m4_grouped_q_enabled",
@@ -2470,10 +2413,8 @@ __all__ = [
     "fused_decode_attention_m4_score_tile_len",
     "fused_decode_attention_m4_split_cache_update_enabled",
     "fused_decode_attention_m4_stage_profile_enabled",
-    "fused_prefill_dense_fia_enabled",
     "fused_kv_update_attention_custom_enabled",
     "fused_kv_update_attention_enabled",
-    "turboquant_profile_enabled",
     "old_seq_lens_from_total",
     "tq_decode_history_to_dense",
     "tq_encode_kv_to_paged_cache",
