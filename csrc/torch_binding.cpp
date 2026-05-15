@@ -1431,15 +1431,9 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "cache num_kv_heads must match key");
     TORCH_CHECK(query.size(2) == head_dim && key.size(2) == head_dim,
                 "last dim must match head_dim");
-    if (pretransformed_query == 1) {
+    if (pretransformed_query != 0) {
         TORCH_CHECK(k_rotation.sizes() == query.sizes(),
                     "pretransformed q_rot must match query shape");
-        TORCH_CHECK(k_qjl_query_matrix.sizes() == query.sizes(),
-                    "pretransformed q_qjl must match query shape");
-    } else if (pretransformed_query == 2) {
-        TORCH_CHECK(k_rotation.size(0) == head_dim
-                        && k_rotation.size(1) == head_dim,
-                    "k_rotation must be [head_dim, head_dim]");
         TORCH_CHECK(k_qjl_query_matrix.sizes() == query.sizes(),
                     "pretransformed q_qjl must match query shape");
     } else {
@@ -1476,8 +1470,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "skip_cache_update must be 0 or 1");
     TORCH_CHECK(debug_mode >= 0 && debug_mode <= 9,
                 "debug_mode must be in [0, 9]");
-    TORCH_CHECK(pretransformed_query >= 0 && pretransformed_query <= 2,
-                "pretransformed_query must be in [0, 2]");
+    TORCH_CHECK(pretransformed_query == 0 || pretransformed_query == 1,
+                "pretransformed_query must be 0 or 1");
     TORCH_CHECK(history_partitions >= 1 && history_partitions <= 16,
                 "history_partitions must be in [1, 16]");
     TORCH_CHECK(transform_mode == 0 || transform_mode == 1,
