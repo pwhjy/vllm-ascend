@@ -188,6 +188,28 @@ public:
         return (value >> bitOff) & mask;
     }
 
+    template <uint32_t Bits>
+    __aicore__ inline uint32_t ExtractBitsConst(
+        GlobalTensor<uint8_t>& packed,
+        uint64_t packedBase,
+        uint32_t d)
+    {
+        uint32_t bitPos = d * Bits;
+        uint32_t byteId = bitPos >> 3;
+        uint32_t bitOff = bitPos & 7U;
+        uint16_t value = static_cast<uint16_t>(packed.GetValue(packedBase + byteId));
+        if constexpr (Bits == 3U) {
+            if (bitOff > 5U) {
+                uint16_t high = static_cast<uint16_t>(
+                    packed.GetValue(packedBase + byteId + 1U));
+                value = static_cast<uint16_t>(value | (high << 8));
+            }
+            return (value >> bitOff) & 7U;
+        } else {
+            return (value >> bitOff) & ((1U << Bits) - 1U);
+        }
+    }
+
     template <typename InT>
     __aicore__ inline void LoadCurrentVector(
         GlobalTensor<InT>& tensor,
@@ -783,7 +805,26 @@ public:
         }
     }
 
-    __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
+    template <uint32_t KBits>
+    __aicore__ inline float HistoryScoreByCacheIndexConst(uint64_t cacheIndex)
+    {
+        uint64_t idxBase = cacheIndex * kPackedCols_;
+        uint64_t qjlBase = cacheIndex * kQjlCols_;
+        float gamma = kGammaGm_.GetValue(cacheIndex);
+        float norm = kNormGm_.GetValue(cacheIndex);
+        float mseAcc = 0.0F;
+        float qjlAcc = 0.0F;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
+            uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
+            float sign = qjl != 0U ? 1.0F : -1.0F;
+            mseAcc += qRot_[d] * kCodebook_[idx];
+            qjlAcc += qQjl_[d] * sign;
+        }
+        return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
+    }
+
+    __aicore__ inline float HistoryScoreByCacheIndexGeneric(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
         uint64_t qjlBase = cacheIndex * kQjlCols_;
@@ -793,7 +834,7 @@ public:
         float qjlAcc = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
-            uint32_t qjl = ExtractBits(kPackedQjlGm_, qjlBase, d, 1U);
+            uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float sign = qjl != 0U ? 1.0F : -1.0F;
             mseAcc += qRot_[d] * kCodebook_[idx];
             qjlAcc += qQjl_[d] * sign;
@@ -801,7 +842,25 @@ public:
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
     }
 
-    __aicore__ inline void HistoryScoresGroupByCacheIndex(uint64_t cacheIndex)
+    __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
+    {
+        if (kStage1Bits_ == 3U) {
+            return HistoryScoreByCacheIndexConst<3U>(cacheIndex);
+        }
+        if (kStage1Bits_ == 4U) {
+            return HistoryScoreByCacheIndexConst<4U>(cacheIndex);
+        }
+        if (kStage1Bits_ == 2U) {
+            return HistoryScoreByCacheIndexConst<2U>(cacheIndex);
+        }
+        if (kStage1Bits_ == 1U) {
+            return HistoryScoreByCacheIndexConst<1U>(cacheIndex);
+        }
+        return HistoryScoreByCacheIndexGeneric(cacheIndex);
+    }
+
+    template <uint32_t KBits>
+    __aicore__ inline void HistoryScoresGroupByCacheIndexConst(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
         uint64_t qjlBase = cacheIndex * kQjlCols_;
@@ -819,8 +878,8 @@ public:
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
         for (uint32_t d = 0; d < headDim_; ++d) {
-            uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
-            uint32_t qjl = ExtractBits(kPackedQjlGm_, qjlBase, d, 1U);
+            uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
+            uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float code = kCodebook_[idx];
             float sign = qjl != 0U ? 1.0F : -1.0F;
             mseAcc0 += qRotGroup_[d] * code;
@@ -840,7 +899,80 @@ public:
         scoreGroup_[3] = (mseAcc3 + qjlScale * qjlAcc3) * outScale;
     }
 
-    __aicore__ inline void AccumulateHistoryVByCacheIndex(
+    __aicore__ inline void HistoryScoresGroupByCacheIndexGeneric(uint64_t cacheIndex)
+    {
+        uint64_t idxBase = cacheIndex * kPackedCols_;
+        uint64_t qjlBase = cacheIndex * kQjlCols_;
+        float gamma = kGammaGm_.GetValue(cacheIndex);
+        float norm = kNormGm_.GetValue(cacheIndex);
+        float mseAcc0 = 0.0F;
+        float mseAcc1 = 0.0F;
+        float mseAcc2 = 0.0F;
+        float mseAcc3 = 0.0F;
+        float qjlAcc0 = 0.0F;
+        float qjlAcc1 = 0.0F;
+        float qjlAcc2 = 0.0F;
+        float qjlAcc3 = 0.0F;
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
+            uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
+            float code = kCodebook_[idx];
+            float sign = qjl != 0U ? 1.0F : -1.0F;
+            mseAcc0 += qRotGroup_[d] * code;
+            mseAcc1 += qRotGroup_[q1Base + d] * code;
+            mseAcc2 += qRotGroup_[q2Base + d] * code;
+            mseAcc3 += qRotGroup_[q3Base + d] * code;
+            qjlAcc0 += qQjlGroup_[d] * sign;
+            qjlAcc1 += qQjlGroup_[q1Base + d] * sign;
+            qjlAcc2 += qQjlGroup_[q2Base + d] * sign;
+            qjlAcc3 += qQjlGroup_[q3Base + d] * sign;
+        }
+        float qjlScale = correction_ * gamma;
+        float outScale = norm * scale_;
+        scoreGroup_[0] = (mseAcc0 + qjlScale * qjlAcc0) * outScale;
+        scoreGroup_[1] = (mseAcc1 + qjlScale * qjlAcc1) * outScale;
+        scoreGroup_[2] = (mseAcc2 + qjlScale * qjlAcc2) * outScale;
+        scoreGroup_[3] = (mseAcc3 + qjlScale * qjlAcc3) * outScale;
+    }
+
+    __aicore__ inline void HistoryScoresGroupByCacheIndex(uint64_t cacheIndex)
+    {
+        if (kStage1Bits_ == 3U) {
+            HistoryScoresGroupByCacheIndexConst<3U>(cacheIndex);
+            return;
+        }
+        if (kStage1Bits_ == 4U) {
+            HistoryScoresGroupByCacheIndexConst<4U>(cacheIndex);
+            return;
+        }
+        if (kStage1Bits_ == 2U) {
+            HistoryScoresGroupByCacheIndexConst<2U>(cacheIndex);
+            return;
+        }
+        if (kStage1Bits_ == 1U) {
+            HistoryScoresGroupByCacheIndexConst<1U>(cacheIndex);
+            return;
+        }
+        HistoryScoresGroupByCacheIndexGeneric(cacheIndex);
+    }
+
+    template <uint32_t VBits>
+    __aicore__ inline void AccumulateHistoryVByCacheIndexConst(
+        uint64_t cacheIndex,
+        float weight)
+    {
+        uint64_t vBase = cacheIndex * vPackedCols_;
+        float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBitsConst<VBits>(vPackedIdxGm_, vBase, d);
+            accRot_[d] += scaledNorm * vCodebook_[idx];
+        }
+    }
+
+    __aicore__ inline void AccumulateHistoryVByCacheIndexGeneric(
         uint64_t cacheIndex,
         float weight)
     {
@@ -852,7 +984,50 @@ public:
         }
     }
 
-    __aicore__ inline void AccumulateHistoryVGroupByCacheIndex(uint64_t cacheIndex)
+    __aicore__ inline void AccumulateHistoryVByCacheIndex(
+        uint64_t cacheIndex,
+        float weight)
+    {
+        if (vBits_ == 4U) {
+            AccumulateHistoryVByCacheIndexConst<4U>(cacheIndex, weight);
+            return;
+        }
+        if (vBits_ == 3U) {
+            AccumulateHistoryVByCacheIndexConst<3U>(cacheIndex, weight);
+            return;
+        }
+        if (vBits_ == 2U) {
+            AccumulateHistoryVByCacheIndexConst<2U>(cacheIndex, weight);
+            return;
+        }
+        if (vBits_ == 1U) {
+            AccumulateHistoryVByCacheIndexConst<1U>(cacheIndex, weight);
+            return;
+        }
+        AccumulateHistoryVByCacheIndexGeneric(cacheIndex, weight);
+    }
+
+    template <uint32_t VBits>
+    __aicore__ inline void AccumulateHistoryVGroupByCacheIndexConst(
+        uint64_t cacheIndex)
+    {
+        uint64_t vBase = cacheIndex * vPackedCols_;
+        float norm = vNormGm_.GetValue(cacheIndex);
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        for (uint32_t d = 0; d < headDim_; ++d) {
+            uint32_t idx = ExtractBitsConst<VBits>(vPackedIdxGm_, vBase, d);
+            float v = vCodebook_[idx] * norm;
+            accRotGroup_[d] += weightGroup_[0] * v;
+            accRotGroup_[q1Base + d] += weightGroup_[1] * v;
+            accRotGroup_[q2Base + d] += weightGroup_[2] * v;
+            accRotGroup_[q3Base + d] += weightGroup_[3] * v;
+        }
+    }
+
+    __aicore__ inline void AccumulateHistoryVGroupByCacheIndexGeneric(
+        uint64_t cacheIndex)
     {
         uint64_t vBase = cacheIndex * vPackedCols_;
         float norm = vNormGm_.GetValue(cacheIndex);
@@ -867,6 +1042,28 @@ public:
             accRotGroup_[q2Base + d] += weightGroup_[2] * v;
             accRotGroup_[q3Base + d] += weightGroup_[3] * v;
         }
+    }
+
+    __aicore__ inline void AccumulateHistoryVGroupByCacheIndex(
+        uint64_t cacheIndex)
+    {
+        if (vBits_ == 4U) {
+            AccumulateHistoryVGroupByCacheIndexConst<4U>(cacheIndex);
+            return;
+        }
+        if (vBits_ == 3U) {
+            AccumulateHistoryVGroupByCacheIndexConst<3U>(cacheIndex);
+            return;
+        }
+        if (vBits_ == 2U) {
+            AccumulateHistoryVGroupByCacheIndexConst<2U>(cacheIndex);
+            return;
+        }
+        if (vBits_ == 1U) {
+            AccumulateHistoryVGroupByCacheIndexConst<1U>(cacheIndex);
+            return;
+        }
+        AccumulateHistoryVGroupByCacheIndexGeneric(cacheIndex);
     }
 
     __aicore__ inline float CurrentScore(uint32_t b, uint32_t head, uint32_t kvHead)
