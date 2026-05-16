@@ -1874,11 +1874,7 @@ public:
             } else if (groupHead == 0U) {
                 EncodeCurrentK(b, kvHead, slotHead);
             }
-            if (UseHadamardTransform()) {
-                if (groupHead == 0U) {
-                    EncodeCurrentV(b, kvHead, slotHead);
-                }
-            } else if (CanPartitionCurrentVEncode()) {
+            if (CanPartitionCurrentVEncode()) {
                 EncodeCurrentVRange(b, kvHead, slotHead, groupHead);
             } else if (groupHead == 0U) {
                 EncodeCurrentV(b, kvHead, slotHead);
