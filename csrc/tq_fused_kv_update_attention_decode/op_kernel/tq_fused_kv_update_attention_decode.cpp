@@ -364,13 +364,11 @@ public:
 
     __aicore__ inline void PrepareCurrentRot(
         GlobalTensor<float>& rotation,
-        float invNorm,
-        bool useValueRotation = false)
+        float invNorm)
     {
         if (UseHadamardTransform()) {
             for (uint32_t d = 0; d < headDim_; ++d) {
-                float sign = useValueRotation ? vSign_[d] : kSign_[d];
-                kResidual_[d] = currentVec_[d] * invNorm * sign;
+                kResidual_[d] = currentVec_[d] * invNorm * MatrixSign(rotation, d);
             }
             FwhtCurrentRot();
             float scale = HadamardScale();
@@ -389,11 +387,10 @@ public:
         GlobalTensor<float>& rotation,
         float invNorm,
         uint32_t dimStart,
-        uint32_t dimEnd,
-        bool useValueRotation = false)
+        uint32_t dimEnd)
     {
         if (UseHadamardTransform()) {
-            PrepareCurrentRot(rotation, invNorm, useValueRotation);
+            PrepareCurrentRot(rotation, invNorm);
             return;
         }
         for (uint32_t outDim = dimStart; outDim < dimEnd; ++outDim) {
@@ -416,12 +413,6 @@ public:
         }
         for (uint32_t i = 0; i + 1U < vLevels; ++i) {
             vBoundary_[i] = vBoundaryGm_.GetValue(i);
-        }
-        if (UseHadamardTransform()) {
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                kSign_[d] = MatrixSign(kRotationGm_, d);
-                vSign_[d] = MatrixSign(vRotationGm_, d);
-            }
         }
     }
 
@@ -616,7 +607,7 @@ public:
         LoadCurrentVector(valueGm_, b, kvHead);
         float norm = CalcCurrentNormFromBuffer();
         float invNorm = 1.0F / norm;
-        PrepareCurrentRot(vRotationGm_, invNorm, true);
+        PrepareCurrentRot(vRotationGm_, invNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
             PackIndex(
                 packed,
@@ -667,7 +658,7 @@ public:
         if (dimEnd > headDim_) {
             dimEnd = headDim_;
         }
-        PrepareCurrentRotRange(vRotationGm_, invNorm, dimStart, dimEnd, true);
+        PrepareCurrentRotRange(vRotationGm_, invNorm, dimStart, dimEnd);
         for (uint32_t d = dimStart; d < dimEnd; ++d) {
             PackIndex(
                 packed,
@@ -700,7 +691,7 @@ public:
         if (UseHadamardTransform()) {
             for (uint32_t d = 0; d < headDim_; ++d) {
                 float q = InputToFloat(queryGm_.GetValue(qBase + d));
-                qRot_[d] = q * kSign_[d];
+                qRot_[d] = q * MatrixSign(kRotationGm_, d);
                 qQjl_[d] = 0.0F;
             }
             for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
@@ -752,7 +743,7 @@ public:
         }
         if (UseHadamardTransform()) {
             for (uint32_t d = 0; d < headDim_; ++d) {
-                float sign = kSign_[d];
+                float sign = MatrixSign(kRotationGm_, d);
                 float query0 = InputToFloat(queryGm_.GetValue(qBase + d));
                 float query1 = InputToFloat(
                     queryGm_.GetValue(qBase + q1Base + d));
@@ -1745,7 +1736,7 @@ public:
             FwhtCurrentVec();
             float rotScale = HadamardScale();
             for (uint32_t d = 0; d < headDim_; ++d) {
-                currentVec_[d] *= rotScale * vSign_[d];
+                currentVec_[d] *= rotScale * MatrixSign(vRotationGm_, d);
             }
         } else {
             for (uint32_t d = 0; d < headDim_; ++d) {
@@ -2175,8 +2166,6 @@ private:
     float vCodebook_[16];
     float kBoundary_[16];
     float vBoundary_[16];
-    float kSign_[256];
-    float vSign_[256];
     float maxScore_{0.0F};
     float sum_{0.0F};
     float currentWeight_{0.0F};
