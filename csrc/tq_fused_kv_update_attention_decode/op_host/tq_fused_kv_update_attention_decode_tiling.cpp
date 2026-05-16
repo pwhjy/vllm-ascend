@@ -43,6 +43,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* historyPartitionsPtr = attr->GetAttrPointer<int64_t>(10);
     const int64_t* historyPartitionPhasePtr = attr->GetAttrPointer<int64_t>(11);
     const int64_t* transformModePtr = attr->GetAttrPointer<int64_t>(12);
+    const int64_t* disableQjlCorrectionPtr =
+        attr->GetAttrPointer<int64_t>(13);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -101,7 +103,11 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     }
     bool groupedQ = groupedQAttr && qPerKv == 4U;
     uint32_t kStage1Bits = kTotalBits > 0 ? kTotalBits - 1U : 0U;
-    float correction = headDim == 0U ? 0.0F : 1.2533141373155001F / headDim;
+    bool disableQjlCorrection =
+        disableQjlCorrectionPtr != nullptr && *disableQjlCorrectionPtr != 0;
+    float correction = headDim == 0U || disableQjlCorrection
+        ? 0.0F
+        : 1.2533141373155001F / headDim;
 
     auto platformInfo = platform_ascendc::PlatformAscendC(
         context->GetPlatformInfo());

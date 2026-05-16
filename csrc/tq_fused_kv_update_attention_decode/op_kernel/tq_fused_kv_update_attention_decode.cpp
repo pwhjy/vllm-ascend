@@ -256,6 +256,11 @@ public:
             && ((headDim_ & (headDim_ - 1U)) == 0U);
     }
 
+    __aicore__ inline bool UseQjlCorrection()
+    {
+        return correction_ != 0.0F;
+    }
+
     __aicore__ inline float MatrixSign(
         GlobalTensor<float>& matrix,
         uint32_t row)
@@ -462,12 +467,15 @@ public:
     {
         uint8_t idxPacked[128];
         uint8_t qjlPacked[64];
+        bool useQjl = UseQjlCorrection();
 
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             idxPacked[col] = 0;
         }
-        for (uint32_t col = 0; col < kQjlCols_; ++col) {
-            qjlPacked[col] = 0;
+        if (useQjl) {
+            for (uint32_t col = 0; col < kQjlCols_; ++col) {
+                qjlPacked[col] = 0;
+            }
         }
 
         LoadCurrentVector(keyGm_, b, kvHead);
@@ -482,29 +490,33 @@ public:
             PackIndex(idxPacked, kPackedCols_, kStage1Bits_, d, idx);
             float xHat = kCodebook_[idx];
             kResidual_[d] = xRot - xHat;
-            gammaSq += kResidual_[d] * kResidual_[d];
+            if (useQjl) {
+                gammaSq += kResidual_[d] * kResidual_[d];
+            }
         }
 
-        float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
-        for (uint32_t j = 0; j < headDim_; ++j) {
-            float sum = 0.0F;
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                float p = kQjlProjTGm_.GetValue(
-                    static_cast<uint64_t>(d) * headDim_ + j);
-                sum += kResidual_[d] * p;
+        if (useQjl) {
+            float gamma = gammaSq > 0.0F ? SqrtScalar(gammaSq) : 0.0F;
+            for (uint32_t j = 0; j < headDim_; ++j) {
+                float sum = 0.0F;
+                for (uint32_t d = 0; d < headDim_; ++d) {
+                    float p = kQjlProjTGm_.GetValue(
+                        static_cast<uint64_t>(d) * headDim_ + j);
+                    sum += kResidual_[d] * p;
+                }
+                PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
             }
-            PackIndex(qjlPacked, kQjlCols_, 1U, j, sum >= 0.0F ? 1U : 0U);
+            uint64_t qjlBase = slotHead * kQjlCols_;
+            for (uint32_t col = 0; col < kQjlCols_; ++col) {
+                kPackedQjlGm_.SetValue(qjlBase + col, qjlPacked[col]);
+            }
+            kGammaGm_.SetValue(slotHead, gamma);
         }
 
         uint64_t idxBase = slotHead * kPackedCols_;
-        uint64_t qjlBase = slotHead * kQjlCols_;
         for (uint32_t col = 0; col < kPackedCols_; ++col) {
             kPackedIdxGm_.SetValue(idxBase + col, idxPacked[col]);
         }
-        for (uint32_t col = 0; col < kQjlCols_; ++col) {
-            kPackedQjlGm_.SetValue(qjlBase + col, qjlPacked[col]);
-        }
-        kGammaGm_.SetValue(slotHead, gamma);
         kNormGm_.SetValue(slotHead, norm);
     }
 
@@ -681,10 +693,12 @@ public:
     {
         uint64_t qBase =
             (static_cast<uint64_t>(b) * numHeads_ + head) * headDim_;
+        bool useQjl = UseQjlCorrection();
         if (pretransformedQuery_ != 0U) {
             for (uint32_t d = 0; d < headDim_; ++d) {
                 qRot_[d] = kRotationGm_.GetValue(qBase + d);
-                qQjl_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+                qQjl_[d] = useQjl ? kQjlQueryMatrixGm_.GetValue(qBase + d)
+                                   : 0.0F;
             }
             return;
         }
@@ -694,12 +708,15 @@ public:
                 qRot_[d] = q * MatrixSign(kRotationGm_, d);
                 qQjl_[d] = 0.0F;
             }
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                float q = InputToFloat(queryGm_.GetValue(qBase + inDim));
-                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
-                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                    qQjl_[outDim] +=
-                        q * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+            if (useQjl) {
+                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                    float q = InputToFloat(queryGm_.GetValue(qBase + inDim));
+                    uint64_t matrixBase =
+                        static_cast<uint64_t>(inDim) * headDim_;
+                    for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                        qQjl_[outDim] += q * kQjlQueryMatrixGm_.GetValue(
+                            matrixBase + outDim);
+                    }
                 }
             }
             FwhtQueryRot();
@@ -718,8 +735,10 @@ public:
             uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
             for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
                 qRot_[outDim] += q * kRotationGm_.GetValue(matrixBase + outDim);
-                qQjl_[outDim] +=
-                    q * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                if (useQjl) {
+                    qQjl_[outDim] +=
+                        q * kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                }
             }
         }
     }
@@ -734,10 +753,13 @@ public:
         uint32_t q1Base = headDim_;
         uint32_t q2Base = headDim_ << 1;
         uint32_t q3Base = 3U * headDim_;
+        bool useQjl = UseQjlCorrection();
         if (pretransformedQuery_ != 0U) {
             for (uint32_t d = 0; d < 4U * headDim_; ++d) {
                 qRotGroup_[d] = kRotationGm_.GetValue(qBase + d);
-                qQjlGroup_[d] = kQjlQueryMatrixGm_.GetValue(qBase + d);
+                qQjlGroup_[d] = useQjl
+                    ? kQjlQueryMatrixGm_.GetValue(qBase + d)
+                    : 0.0F;
             }
             return;
         }
@@ -760,21 +782,26 @@ public:
                 qQjlGroup_[q2Base + d] = 0.0F;
                 qQjlGroup_[q3Base + d] = 0.0F;
             }
-            for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
-                float query0 = InputToFloat(queryGm_.GetValue(qBase + inDim));
-                float query1 = InputToFloat(
-                    queryGm_.GetValue(qBase + q1Base + inDim));
-                float query2 = InputToFloat(
-                    queryGm_.GetValue(qBase + q2Base + inDim));
-                float query3 = InputToFloat(
-                    queryGm_.GetValue(qBase + q3Base + inDim));
-                uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
-                for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
-                    float qjl = kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
-                    qQjlGroup_[outDim] += query0 * qjl;
-                    qQjlGroup_[q1Base + outDim] += query1 * qjl;
-                    qQjlGroup_[q2Base + outDim] += query2 * qjl;
-                    qQjlGroup_[q3Base + outDim] += query3 * qjl;
+            if (useQjl) {
+                for (uint32_t inDim = 0; inDim < headDim_; ++inDim) {
+                    float query0 =
+                        InputToFloat(queryGm_.GetValue(qBase + inDim));
+                    float query1 = InputToFloat(
+                        queryGm_.GetValue(qBase + q1Base + inDim));
+                    float query2 = InputToFloat(
+                        queryGm_.GetValue(qBase + q2Base + inDim));
+                    float query3 = InputToFloat(
+                        queryGm_.GetValue(qBase + q3Base + inDim));
+                    uint64_t matrixBase =
+                        static_cast<uint64_t>(inDim) * headDim_;
+                    for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
+                        float qjl =
+                            kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                        qQjlGroup_[outDim] += query0 * qjl;
+                        qQjlGroup_[q1Base + outDim] += query1 * qjl;
+                        qQjlGroup_[q2Base + outDim] += query2 * qjl;
+                        qQjlGroup_[q3Base + outDim] += query3 * qjl;
+                    }
                 }
             }
             FwhtQueryRotGroup(0U);
@@ -802,15 +829,18 @@ public:
             uint64_t matrixBase = static_cast<uint64_t>(inDim) * headDim_;
             for (uint32_t outDim = 0; outDim < headDim_; ++outDim) {
                 float rot = kRotationGm_.GetValue(matrixBase + outDim);
-                float qjl = kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
                 qRotGroup_[outDim] += query0 * rot;
                 qRotGroup_[q1Base + outDim] += query1 * rot;
                 qRotGroup_[q2Base + outDim] += query2 * rot;
                 qRotGroup_[q3Base + outDim] += query3 * rot;
-                qQjlGroup_[outDim] += query0 * qjl;
-                qQjlGroup_[q1Base + outDim] += query1 * qjl;
-                qQjlGroup_[q2Base + outDim] += query2 * qjl;
-                qQjlGroup_[q3Base + outDim] += query3 * qjl;
+                if (useQjl) {
+                    float qjl =
+                        kQjlQueryMatrixGm_.GetValue(matrixBase + outDim);
+                    qQjlGroup_[outDim] += query0 * qjl;
+                    qQjlGroup_[q1Base + outDim] += query1 * qjl;
+                    qQjlGroup_[q2Base + outDim] += query2 * qjl;
+                    qQjlGroup_[q3Base + outDim] += query3 * qjl;
+                }
             }
         }
     }
@@ -826,9 +856,18 @@ public:
     __aicore__ inline float HistoryScoreByCacheIndexConst(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
+        float norm = kNormGm_.GetValue(cacheIndex);
+        if (!UseQjlCorrection()) {
+            float mseAcc = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                uint32_t idx =
+                    ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
+                mseAcc += qRot_[d] * kCodebook_[idx];
+            }
+            return mseAcc * norm * scale_;
+        }
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
-        float norm = kNormGm_.GetValue(cacheIndex);
         float mseAcc = 0.0F;
         float qjlAcc = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
@@ -844,9 +883,18 @@ public:
     __aicore__ inline float HistoryScoreByCacheIndexGeneric(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
+        float norm = kNormGm_.GetValue(cacheIndex);
+        if (!UseQjlCorrection()) {
+            float mseAcc = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                uint32_t idx =
+                    ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
+                mseAcc += qRot_[d] * kCodebook_[idx];
+            }
+            return mseAcc * norm * scale_;
+        }
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
-        float norm = kNormGm_.GetValue(cacheIndex);
         float mseAcc = 0.0F;
         float qjlAcc = 0.0F;
         for (uint32_t d = 0; d < headDim_; ++d) {
@@ -880,9 +928,33 @@ public:
     __aicore__ inline void HistoryScoresGroupByCacheIndexConst(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
+        float norm = kNormGm_.GetValue(cacheIndex);
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        if (!UseQjlCorrection()) {
+            float mseAcc0 = 0.0F;
+            float mseAcc1 = 0.0F;
+            float mseAcc2 = 0.0F;
+            float mseAcc3 = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                uint32_t idx =
+                    ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
+                float code = kCodebook_[idx];
+                mseAcc0 += qRotGroup_[d] * code;
+                mseAcc1 += qRotGroup_[q1Base + d] * code;
+                mseAcc2 += qRotGroup_[q2Base + d] * code;
+                mseAcc3 += qRotGroup_[q3Base + d] * code;
+            }
+            float outScale = norm * scale_;
+            scoreGroup_[0] = mseAcc0 * outScale;
+            scoreGroup_[1] = mseAcc1 * outScale;
+            scoreGroup_[2] = mseAcc2 * outScale;
+            scoreGroup_[3] = mseAcc3 * outScale;
+            return;
+        }
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
-        float norm = kNormGm_.GetValue(cacheIndex);
         float mseAcc0 = 0.0F;
         float mseAcc1 = 0.0F;
         float mseAcc2 = 0.0F;
@@ -891,9 +963,6 @@ public:
         float qjlAcc1 = 0.0F;
         float qjlAcc2 = 0.0F;
         float qjlAcc3 = 0.0F;
-        uint32_t q1Base = headDim_;
-        uint32_t q2Base = headDim_ << 1;
-        uint32_t q3Base = 3U * headDim_;
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
@@ -919,9 +988,33 @@ public:
     __aicore__ inline void HistoryScoresGroupByCacheIndexGeneric(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
+        float norm = kNormGm_.GetValue(cacheIndex);
+        uint32_t q1Base = headDim_;
+        uint32_t q2Base = headDim_ << 1;
+        uint32_t q3Base = 3U * headDim_;
+        if (!UseQjlCorrection()) {
+            float mseAcc0 = 0.0F;
+            float mseAcc1 = 0.0F;
+            float mseAcc2 = 0.0F;
+            float mseAcc3 = 0.0F;
+            for (uint32_t d = 0; d < headDim_; ++d) {
+                uint32_t idx =
+                    ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
+                float code = kCodebook_[idx];
+                mseAcc0 += qRotGroup_[d] * code;
+                mseAcc1 += qRotGroup_[q1Base + d] * code;
+                mseAcc2 += qRotGroup_[q2Base + d] * code;
+                mseAcc3 += qRotGroup_[q3Base + d] * code;
+            }
+            float outScale = norm * scale_;
+            scoreGroup_[0] = mseAcc0 * outScale;
+            scoreGroup_[1] = mseAcc1 * outScale;
+            scoreGroup_[2] = mseAcc2 * outScale;
+            scoreGroup_[3] = mseAcc3 * outScale;
+            return;
+        }
         uint64_t qjlBase = cacheIndex * kQjlCols_;
         float gamma = kGammaGm_.GetValue(cacheIndex);
-        float norm = kNormGm_.GetValue(cacheIndex);
         float mseAcc0 = 0.0F;
         float mseAcc1 = 0.0F;
         float mseAcc2 = 0.0F;
@@ -930,9 +1023,6 @@ public:
         float qjlAcc1 = 0.0F;
         float qjlAcc2 = 0.0F;
         float qjlAcc3 = 0.0F;
-        uint32_t q1Base = headDim_;
-        uint32_t q2Base = headDim_ << 1;
-        uint32_t q3Base = 3U * headDim_;
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
@@ -1868,7 +1958,7 @@ public:
         if (slot >= 0 && skipCacheUpdate_ == 0U) {
             uint64_t slotHead =
                 static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
-            if (CanPartitionCurrentKQjlEncode()) {
+            if (UseQjlCorrection() && CanPartitionCurrentKQjlEncode()) {
                 PrepareCurrentKResidual(b, kvHead, slotHead, groupHead == 0U);
                 EncodeCurrentKQjlRange(slotHead, groupHead);
             } else if (groupHead == 0U) {
