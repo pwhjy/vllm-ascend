@@ -43,6 +43,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     const int64_t* historyPartitionsPtr = attr->GetAttrPointer<int64_t>(10);
     const int64_t* historyPartitionPhasePtr = attr->GetAttrPointer<int64_t>(11);
     const int64_t* transformModePtr = attr->GetAttrPointer<int64_t>(12);
+    const int64_t* disableQjlCorrectionPtr =
+        attr->GetAttrPointer<int64_t>(13);
 
     uint32_t kTotalBits = static_cast<uint32_t>(
         kTotalBitsPtr != nullptr ? *kTotalBitsPtr : 0);
@@ -64,10 +66,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     bool skipCacheUpdateAttr =
         skipCacheUpdatePtr != nullptr && *skipCacheUpdatePtr != 0;
     int64_t debugModeAttr = debugModePtr != nullptr ? *debugModePtr : 0;
-    bool disableQjlCorrection =
-        debugModeAttr > 0 && (static_cast<uint32_t>(debugModeAttr) & 16U) != 0U;
     uint32_t debugMode =
-        debugModeAttr > 0 ? (static_cast<uint32_t>(debugModeAttr) & 15U) : 0U;
+        debugModeAttr > 0 ? static_cast<uint32_t>(debugModeAttr) : 0U;
     if (debugMode > 9U) {
         debugMode = 9U;
     }
@@ -103,6 +103,8 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     }
     bool groupedQ = groupedQAttr && qPerKv == 4U;
     uint32_t kStage1Bits = kTotalBits > 0 ? kTotalBits - 1U : 0U;
+    bool disableQjlCorrection =
+        disableQjlCorrectionPtr != nullptr && *disableQjlCorrectionPtr != 0;
     float correction = headDim == 0U || disableQjlCorrection
         ? 0.0F
         : 1.2533141373155001F / headDim;

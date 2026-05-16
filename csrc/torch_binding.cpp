@@ -1468,8 +1468,8 @@ at::Tensor tq_fused_kv_update_attention_decode(
                 "grouped_q must be 0 or 1");
     TORCH_CHECK(skip_cache_update == 0 || skip_cache_update == 1,
                 "skip_cache_update must be 0 or 1");
-    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 31,
-                "debug_mode must be in [0, 9] with optional feature bits");
+    TORCH_CHECK(debug_mode >= 0 && debug_mode <= 9,
+                "debug_mode must be in [0, 9]");
     TORCH_CHECK(pretransformed_query == 0 || pretransformed_query == 1,
                 "pretransformed_query must be 0 or 1");
     TORCH_CHECK(history_partitions >= 1 && history_partitions <= 16,
@@ -1482,11 +1482,10 @@ at::Tensor tq_fused_kv_update_attention_decode(
         query.options().dtype(at::kFloat));
     const int64_t capped_history_partitions =
         history_partitions > 2 ? 2 : history_partitions;
-    const int64_t debug_mode_low = debug_mode & 15;
     const bool use_history_partitions = capped_history_partitions > 1
         && grouped_q == 0
         && skip_cache_update != 0
-        && debug_mode_low == 0;
+        && debug_mode == 0;
     const int64_t kernel_history_partitions =
         use_history_partitions ? capped_history_partitions : 1;
     int64_t history_partition_phase_none = 0;
