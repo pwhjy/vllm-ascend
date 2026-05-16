@@ -831,40 +831,6 @@ public:
         float norm = kNormGm_.GetValue(cacheIndex);
         float mseAcc = 0.0F;
         float qjlAcc = 0.0F;
-        if constexpr (KBits == 3U) {
-            uint32_t d = 0;
-            for (; d + 7U < headDim_; d += 8U) {
-                uint64_t kByteBase =
-                    idxBase + ((static_cast<uint64_t>(d) * 3U) >> 3);
-                uint32_t packed =
-                    static_cast<uint32_t>(kPackedIdxGm_.GetValue(kByteBase))
-                    | (static_cast<uint32_t>(
-                           kPackedIdxGm_.GetValue(kByteBase + 1U))
-                       << 8)
-                    | (static_cast<uint32_t>(
-                           kPackedIdxGm_.GetValue(kByteBase + 2U))
-                       << 16);
-                uint32_t qjlByte = static_cast<uint32_t>(
-                    kPackedQjlGm_.GetValue(qjlBase + (d >> 3)));
-                for (uint32_t i = 0; i < 8U; ++i) {
-                    uint32_t dim = d + i;
-                    uint32_t idx = (packed >> (i * 3U)) & 7U;
-                    float sign = (qjlByte & (1U << i)) != 0U ? 1.0F : -1.0F;
-                    mseAcc += qRot_[dim] * kCodebook_[idx];
-                    qjlAcc += qQjl_[dim] * sign;
-                }
-            }
-            for (; d < headDim_; ++d) {
-                uint32_t idx =
-                    ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
-                uint32_t qjl =
-                    ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
-                float sign = qjl != 0U ? 1.0F : -1.0F;
-                mseAcc += qRot_[d] * kCodebook_[idx];
-                qjlAcc += qQjl_[d] * sign;
-            }
-            return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
-        }
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
@@ -1017,22 +983,6 @@ public:
     {
         uint64_t vBase = cacheIndex * vPackedCols_;
         float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
-        if constexpr (VBits == 4U) {
-            uint32_t d = 0;
-            for (; d + 1U < headDim_; d += 2U) {
-                uint32_t packed = static_cast<uint32_t>(
-                    vPackedIdxGm_.GetValue(vBase + (d >> 1)));
-                accRot_[d] += scaledNorm * vCodebook_[packed & 0xFU];
-                accRot_[d + 1U] +=
-                    scaledNorm * vCodebook_[(packed >> 4) & 0xFU];
-            }
-            if (d < headDim_) {
-                uint32_t idx =
-                    ExtractBitsConst<VBits>(vPackedIdxGm_, vBase, d);
-                accRot_[d] += scaledNorm * vCodebook_[idx];
-            }
-            return;
-        }
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBitsConst<VBits>(vPackedIdxGm_, vBase, d);
             accRot_[d] += scaledNorm * vCodebook_[idx];
