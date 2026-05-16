@@ -1853,6 +1853,7 @@ def tq_fused_decode_history_current_attention(
         t_stage = time.perf_counter()
     debug_mode = fused_decode_attention_m4_debug_mode()
     disable_qjl = fused_decode_attention_m4_disable_qjl_enabled()
+    op_debug_mode = debug_mode | (16 if disable_qjl else 0)
     pretransform_query = (
         split_cache_update
         and fused_decode_attention_m4_pretransform_query_enabled()
@@ -1909,11 +1910,10 @@ def tq_fused_decode_history_current_attention(
         fused_decode_attention_m4_score_tile_len(),
         1 if fused_decode_attention_m4_grouped_q_enabled() else 0,
         1 if split_cache_update else 0,
-        debug_mode,
+        op_debug_mode,
         1 if pretransform_query else 0,
         fused_decode_attention_m4_history_partitions(),
         int(transform_mode),
-        1 if disable_qjl else 0,
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
