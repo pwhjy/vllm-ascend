@@ -108,7 +108,6 @@ static ge::graphStatus TqFusedKvUpdateAttentionDecodeTilingFunc(
     uint32_t coreNum = platformInfo.GetCoreNumAiv();
     bool historyParallel = historyPartitions > 1U
         && !groupedQ
-        && skipCacheUpdateAttr
         && debugMode == 0U;
     uint64_t usefulCore = static_cast<uint64_t>(batch)
         * static_cast<uint64_t>(groupedQ ? numKvHeads : numHeads)
