@@ -1241,52 +1241,6 @@ public:
         initialized_ = true;
     }
 
-    template <uint32_t KBits, uint32_t VBits>
-    __aicore__ inline void AccumulateHistoryTileConst(
-        uint64_t cacheBase,
-        uint32_t tokenOffset,
-        uint32_t tileLen)
-    {
-        float tileMax = -3.4028234663852886e38F;
-        for (uint32_t i = 0; i < tileLen; ++i) {
-            uint64_t cacheIndex =
-                cacheBase + static_cast<uint64_t>(tokenOffset + i) * numKvHeads_;
-            float score = HistoryScoreByCacheIndexConst<KBits>(cacheIndex);
-            scoreTile_[i] = score;
-            if (score > tileMax) {
-                tileMax = score;
-            }
-        }
-
-        bool updateMax = initialized_ && tileMax > maxScore_;
-        float newMax = updateMax || !initialized_ ? tileMax : maxScore_;
-        float oldScale = initialized_ ? 1.0F : 0.0F;
-        if (updateMax) {
-            oldScale = ExpScalar(maxScore_ - newMax);
-            ScaleGlobalAccumulator(oldScale);
-        }
-
-        float tileSum = 0.0F;
-        LocalTensor<float> weightLocal = expBuf_.Get<float>();
-        for (uint32_t i = 0; i < tileLen; ++i) {
-            weightLocal.SetValue(i, scoreTile_[i] - newMax);
-        }
-        SToVSync();
-        Exp(weightLocal, weightLocal, tileLen);
-        VToSSync();
-        for (uint32_t i = 0; i < tileLen; ++i) {
-            float weight = weightLocal.GetValue(i);
-            tileSum += weight;
-            uint64_t cacheIndex =
-                cacheBase + static_cast<uint64_t>(tokenOffset + i) * numKvHeads_;
-            AccumulateHistoryVByCacheIndexConst<VBits>(cacheIndex, weight);
-        }
-
-        sum_ = sum_ * oldScale + tileSum;
-        maxScore_ = newMax;
-        initialized_ = true;
-    }
-
     __aicore__ inline void ProcessHistoryScalar(
         uint32_t b,
         uint32_t kvHead,
@@ -1385,11 +1339,6 @@ public:
         uint32_t kvHead,
         uint32_t oldLen)
     {
-        if (kStage1Bits_ == 3U && vBits_ == 4U) {
-            ProcessHistoryTiledConst<3U, 4U>(b, kvHead, oldLen);
-            return;
-        }
-
         uint32_t tileLenLimit = scoreTileLen_;
         if (tileLenLimit > 64U) {
             tileLenLimit = 64U;
@@ -1419,49 +1368,6 @@ public:
                     tileLen = tileLenLimit;
                 }
                 AccumulateHistoryTile(cacheBase, tokenOffset, tileLen);
-                tokenOffset += tileLen;
-            }
-            pos += tokensInBlock;
-            ++blockOffset;
-        }
-    }
-
-    template <uint32_t KBits, uint32_t VBits>
-    __aicore__ inline void ProcessHistoryTiledConst(
-        uint32_t b,
-        uint32_t kvHead,
-        uint32_t oldLen)
-    {
-        uint32_t tileLenLimit = scoreTileLen_;
-        if (tileLenLimit > 64U) {
-            tileLenLimit = 64U;
-        }
-        if (tileLenLimit <= 1U) {
-            ProcessHistoryScalar(b, kvHead, oldLen);
-            return;
-        }
-
-        uint32_t pos = 0;
-        uint32_t blockOffset = 0;
-        while (pos < oldLen) {
-            int32_t blockId = blockTableGm_.GetValue(
-                static_cast<uint64_t>(b) * maxBlocksPerSeq_ + blockOffset);
-            uint32_t tokensInBlock = blockSize_;
-            uint32_t remaining = oldLen - pos;
-            if (tokensInBlock > remaining) {
-                tokensInBlock = remaining;
-            }
-            uint64_t cacheBase =
-                static_cast<uint64_t>(blockId) * blockSize_ * numKvHeads_
-                + kvHead;
-            uint32_t tokenOffset = 0;
-            while (tokenOffset < tokensInBlock) {
-                uint32_t tileLen = tokensInBlock - tokenOffset;
-                if (tileLen > tileLenLimit) {
-                    tileLen = tileLenLimit;
-                }
-                AccumulateHistoryTileConst<KBits, VBits>(
-                    cacheBase, tokenOffset, tileLen);
                 tokenOffset += tileLen;
             }
             pos += tokensInBlock;
