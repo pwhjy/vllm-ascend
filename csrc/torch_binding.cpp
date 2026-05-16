@@ -1484,7 +1484,6 @@ at::Tensor tq_fused_kv_update_attention_decode(
         history_partitions > 2 ? 2 : history_partitions;
     const bool use_history_partitions = capped_history_partitions > 1
         && grouped_q == 0
-        && skip_cache_update != 0
         && debug_mode == 0;
     const int64_t kernel_history_partitions =
         use_history_partitions ? capped_history_partitions : 1;

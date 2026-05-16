@@ -1519,6 +1519,24 @@ public:
             return;
         }
 
+        uint32_t groupHead = head - kvHead * qPerKv_;
+        int64_t slot = slotMappingGm_.GetValue(b);
+        if (slot >= 0 && skipCacheUpdate_ == 0U) {
+            uint64_t slotHead =
+                static_cast<uint64_t>(slot) * numKvHeads_ + kvHead;
+            if (CanPartitionCurrentKQjlEncode()) {
+                PrepareCurrentKResidual(b, kvHead, slotHead, groupHead == 0U);
+                EncodeCurrentKQjlRange(slotHead, groupHead);
+            } else if (groupHead == 0U) {
+                EncodeCurrentK(b, kvHead, slotHead);
+            }
+            if (CanPartitionCurrentVEncode()) {
+                EncodeCurrentVRange(b, kvHead, slotHead, groupHead);
+            } else if (groupHead == 0U) {
+                EncodeCurrentV(b, kvHead, slotHead);
+            }
+        }
+
         float globalMax = -3.4028234663852886e38F;
         for (uint32_t partition = 0; partition < historyPartitions_; ++partition) {
             uint64_t base = HistoryPartialBase(b, head, partition);
@@ -2048,7 +2066,6 @@ public:
         bool useGrouped = groupedQ_ != 0U && qPerKv_ == 4U;
         bool useHistoryParallel = historyPartitions_ > 1U
             && !useGrouped
-            && skipCacheUpdate_ != 0U
             && debugMode_ == 0U
             && headDim_ > 0U
             && headDim_ <= 256U
