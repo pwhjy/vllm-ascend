@@ -436,14 +436,6 @@ public:
         return idx;
     }
 
-    __aicore__ inline void PrepareScaledVCodebook(float scaledNorm)
-    {
-        uint32_t levels = vBits_ < 4U ? (1U << vBits_) : 16U;
-        for (uint32_t i = 0; i < levels; ++i) {
-            scaledVCodebook_[i] = scaledNorm * vCodebook_[i];
-        }
-    }
-
     __aicore__ inline void PackIndex(
         uint8_t* packed,
         uint32_t packedCols,
@@ -991,10 +983,9 @@ public:
     {
         uint64_t vBase = cacheIndex * vPackedCols_;
         float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
-        PrepareScaledVCodebook(scaledNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBitsConst<VBits>(vPackedIdxGm_, vBase, d);
-            accRot_[d] += scaledVCodebook_[idx];
+            accRot_[d] += scaledNorm * vCodebook_[idx];
         }
     }
 
@@ -1004,10 +995,9 @@ public:
     {
         uint64_t vBase = cacheIndex * vPackedCols_;
         float scaledNorm = weight * vNormGm_.GetValue(cacheIndex);
-        PrepareScaledVCodebook(scaledNorm);
         for (uint32_t d = 0; d < headDim_; ++d) {
             uint32_t idx = ExtractBits(vPackedIdxGm_, vBase, d, vBits_);
-            accRot_[d] += scaledVCodebook_[idx];
+            accRot_[d] += scaledNorm * vCodebook_[idx];
         }
     }
 
@@ -2174,7 +2164,6 @@ private:
     float kResidual_[256];
     float kCodebook_[16];
     float vCodebook_[16];
-    float scaledVCodebook_[16];
     float kBoundary_[16];
     float vBoundary_[16];
     float maxScore_{0.0F};
