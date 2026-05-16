@@ -822,6 +822,11 @@ public:
         }
     }
 
+    __aicore__ inline bool CanUseKScoreLut()
+    {
+        return headDim_ <= 128U;
+    }
+
     __aicore__ inline void PrepareKScoreLut()
     {
         uint32_t levels = kStage1Bits_ < 4U ? (1U << kStage1Bits_) : 16U;
@@ -834,7 +839,7 @@ public:
         }
     }
 
-    template <uint32_t KBits>
+    template <uint32_t KBits, bool UseLut>
     __aicore__ inline float HistoryScoreByCacheIndexConst(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
@@ -847,12 +852,17 @@ public:
             uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float sign = qjl != 0U ? 1.0F : -1.0F;
-            mseAcc += kScoreLut_[(d << 4) + idx];
+            if constexpr (UseLut) {
+                mseAcc += kScoreLut_[(d << 4) + idx];
+            } else {
+                mseAcc += qRot_[d] * kCodebook_[idx];
+            }
             qjlAcc += qQjl_[d] * sign;
         }
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
     }
 
+    template <bool UseLut>
     __aicore__ inline float HistoryScoreByCacheIndexGeneric(uint64_t cacheIndex)
     {
         uint64_t idxBase = cacheIndex * kPackedCols_;
@@ -865,27 +875,40 @@ public:
             uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float sign = qjl != 0U ? 1.0F : -1.0F;
-            mseAcc += kScoreLut_[(d << 4) + idx];
+            if constexpr (UseLut) {
+                mseAcc += kScoreLut_[(d << 4) + idx];
+            } else {
+                mseAcc += qRot_[d] * kCodebook_[idx];
+            }
             qjlAcc += qQjl_[d] * sign;
         }
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
     }
 
-    __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
+    template <bool UseLut>
+    __aicore__ inline float HistoryScoreByCacheIndexDispatch(uint64_t cacheIndex)
     {
         if (kStage1Bits_ == 3U) {
-            return HistoryScoreByCacheIndexConst<3U>(cacheIndex);
+            return HistoryScoreByCacheIndexConst<3U, UseLut>(cacheIndex);
         }
         if (kStage1Bits_ == 4U) {
-            return HistoryScoreByCacheIndexConst<4U>(cacheIndex);
+            return HistoryScoreByCacheIndexConst<4U, UseLut>(cacheIndex);
         }
         if (kStage1Bits_ == 2U) {
-            return HistoryScoreByCacheIndexConst<2U>(cacheIndex);
+            return HistoryScoreByCacheIndexConst<2U, UseLut>(cacheIndex);
         }
         if (kStage1Bits_ == 1U) {
-            return HistoryScoreByCacheIndexConst<1U>(cacheIndex);
+            return HistoryScoreByCacheIndexConst<1U, UseLut>(cacheIndex);
         }
-        return HistoryScoreByCacheIndexGeneric(cacheIndex);
+        return HistoryScoreByCacheIndexGeneric<UseLut>(cacheIndex);
+    }
+
+    __aicore__ inline float HistoryScoreByCacheIndex(uint64_t cacheIndex)
+    {
+        if (CanUseKScoreLut()) {
+            return HistoryScoreByCacheIndexDispatch<true>(cacheIndex);
+        }
+        return HistoryScoreByCacheIndexDispatch<false>(cacheIndex);
     }
 
     template <uint32_t KBits>
@@ -1517,7 +1540,9 @@ public:
 
         if (startPos < endPos) {
             BuildQueryTransforms(b, head);
-            PrepareKScoreLut();
+            if (CanUseKScoreLut()) {
+                PrepareKScoreLut();
+            }
             ProcessHistoryTiledRange(b, kvHead, startPos, endPos);
         }
         StoreHistoryPartial(b, head, partition);
@@ -1939,7 +1964,9 @@ public:
             return;
         }
 
-        PrepareKScoreLut();
+        if (CanUseKScoreLut()) {
+            PrepareKScoreLut();
+        }
         for (uint32_t d = 0; d < headDim_; ++d) {
             accRot_[d] = 0.0F;
         }
@@ -2186,7 +2213,7 @@ private:
     float kResidual_[256];
     float kCodebook_[16];
     float vCodebook_[16];
-    float kScoreLut_[4096];
+    float kScoreLut_[2048];
     float kBoundary_[16];
     float vBoundary_[16];
     float maxScore_{0.0F};
