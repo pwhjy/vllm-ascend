@@ -822,18 +822,6 @@ public:
         }
     }
 
-    __aicore__ inline void PrepareKScoreLut()
-    {
-        uint32_t levels = kStage1Bits_ < 4U ? (1U << kStage1Bits_) : 16U;
-        for (uint32_t d = 0; d < headDim_; ++d) {
-            uint32_t base = d << 4;
-            float q = qRot_[d];
-            for (uint32_t idx = 0; idx < levels; ++idx) {
-                kScoreLut_[base + idx] = q * kCodebook_[idx];
-            }
-        }
-    }
-
     template <uint32_t KBits>
     __aicore__ inline float HistoryScoreByCacheIndexConst(uint64_t cacheIndex)
     {
@@ -847,7 +835,7 @@ public:
             uint32_t idx = ExtractBitsConst<KBits>(kPackedIdxGm_, idxBase, d);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float sign = qjl != 0U ? 1.0F : -1.0F;
-            mseAcc += kScoreLut_[(d << 4) + idx];
+            mseAcc += qRot_[d] * kCodebook_[idx];
             qjlAcc += qQjl_[d] * sign;
         }
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
@@ -865,7 +853,7 @@ public:
             uint32_t idx = ExtractBits(kPackedIdxGm_, idxBase, d, kStage1Bits_);
             uint32_t qjl = ExtractBitsConst<1U>(kPackedQjlGm_, qjlBase, d);
             float sign = qjl != 0U ? 1.0F : -1.0F;
-            mseAcc += kScoreLut_[(d << 4) + idx];
+            mseAcc += qRot_[d] * kCodebook_[idx];
             qjlAcc += qQjl_[d] * sign;
         }
         return (mseAcc + correction_ * gamma * qjlAcc) * norm * scale_;
@@ -1517,7 +1505,6 @@ public:
 
         if (startPos < endPos) {
             BuildQueryTransforms(b, head);
-            PrepareKScoreLut();
             ProcessHistoryTiledRange(b, kvHead, startPos, endPos);
         }
         StoreHistoryPartial(b, head, partition);
@@ -1921,25 +1908,6 @@ public:
         }
 
         BuildQueryTransforms(b, head);
-        if (debugMode_ == 7U) {
-            StoreDebugOutput(b, head, (qRot_[0] + qQjl_[0]) * 1.0e-6F);
-            return;
-        }
-        if (debugMode_ == 1U) {
-            for (uint32_t d = 0; d < headDim_; ++d) {
-                accRot_[d] = 0.0F;
-            }
-            maxScore_ = -3.4028234663852886e38F;
-            sum_ = 0.0F;
-            currentWeight_ = 0.0F;
-            initialized_ = false;
-            float curScore = CurrentScore(b, head, kvHead);
-            OnlineAccumulateCurrent(curScore);
-            StoreOutput(b, head, kvHead);
-            return;
-        }
-
-        PrepareKScoreLut();
         for (uint32_t d = 0; d < headDim_; ++d) {
             accRot_[d] = 0.0F;
         }
@@ -1948,6 +1916,16 @@ public:
         currentWeight_ = 0.0F;
         initialized_ = false;
 
+        if (debugMode_ == 7U) {
+            StoreDebugOutput(b, head, (qRot_[0] + qQjl_[0]) * 1.0e-6F);
+            return;
+        }
+        if (debugMode_ == 1U) {
+            float curScore = CurrentScore(b, head, kvHead);
+            OnlineAccumulateCurrent(curScore);
+            StoreOutput(b, head, kvHead);
+            return;
+        }
         if (debugMode_ == 2U) {
             float sink = ProcessHistoryScoreOnly(b, kvHead, oldLen);
             StoreDebugOutput(b, head, sink);
@@ -2186,7 +2164,6 @@ private:
     float kResidual_[256];
     float kCodebook_[16];
     float vCodebook_[16];
-    float kScoreLut_[4096];
     float kBoundary_[16];
     float vBoundary_[16];
     float maxScore_{0.0F};
