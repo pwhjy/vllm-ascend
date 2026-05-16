@@ -464,12 +464,6 @@ def fused_decode_attention_m4_pretransform_query_enabled() -> bool:
     return os.getenv("VLLM_ASCEND_TQ_M4_PRETRANSFORM_QUERY", "1") == "1"
 
 
-def fused_decode_attention_m4_disable_qjl_enabled() -> bool:
-    """Skip M4 QJL correction for performance upper-bound experiments."""
-
-    return os.getenv("VLLM_ASCEND_TQ_M4_DISABLE_QJL", "0") == "1"
-
-
 def fused_decode_attention_m4_force_fp32_input() -> bool:
     """Force legacy fp32 Q/K/V materialization before the M4 decode op."""
 
@@ -1852,11 +1846,9 @@ def tq_fused_decode_history_current_attention(
         )
         t_stage = time.perf_counter()
     debug_mode = fused_decode_attention_m4_debug_mode()
-    disable_qjl = fused_decode_attention_m4_disable_qjl_enabled()
     pretransform_query = (
         split_cache_update
         and fused_decode_attention_m4_pretransform_query_enabled()
-        and not disable_qjl
         and debug_mode not in (6, 8, 9)
     )
     if pretransform_query:
@@ -1913,7 +1905,6 @@ def tq_fused_decode_history_current_attention(
         1 if pretransform_query else 0,
         fused_decode_attention_m4_history_partitions(),
         int(transform_mode),
-        1 if disable_qjl else 0,
     )
     if stage_profile:
         _maybe_sync_for_profile(out)
@@ -2426,7 +2417,6 @@ __all__ = [
     "encode_cache_update_v_partitions",
     "fused_decode_attention_m4_enabled",
     "fused_decode_attention_m4_debug_mode",
-    "fused_decode_attention_m4_disable_qjl_enabled",
     "fused_decode_attention_m4_grouped_q_enabled",
     "fused_decode_attention_m4_history_partitions",
     "fused_decode_attention_m4_pretransform_query_enabled",
